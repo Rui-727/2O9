@@ -267,23 +267,58 @@ etc.) pick up the optimization automatically.
 
 ### 5.3 Declarative Engine (C)
 
-The user writes `2O9.nix` (global) and/or `home.nix` (user scope). We **do not
+The user writes `2O9.nix` (global) and/or `home.nix` (user scope). This is a
+real Nix file — the language, the evaluator, the store, all of it. We **do not
 ship a Nix interpreter**. We shell out to `nix eval --json --impure ./2O9.nix`,
-which yields a JSON **manifest**:
+which yields a JSON manifest that the engine consumes.
+
+What the user writes (`/etc/2O9/2O9.nix`):
+
+```nix
+{ config, ... }:
+
+{
+  packages = [ "firefox" "neovim" ];
+  aur = {
+    packages = [ "google-chrome" ];
+    flags = {
+      "*" = { MAKEOPTS = "-j$(nproc)"; OPTIONS = [ "strip" "!debug" ]; };
+      "ffmpeg" = {
+        ENABLE = [ "nvenc" "vaapi" "vulkan" ];
+        DISABLE = [ "alsa" ];
+        CFLAGS = "-march=native -O3 -pipe";
+      };
+    };
+    optimize = { profile = "native"; };
+    jobs = "auto";
+  };
+  pacman = {
+    options = {
+      SigLevel = "Required DatabaseOptional";
+      ParallelDownloads = 5;
+      IgnorePkg = [ "linux" ];
+    };
+    repos = {
+      core      = { server = "https://mirror.../core/os/$arch"; };
+      extra     = { server = "https://mirror.../extra/os/$arch"; };
+      multilib  = { server = "https://mirror.../multilib/os/$arch"; };
+    };
+  };
+  services = {
+    sshd = { enable = true; };
+  };
+}
+```
+
+What `nix eval` produces (JSON manifest consumed by the engine):
 
 ```json
 {
   "packages": ["firefox", "neovim"],
-  "aur": ["google-chrome"],
+  "aur": { "packages": ["google-chrome"], "flags": { ... }, "optimize": { ... } },
   "pacman": {
-    "options": { "SigLevel": "Required DatabaseOptional",
-                 "ParallelDownloads": 5,
-                 "IgnorePkg": ["linux"] },
-    "repos": {
-      "core":    { "server": "https://mirror.../core/os/$arch" },
-      "extra":   { "server": "https://mirror.../extra/os/$arch" },
-      "multilib":{ "server": "https://mirror.../multilib/os/$arch" }
-    }
+    "options": { "SigLevel": "Required DatabaseOptional", ... },
+    "repos": { "core": { "server": "..." }, ... }
   },
   "services": { "sshd": { "enable": true } }
 }
@@ -313,9 +348,10 @@ transaction simply never gets its generation committed.
 The CLI uses **Subject-Object-Verb** order. This is a deliberate design choice,
 not an aesthetic quirk.
 
-`209 nginx install` reads as "nginx. install. now." — direct, declarative,
-no ceremony. `209 install nginx` reads as "Excuse me, could you please install
-nginx if you have a moment?" — too polite for PID 1.
+`209 nginx install` reads as "nginx — install." The thing comes first, the action
+comes last. You already know what you're talking about before you say what to do
+with it. `209 install nginx` puts the verb up front and makes you wait for the
+object — action-first is ceremony; subject-first is intent.
 
 pacman's `src/pacman/` frontend is the base for the CLI. The **binary is `209`**
 (numeric); the project/branding name is 2O9. Commands:
