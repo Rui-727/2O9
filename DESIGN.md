@@ -476,6 +476,31 @@ for everything:
 | **Global (system)** | `/etc/2O9/2O9.nix` | `/nix/var/nix/profiles/per-user/2O9-system` | `/var/lib/2O9` |
 | **Per-user** | `~/.config/2O9/home.nix` | `~/.local/state/2O9/profile` (user-owned Nix profile) | `~/.local/state/2O9` |
 
+### How profiles work — the 2O9 daemon
+
+The global `2O9.nix` applies to **all users**. When `209 apply` runs, it
+evaluates the Nix file and produces one manifest for the whole system. Then it
+builds a symlink farm for each logged-in user, on **their** profile path:
+
+```
+/etc/2O9/2O9.nix
+        │
+        ▼  209 apply (one manifest for everyone)
+        │
+        ├── user alice:  ~/.local/state/2O9/profile  →  generation #42 symlink farm
+        ├── user bob:    ~/.local/state/2O9/profile  →  generation #42 symlink farm
+        └── system:      /nix/var/nix/profiles/per-user/2O9-system  →  generation #42
+```
+
+The **2O9 daemon** (`209d`) runs in the background and tracks which users are
+logged in. When a new generation is committed, the daemon reapplies the symlink
+farm on each logged-in user's profile path. That's the whole job: watch for new
+generations, apply them to everyone who's logged in.
+
+A user's `home.nix` overlays on top of the global config — packages and
+settings in `home.nix` are added to that user's profile only, without affecting
+anyone else. The merge order (§7 above) determines what wins.
+
 Per-user profiles use Nix's user-profile mechanism so unprivileged installs work
 without root, mirroring `nix profile` semantics.
 
@@ -720,11 +745,12 @@ Phase 1 alone is a useful, shippable proof-of-concept even if later phases stall
   today. The store makes it visible earlier (at generation-commit time) rather
   than at install time, which is actually better — but it still needs a conflict
   resolution strategy.
-- **Services after rollback.** When you rollback to a previous generation, the
-  symlinks change but running services keep their old binaries (via open FDs).
-  Services that need restarting after a rollback (e.g. a daemon whose binary
-  changed) are not automatically restarted. This is an unsolved problem. Options
-  include: a post-rollback hook list, systemd integration, or just documenting
-  that users should check. No decision yet.
+- **Services after rollback.** When you rollback, the 2O9 daemon reapplies the
+  symlink farm for all logged-in users. Running processes keep their old binaries
+  (via open FDs). Services that need restarting after a rollback (e.g. a daemon
+  whose binary changed) are not automatically restarted by 209d — it only
+  manages symlinks, not service lifecycles. Options for automatic service
+  restarts include: a post-rollback hook list in `2O9.nix`, systemd integration,
+  or just documenting that users should check. No decision yet.
 - **Scope realism.** "Full Nix store on pacman" is a multi-year, team-scale effort.
   The plan is structured so each phase produces something useful on its own.
