@@ -73,9 +73,11 @@ pacman.conf + paru.conf + package lists + services  ──►  2O9.nix
 ```
 
 There is **no `pacman.conf`, no `paru.conf`, no `config.toml`**. Everything is
-declared in `2O9.nix`. The Arch Linux repo mirrors are still fetched from the
-network — the Nix file just declares *which* repos and *which* servers, same as
-`pacman.conf` does today.
+declared in `2O9.nix`. The package repository is **always an Arch Linux mirror**
+— the Nix file just declares *which* mirrors, same as `pacman.conf` does today.
+There are no custom repos, no Nix binary caches for packages, no alternative
+package sources. 2O9 is an Arch Linux package manager that puts files in
+`/nix/store/`.
 
 On `209 apply`, the engine evaluates `2O9.nix` and feeds the `pacman` block
 **directly into lib209's in-memory API** (`alpm_option_set`,

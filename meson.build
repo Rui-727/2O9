@@ -51,9 +51,8 @@ config_h = configure_file(
   configuration : conf)
 
 # ── External dependencies ─────────────────────────────────────────
-# libarchive: system package. pacman -S libarchive / apt install libarchive-dev
-# libzstd:    system package. needed for .pkg.tar.zst support
 libarchive_dep = dependency('libarchive', version : '>=3.0.0', required : false)
+libcurl_dep = dependency('libcurl', version : '>=7.55.0', required : true)
 libzstd_dep = dependency('libzstd', version : '>=1.4.0', required : false)
 
 if libarchive_dep.found()
@@ -63,35 +62,42 @@ else
 endif
 
 # ── lib209 (vendored libalpm) ─────────────────────────────────────
-# Build libalpm from the vendored pacman source as lib209.a.
-# Requires libarchive-dev + openssl-dev.
 if get_option('build-lib209')
   subdir('subprojects/pacman')
 endif
 
-# ── Internal libraries ────────────────────────────────────────────
-
-# Store adapter sources (not a separate lib, compiled into 209)
+# ── Internal modules ──────────────────────────────────────────────
 subdir('src/store')
-
-# Declarative engine sources (generation DB)
 subdir('src/declarative')
+subdir('src/aur')
 
 # ── 209 binary ────────────────────────────────────────────────────
 cli_sources = files('src/cli/main.c')
 
-# All internal sources linked into 209
-two9_sources = cli_sources + store_sources + declarative_sources
+two9_sources = cli_sources + store_sources + declarative_sources + aur_sources
 
 two9_includes = include_directories(
   'src',
   'src/store',
   'src/declarative',
+  'src/aur',
 )
 
 executable(
   '209',
   two9_sources,
   include_directories : two9_includes,
+  dependencies : [libcurl_dep],
   install : true,
+)
+
+# ── Test binaries ─────────────────────────────────────────────────
+aur_lib_files = files('src/aur/aur_rpc.c', 'src/aur/cJSON.c')
+
+executable(
+  'test-aur-rpc',
+  files('src/aur/test_aur_rpc.c') + aur_lib_files,
+  include_directories : include_directories('src/aur'),
+  dependencies : [libcurl_dep],
+  install : false,
 )
