@@ -1,4 +1,4 @@
-# 2O9 — Makefile
+# 2O9 Makefile
 # Build: make
 # Install: make install PREFIX=/usr
 # Clean: make clean
@@ -7,10 +7,8 @@ CC ?= cc
 CFLAGS ?= -std=gnu11 -Wall -Wextra -O2 -g
 PREFIX ?= /usr
 
-# ── Version ────────────────────────────────────────────────────────
 VERSION := $(shell git describe --abbrev=4 --dirty 2>/dev/null || echo 0.0.1)
 
-# ── Defines ────────────────────────────────────────────────────────
 DEFS = -D_GNU_SOURCE \
        -DPACKAGE='"2O9"' \
        -DPACKAGE_VERSION='"$(VERSION)"' \
@@ -23,24 +21,19 @@ DEFS = -D_GNU_SOURCE \
        -DBIN_DIR='"/.local/bin"' \
        -DLIB_DIR='"/.local/lib"'
 
-# ── Includes ───────────────────────────────────────────────────────
 INCS = -Isrc -Isrc/store -Isrc/declarative -Isrc/aur
 
-# ── External libs ──────────────────────────────────────────────────
 LIBS = -lcurl
 
-# ── Sources ────────────────────────────────────────────────────────
 CLI_SRC   = src/cli/main.c
 STORE_SRC = src/store/store.c src/store/symlinks.c
 DECL_SRC  = src/declarative/gen.c
-AUR_SRC   = src/aur/aur_rpc.c src/aur/cJSON.c
+AUR_SRC   = src/aur/aur_rpc.c src/aur/cJSON.c src/aur/aur_build.c src/aur/aur_resolve.c
 
 SRC = $(CLI_SRC) $(STORE_SRC) $(DECL_SRC) $(AUR_SRC)
 
-# ── Objects ────────────────────────────────────────────────────────
 OBJ = $(SRC:.c=.o)
 
-# ── Targets ────────────────────────────────────────────────────────
 all: 209 test-aur-rpc
 
 209: $(OBJ)

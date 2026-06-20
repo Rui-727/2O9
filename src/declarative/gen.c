@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/file.h>
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
@@ -88,6 +89,7 @@ gen_db_t *gen_db_open(const char *root)
 
         db->root = strdup(root);
         db->scope = 0;
+        db->lock_fd = -1;
 
         /* Ensure directory structure exists */
         char path[PATH_MAX];
@@ -104,6 +106,10 @@ gen_db_t *gen_db_open(const char *root)
 void gen_db_close(gen_db_t *db)
 {
         if (!db) return;
+        if (db->lock_fd >= 0) {
+                close(db->lock_fd);
+                db->lock_fd = -1;
+        }
         free(db->root);
         free(db);
 }
@@ -169,6 +175,37 @@ static int write_manifest(gen_db_t *db, int id, gen_pkg_t *packages)
         fprintf(f, "}\n");
         fclose(f);
         return 0;
+}
+
+/* ── Lockfile ────────────────────────────────────────────────────── */
+
+int gen_db_lock(gen_db_t *db)
+{
+        if (!db) return -1;
+
+        char lock_path[PATH_MAX];
+        snprintf(lock_path, sizeof(lock_path), "%s/lock", db->root);
+
+        int fd = open(lock_path, O_RDWR | O_CREAT, 0644);
+        if (fd < 0)
+                return -1;
+
+        /* Non-blocking lock. If another 2O9 process holds it, fail fast. */
+        if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+                close(fd);
+                return -1;  /* already locked */
+        }
+
+        db->lock_fd = fd;
+        return 0;
+}
+
+void gen_db_unlock(gen_db_t *db)
+{
+        if (!db || db->lock_fd < 0) return;
+        flock(db->lock_fd, LOCK_UN);
+        close(db->lock_fd);
+        db->lock_fd = -1;
 }
 
 /* ── Commit generation ───────────────────────────────────────────── */

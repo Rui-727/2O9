@@ -80,10 +80,9 @@ static int direct_extract(const char *pkg_path, char **store_path_out)
         /* TODO: implement with libarchive
          * 1. Open .pkg.tar.zst with archive_read_open_filename()
          * 2. Read .PKGINFO to get pkgname + pkgver
-         * 3. Compute a content hash (or use nix-style hash)
-         * 4. Create /nix/store/<hash>-<name>-<ver>/
-         * 5. Extract all files into that directory
-         * 6. Return the store path
+         * 3. Create /nix/store/<name>-<version>/ (no hash)
+         * 4. Extract all files into that directory
+         * 5. Return the store path
          */
         (void)pkg_path;
         (void)store_path_out;

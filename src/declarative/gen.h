@@ -12,6 +12,7 @@
  *   │   ├── 2/manifest.json      ← second generation
  *   │   └── ...
  *   ├── current → generations/42  ← symlink to current generation
+ *   ├── lock                      ← flock() lockfile (concurrency safety)
  *   └── pinned                    ← file listing pinned generation numbers
  *
  *   Per-user:
@@ -32,27 +33,28 @@
 
 /* A single package entry in a generation */
 typedef struct gen_pkg {
-	char *name;
-	char *version;
-	char *store_path;    /* /nix/store/<hash>-<name>-<ver> */
-	char *origin;        /* "repo", "aur", "imperative" */
-	struct gen_pkg *next;
+        char *name;
+        char *version;
+        char *store_path;    /* /nix/store/<name>-<version> (no hash) */
+        char *origin;        /* "repo", "aur", "imperative" */
+        struct gen_pkg *next;
 } gen_pkg_t;
 
 /* A generation snapshot */
 typedef struct gen {
-	int id;              /* 1, 2, 3, ... */
-	time_t timestamp;
-	char *manifest_path; /* path to manifest.json on disk */
-	gen_pkg_t *packages;
-	size_t pkg_count;
-	int is_pinned;       /* 1 = protected from GC */
+        int id;              /* 1, 2, 3, ... */
+        time_t timestamp;
+        char *manifest_path; /* path to manifest.json on disk */
+        gen_pkg_t *packages;
+        size_t pkg_count;
+        int is_pinned;       /* 1 = protected from GC */
 } gen_t;
 
 /* Generation DB handle */
 typedef struct gen_db {
-	char *root;          /* /var/lib/2O9 or ~/.local/state/2O9 */
-	int scope;           /* 0 = system, 1 = user */
+        char *root;          /* /var/lib/2O9 or ~/.local/state/2O9 */
+        int scope;           /* 0 = system, 1 = user */
+        int lock_fd;         /* fd for /var/lib/2O9/lock (flock), -1 if unlocked */
 } gen_db_t;
 
 /* Open a generation DB. root = base directory (e.g. /var/lib/2O9) */
@@ -82,6 +84,14 @@ gen_t **gen_db_list(gen_db_t *db, size_t *count);
 /* Pin/unpin a generation (protect from GC) */
 int gen_db_pin(gen_db_t *db, int id);
 int gen_db_unpin(gen_db_t *db, int id);
+
+/* Lock/unlock the DB for mutating operations.
+ * gen_db_lock() takes an exclusive, non-blocking flock on
+ * <root>/lock. Returns 0 on success, -1 if already locked.
+ * The lock is released by gen_db_unlock() or gen_db_close().
+ * Call gen_db_lock() before commit, rollback, pin, or gc. */
+int gen_db_lock(gen_db_t *db);
+void gen_db_unlock(gen_db_t *db);
 
 /* Free a single generation */
 void gen_free(gen_t *g);

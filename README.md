@@ -10,17 +10,21 @@ into one tool:
    the install backend dispatches to the store adapter.
 2. **paru's AUR workflow** — rewritten in C: AUR RPC queries, PKGBUILD clone
    and review, recursive AUR dependency resolution, and `makepkg` orchestration.
-3. **A real `/nix/store`** — content-addressed storage with atomic generations,
-   driven by a **declarative** Nix-syntax configuration (`2O9.nix`) describing
-   desired system and per-user state. The Nix evaluator is also copied into
-   lib2O9, modified to work without the full Nix daemon.
+3. **A real `/nix/store`** — predictable store paths (`/nix/store/<name>-<version>/`,
+   no content hash) with atomic generations, driven by a **declarative** Nix-syntax
+   configuration (`2O9.nix`) describing desired system and per-user state. The
+   Nix evaluator is **written from scratch in C** as part of lib2O9 — not a vendored
+   copy of the C++ nix source. It supports the function form (`{ config, ... }: ...`)
+   with fixed-point recursion for self-reference, and `import` for splitting configs
+   across multiple files.
 
 Plus **Trakker** — a ptrace-based execution sandbox: syscall tracing, network
 and write blocking, file-write redirection, JSON trace output.
 `209 <cmd> trakker --no-net`.
 
-Rollback is just a symlink swap. No boot-time rollback machinery, no daemon.
-Activation repoints a generation symlink; that's it.
+Rollback is just a symlink swap + reboot. No boot-time rollback machinery, no
+daemon. Activation repoints a generation symlink; the user reboots for the new
+system state to take full effect. Services are managed via `systemctl enable`.
 
 ## The package repo is always Arch Linux
 
@@ -35,7 +39,7 @@ in `/nix/store/` instead of `/`.
 |---|---|---|
 | Binary / command | `209` (numeric) | what you type |
 | Project / branding | `2O9` (letter O) | docs, repo name, on-disk paths (`/etc/2O9/`, `/var/lib/2O9/`) |
-| Merged internal library | `lib2O9` | static `lib2O9.a` — modified libalpm + modified Nix evaluator |
+| Merged internal library | `lib2O9` | static `lib2O9.a` — modified libalpm + own C Nix evaluator |
 
 ## Build
 
@@ -46,8 +50,8 @@ make install PREFIX=/usr/local  # custom prefix
 ```
 
 Requirements: a C compiler, make, libcurl-dev. To build lib2O9 you also need
-libarchive-dev and openssl-dev. The Nix evaluator (C++) needs its own deps —
-see `lib/2O9/nix/`.
+libarchive-dev and openssl-dev. The Nix evaluator is our own C code — no
+C++ deps needed.
 
 ## Repo structure
 
@@ -56,7 +60,7 @@ see `lib/2O9/nix/`.
 ├── Makefile              # build system
 ├── lib/2O9/              # lib2O9 — one static library
 │   ├── alpm/             #   modified libalpm (from pacman)
-│   ├── nix/              #   modified Nix evaluator
+│   ├── nix/              #   own C Nix evaluator (from scratch)
 │   └── common/           #   shared utils
 ├── src/
 │   ├── cli/              # 209 binary (SOV command dispatch)
@@ -70,10 +74,14 @@ see `lib/2O9/nix/`.
 
 ## Status
 
-Phase 0–1 complete. The 209 binary handles install, rollback, generations,
-and pinning. AUR RPC client works. lib2O9 (alpm + nix evaluator) is in tree
-but not yet compiled — needs libarchive-dev for the alpm half and C++ deps
-for the nix half. See [`DESIGN.md`](./DESIGN.md) for the phased roadmap.
+Phase 0–2 complete. The 209 binary handles install, rollback, generations,
+pinning, and the full AUR pipeline (search, info, clone, review, resolve
+deps, makepkg, install to store). AUR RPC client works. Dependency
+resolver classifies deps into repo vs AUR. Build optimization via
+CFLAGS/CXXFLAGS/LDFLAGS env vars. lib2O9 (alpm + own C nix evaluator)
+is in tree but not yet compiled — needs libarchive-dev for the alpm half.
+The nix evaluator is own C code (no C++ deps). See [`DESIGN.md`](./DESIGN.md)
+for the phased roadmap.
 
 ## License
 

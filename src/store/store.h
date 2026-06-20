@@ -4,7 +4,7 @@
  * the Nix store (where files actually land). Its job:
  *
  *   1. Take a .pkg.tar.zst and add it to /nix/store/
- *   2. Return the store path (e.g. /nix/store/x3f-neovim-0.9.5)
+ *   2. Return the store path (e.g. /nix/store/neovim-0.9.5)
  *   3. Build a manifest of files in the store path (for symlink farm)
  *
  * Two backends:
@@ -21,33 +21,33 @@
 
 /* A single file entry in a store path */
 typedef struct store_entry {
-	char *path;       /* relative path within the store (e.g. "bin/nvim") */
-	char *symlink;    /* if not NULL, this entry is a symlink to this target */
-	int is_dir;       /* 1 if directory entry */
-	int is_config;    /* 1 if file should go to /etc/ instead of ~/.local/ */
-	struct store_entry *next;
+        char *path;       /* relative path within the store (e.g. "bin/nvim") */
+        char *symlink;    /* if not NULL, this entry is a symlink to this target */
+        int is_dir;       /* 1 if directory entry */
+        int is_config;    /* 1 if file should go to /etc/ instead of ~/.local/ */
+        struct store_entry *next;
 } store_entry_t;
 
 /* A store path with its file manifest */
 typedef struct store_manifest {
-	char *store_path;   /* e.g. /nix/store/x3f-neovim-0.9.5 */
-	char *pkg_name;     /* e.g. neovim */
-	char *pkg_version;  /* e.g. 0.9.5 */
-	store_entry_t *entries;  /* linked list of files */
-	size_t entry_count;
+        char *store_path;   /* e.g. /nix/store/neovim-0.9.5 (no hash, just name-version) */
+        char *pkg_name;     /* e.g. neovim */
+        char *pkg_version;  /* e.g. 0.9.5 */
+        store_entry_t *entries;  /* linked list of files */
+        size_t entry_count;
 } store_manifest_t;
 
 /* Store backend selection */
 typedef enum {
-	STORE_BACKEND_NIX_STORE,   /* nix-store --add (default) */
-	STORE_BACKEND_DIRECT,      /* libarchive extraction (testing) */
+        STORE_BACKEND_NIX_STORE,   /* nix-store --add (default) */
+        STORE_BACKEND_DIRECT,      /* libarchive extraction (testing) */
 } store_backend_t;
 
 /* Result of adding a package to the store */
 typedef struct store_add_result {
-	int success;               /* 0 = ok, nonzero = error */
-	char *store_path;          /* set on success */
-	char *error_msg;           /* set on failure */
+        int success;               /* 0 = ok, nonzero = error */
+        char *store_path;          /* set on success */
+        char *error_msg;           /* set on failure */
 } store_add_result_t;
 
 /* Add a .pkg.tar.zst to the store.
