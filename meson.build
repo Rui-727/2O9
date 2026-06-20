@@ -64,8 +64,8 @@ endif
 
 # ── lib209 (vendored libalpm) ─────────────────────────────────────
 # Build libalpm from the vendored pacman source as lib209.a.
-# Requires libarchive-dev.
-if get_option('build-lib209') and libarchive_dep.found()
+# Requires libarchive-dev + openssl-dev.
+if get_option('build-lib209')
   subdir('subprojects/pacman')
 endif
 
