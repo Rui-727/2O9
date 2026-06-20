@@ -102,8 +102,8 @@ user's `~/.local/`, not into `/usr/bin/` or any system path.
           ▼  symlink farm (generation #42, for user alice)
 ~/.local/bin/firefox   →  /nix/store/x3f-firefox-120/bin/firefox
 ~/.local/bin/nvim      →  /nix/store/a91-neovim-0.9/bin/nvim
-~/.local/etc/firefox   →  /nix/store/x3f-firefox-120/etc/firefox
-~/.local/etc/nvim      →  /nix/store/a91-neovim-0.9/etc/nvim
+/etc/firefox           →  /nix/store/x3f-firefox-120/etc/firefox
+/etc/nvim              →  /nix/store/a91-neovim-0.9/etc/nvim
 ```
 
 The user's shell includes `~/.local/bin` in `$PATH`. That's it. No system-wide
