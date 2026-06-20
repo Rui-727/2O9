@@ -1,10 +1,3 @@
-# 209 CLI build
-
-cli_sources = files('main.c')
-
-executable(
-  '209',
-  cli_sources,
-  include_directories : include_directories('..', '../..'),
-  install : true,
-)
+# 209 CLI — main is compiled in the top-level meson.build
+# This file is kept for future CLI-specific sources
+cli_sources = files()

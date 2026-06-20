@@ -13,8 +13,6 @@ project('2O9',
 cc = meson.get_compiler('c')
 
 # ── Version ────────────────────────────────────────────────────────
-# If building from git, try to get a descriptive version; otherwise
-# fall back to the project version set above.
 if get_option('use-git-version')
   git = find_program('git', required : false)
   if git.found()
@@ -61,8 +59,29 @@ if get_option('build-lib209')
   subdir('subprojects/pacman')
 endif
 
-# ── 209 binary ────────────────────────────────────────────────────
-subdir('src/cli')
+# ── Internal libraries ────────────────────────────────────────────
 
-# ── store adapter (Phase 0 spike) ────────────────────────────────
+# Store adapter sources (not a separate lib, compiled into 209)
 subdir('src/store')
+
+# Declarative engine sources (generation DB)
+subdir('src/declarative')
+
+# ── 209 binary ────────────────────────────────────────────────────
+cli_sources = files('src/cli/main.c')
+
+# All internal sources linked into 209
+two9_sources = cli_sources + store_sources + declarative_sources
+
+two9_includes = include_directories(
+  'src',
+  'src/store',
+  'src/declarative',
+)
+
+executable(
+  '209',
+  two9_sources,
+  include_directories : two9_includes,
+  install : true,
+)
