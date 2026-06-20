@@ -74,14 +74,17 @@ C++ deps needed.
 
 ## Status
 
-Phase 0–2 complete. The 209 binary handles install, rollback, generations,
+Phase 0–3 in progress. The 209 binary handles install, rollback, generations,
 pinning, and the full AUR pipeline (search, info, clone, review, resolve
 deps, makepkg, install to store). AUR RPC client works. Dependency
 resolver classifies deps into repo vs AUR. Build optimization via
-CFLAGS/CXXFLAGS/LDFLAGS env vars. lib2O9 (alpm + own C nix evaluator)
-is in tree but not yet compiled — needs libarchive-dev for the alpm half.
-The nix evaluator is own C code (no C++ deps). See [`DESIGN.md`](./DESIGN.md)
-for the phased roadmap.
+CFLAGS/CXXFLAGS/LDFLAGS env vars. **Phase 3 — Declarative Engine** has its
+core Nix evaluator working: the evaluator parses Nix expressions, produces
+JSON manifests, supports import resolution and fixed-point recursion for
+config self-reference. `209 apply` evaluates `2O9.nix` and commits
+generations. 19 builtins are registered. The parser still needs binary
+operator precedence levels and lambda formals parsing for full 2O9.nix
+support. See [`DESIGN.md`](./DESIGN.md) for the phased roadmap.
 
 ## License
 

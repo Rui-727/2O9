@@ -298,8 +298,17 @@ nix_token_t nix_lexer_next(struct nix_lexer *lex)
     if (c == '"')
         return lex_string(lex);
 
-    /* Path literal: starts with / or ./ or ~/ */
-    if (c == '/' || (c == '.' && peek_at(lex, 1) == '/') ||
+    /* Path literal: starts with / or ./ or ~/
+     * But / followed by space or digit is the division operator, not a path. */
+    if (c == '/') {
+        char next = peek_at(lex, 1);
+        if (isalpha(next) || next == '_' || next == '/' || next == '.' ||
+            next == '-' || next == '~' || next == '+') {
+            return lex_path(lex);
+        }
+        /* Otherwise it's the / operator — fall through to single-char ops */
+    }
+    if ((c == '.' && peek_at(lex, 1) == '/') ||
         (c == '~' && peek_at(lex, 1) == '/'))
         return lex_path(lex);
 

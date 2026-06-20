@@ -330,6 +330,86 @@ gen_t *gen_db_get(gen_db_t *db, int id)
         g->manifest_path = strdup(path);
         g->packages = NULL;
         g->pkg_count = 0;
+
+        /* Load the package list from the manifest */
+        FILE *f = fopen(g->manifest_path, "r");
+        if (f) {
+                char line[8192];
+                gen_pkg_t **tail = &g->packages;
+                while (fgets(line, sizeof(line), f)) {
+                        char *name_start = strstr(line, "\"name\":");
+                        if (!name_start) continue;
+
+                        name_start += strlen("\"name\":");
+                        while (*name_start == ' ' || *name_start == '"') name_start++;
+                        char *name_end = strchr(name_start, '"');
+                        if (!name_end) continue;
+
+                        char pkg_name_buf[256];
+                        size_t nlen = name_end - name_start;
+                        if (nlen >= sizeof(pkg_name_buf)) nlen = sizeof(pkg_name_buf) - 1;
+                        memcpy(pkg_name_buf, name_start, nlen);
+                        pkg_name_buf[nlen] = '\0';
+
+                        char *ver_start = strstr(line, "\"version\":");
+                        char pkg_ver_buf[64] = "unknown";
+                        if (ver_start) {
+                                ver_start += strlen("\"version\":");
+                                while (*ver_start == ' ' || *ver_start == '"') ver_start++;
+                                char *ver_end = strchr(ver_start, '"');
+                                if (ver_end) {
+                                        size_t vlen = ver_end - ver_start;
+                                        if (vlen >= sizeof(pkg_ver_buf)) vlen = sizeof(pkg_ver_buf) - 1;
+                                        memcpy(pkg_ver_buf, ver_start, vlen);
+                                        pkg_ver_buf[vlen] = '\0';
+                                }
+                        }
+
+                        char *sp_start = strstr(line, "\"store_path\":");
+                        char pkg_store_buf[PATH_MAX] = "";
+                        if (sp_start) {
+                                sp_start += strlen("\"store_path\":");
+                                while (*sp_start == ' ' || *sp_start == '"') sp_start++;
+                                char *sp_end = strchr(sp_start, '"');
+                                if (sp_end) {
+                                        size_t slen = sp_end - sp_start;
+                                        if (slen >= sizeof(pkg_store_buf)) slen = sizeof(pkg_store_buf) - 1;
+                                        memcpy(pkg_store_buf, sp_start, slen);
+                                        pkg_store_buf[slen] = '\0';
+                                }
+                        }
+
+                        char *or_start = strstr(line, "\"origin\":");
+                        char pkg_origin_buf[32] = "repo";
+                        if (or_start) {
+                                or_start += strlen("\"origin\":");
+                                while (*or_start == ' ' || *or_start == '"') or_start++;
+                                char *or_end = strchr(or_start, '"');
+                                if (or_end) {
+                                        size_t olen = or_end - or_start;
+                                        if (olen >= sizeof(pkg_origin_buf)) olen = sizeof(pkg_origin_buf) - 1;
+                                        memcpy(pkg_origin_buf, or_start, olen);
+                                        pkg_origin_buf[olen] = '\0';
+                                }
+                        }
+
+                        gen_pkg_t *p = gen_pkg_create(pkg_name_buf, pkg_ver_buf,
+                                                      pkg_store_buf[0] ? pkg_store_buf : NULL,
+                                                      pkg_origin_buf);
+                        *tail = p;
+                        tail = &p->next;
+                        g->pkg_count++;
+                }
+                fclose(f);
+        }
+
+        /* Check pinned status */
+        char pin_path[PATH_MAX];
+        snprintf(pin_path, sizeof(pin_path), "%s/generations/%d/.pinned",
+                 db->root, id);
+        struct stat st;
+        g->is_pinned = (stat(pin_path, &st) == 0);
+
         return g;
 }
 

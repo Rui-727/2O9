@@ -115,4 +115,16 @@ These files compile as part of `lib2O9.a` — pure C, no C++ deps.
 
 ## Status
 
-Stub — to be implemented in Phase 3 (Declarative Engine).
+Phase 3 — core evaluator implemented. The evaluator handles:
+- Attribute sets (plain & recursive), lists, strings with interpolation
+- Let-bindings, if/then/else, with, assert, select
+- Lambda functions (ident param), function application
+- Import resolution with base directory
+- Fixed-point recursion for `{ config, ... }: { ... }` pattern
+- 19 builtins (map, filter, length, head, tail, attrNames, attrValues, etc.)
+- JSON serialization of values
+
+Parser still needs:
+- Binary operator precedence levels (+, -, *, /, ==, &&, ||, ->, etc.)
+- Lambda formals with commas ({ a, b }: body)
+- Dot-notation select for builtins (builtins.length)
