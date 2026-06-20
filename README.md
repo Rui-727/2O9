@@ -3,8 +3,10 @@
 **2O9** (stylized name; the binary is **`209`**) is a unified package manager
 that combines three things into one tool:
 
-1. **pacman's engine** — libalpm, used as a linked dependency (not a fork) for
-   dependency resolution, repository sync, database parsing, and hooks.
+1. **pacman's engine** — libalpm, modified in-tree into **lib209**: dependency
+   resolution, repository sync, database parsing, and hooks. The solver reads
+   from the generation DB instead of `/var/lib/pacman/local/`; the install
+   backend dispatches to the store adapter.
 2. **paru's AUR workflow** — rewritten in C: AUR RPC, PKGBUILD review, recursive
    AUR dependency resolution, and `makepkg` orchestration.
 3. **A real `/nix/store`** — content-addressed storage with atomic generations,
@@ -20,11 +22,12 @@ Activation repoints a generation symlink; that's it.
 |---|---|---|
 | Binary / command | `209` (numeric) | what you type |
 | Project / branding | `2O9` (letter O) | docs, repo name, on-disk paths (`/etc/2O9/`, `/var/lib/2O9/`) |
+| Modified libalpm | `lib209` | internal static library, never published separately |
 
 ## Status
 
 Design phase. See [`DESIGN.md`](./DESIGN.md) for the full architecture, the
-non-fork libalpm integration strategy, and the phased roadmap.
+lib209 integration strategy, and the phased roadmap.
 
 ## License
 
