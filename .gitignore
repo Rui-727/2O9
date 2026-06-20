@@ -1,0 +1,22 @@
+# Build artifacts (meson / ninja)
+build/
+builddir/
+.subprojects/
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.so.*
+[out]
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Local Nix experiment output
+result
+result-*
