@@ -111,11 +111,9 @@ The user's shell includes `~/.local/bin` in `$PATH`. That's it. No system-wide
 `~/.local/`. Global packages from `2O9.nix` and per-user packages from
 `home.nix` all land in the same place — the user's `~/.local/`.
 
-`/etc` files follow the same pattern: they're symlinked into `~/.local/etc/`.
-User edits to `~/.local/etc/foo` follow the symlink and write into the store —
-which means those edits are part of that generation. A rollback restores the
-old symlinks, which point to the old store paths. (If you want persistent
-config across generations, declare it in the Nix file.)
+`/etc` files are symlinked at their real paths — `/etc/foo` → store. Programs
+expect `/etc/foo` to be at `/etc/foo`, and that's where they find it. Only
+binaries and libraries are symlinked into `~/.local/`.
 
 **Problem 2: Making the solver work.** libalpm's solver reads
 `/var/lib/pacman/local/` to know what's installed. It expects files at canonical
@@ -202,8 +200,9 @@ files visible at their conventional paths.
 
 - **Symlink farm builder**
   For each store path in a generation, create symlinks from conventional
-  locations (`~/.local/bin/`, `~/.local/lib/`, `~/.local/share/`, `~/.local/etc/`)
-  into the store.
+  locations (`~/.local/bin/`, `~/.local/lib/`, `~/.local/share/`) into the
+  store. **Not `/etc/`** — `/etc/` is `/etc/`. Config files are symlinked at
+  their real system paths. Only binaries and libraries go to `~/.local/`.
   A **generation** = an ordered set of store paths + the symlink-farm manifest
   (the union view). `commit_generation()` atomically swaps the active profile
   symlink via `rename(2)` — that's the rollback primitive.
@@ -310,12 +309,13 @@ up the optimization automatically. Packages that hardcode their own flags don't
 The user writes `2O9.nix` (global) and/or `home.nix` (user scope). This is a
 real Nix file — the language, the evaluator, the store, all of it.
 
-The engine evaluates the file and produces a JSON manifest. We write our own
-evaluator — no `nix eval` subprocess, no dependency on the Nix CLI for
-configuration parsing. The store is still Nix's store (we shell out to
-`nix-store` for that), but configuration evaluation is ours. This avoids the
-fragility and latency of shelling out to `nix eval` on every `209 apply`,
-and means we control the evaluation semantics.
+The engine evaluates the file and produces a JSON manifest. We copy the Nix
+evaluator source into our tree (same pattern as lib209 — copy, then modify
+heavily) under `subprojects/nix-eval/`. It builds as a C library that the
+declarative engine calls directly — no `nix eval` subprocess, no dependency
+on the Nix CLI for configuration parsing. The store is still Nix's store
+(we shell out to `nix-store` for that), but configuration evaluation is
+ours. Same approach as lib209: take the existing code, make it ours.
 
 What the user writes (`/etc/2O9/2O9.nix`):
 
@@ -401,7 +401,7 @@ pacman's `src/pacman/` frontend is the base for the CLI. The **binary is `209`**
 | `209 <pkg> aur build` | Build from AUR | paru |
 | `209 <term> aur search` | Search AUR | paru |
 | `209 <pkg> aur review` | Review PKGBUILD diff | paru |
-| `209 <cmd> trakker` | Run command in sandbox, record trace | new |
+| `209 <subject> trakker [flags]` | Run command in sandbox, record trace | new |
 | `209 apply` | Apply declarative config | new |
 | `209 <n> rollback` | Roll back to generation #n | new |
 | `209 <n> pin` | Pin a generation (protect from GC) | new |
@@ -482,42 +482,37 @@ for everything:
 | **Global (system)** | `/etc/2O9/2O9.nix` | `/nix/var/nix/profiles/per-user/2O9-system` | `/var/lib/2O9` |
 | **Per-user** | `~/.config/2O9/home.nix` | `~/.local/state/2O9/profile` (user-owned Nix profile) | `~/.local/state/2O9` |
 
-### How profiles work — the 2O9 daemon
+### How profiles work
 
-Symlinks go into each user's `~/.local/`. The shell has `~/.local/bin` in
-`$PATH`. That's the visibility mechanism — no system-path writes, no
-`/usr/bin/` symlinks, no root needed for user packages.
+`~/.local/bin` is in `$PATH`. That's the visibility mechanism. Binaries are
+symlinked there. Libraries to `~/.local/lib/`. Config files stay at their real
+paths — `/etc/` is `/etc/`.
 
 The global `2O9.nix` applies to **all users**. When `209 apply` runs, it
 evaluates the Nix file and produces one manifest for the whole system. Then it
-builds the symlink farm in each logged-in user's `~/.local/`:
+builds the symlink farm:
 
 ```
 /etc/2O9/2O9.nix
         │
         ▼  209 apply (one manifest for everyone)
         │
-        ├── user alice:  ~/.local/bin/*, ~/.local/etc/*, ~/.local/lib/*  →  store
-        ├── user bob:    ~/.local/bin/*, ~/.local/etc/*, ~/.local/lib/*  →  store
-        └── system:      /usr/bin/*, /usr/lib/*, /etc/*  →  store  (root only)
+        ├── binaries:    ~/.local/bin/*  →  store    (per user, no root needed)
+        ├── libraries:   ~/.local/lib/*  →  store    (per user, no root needed)
+        ├── config:      /etc/*          →  store    (system, root needed)
+        └── system bins: /usr/bin/*      →  store    (system, root needed)
 ```
 
-The **2O9 daemon** (`209d`) runs in the background and tracks which users are
-logged in. When a new generation is committed, the daemon reapplies the symlink
-farm in each logged-in user's `~/.local/`. That's the whole job: watch for new
-generations, apply symlinks on their path.
-
-System-level symlinks (`/usr/bin/`, `/usr/lib/`, `/etc/`) only exist for root
-and system services — they require root to create. User packages never touch
-system paths.
+No daemon. When a new generation is committed, the symlink farm is written
+directly. Each user's `~/.local/` gets their symlinks. System paths (`/etc/`,
+`/usr/bin/`) get system symlinks (root needed). The shell already has
+`~/.local/bin` in `$PATH` (set via `/etc/profile.d/2O9.sh` on install), so
+new binaries are visible in the next shell session. If you want them
+immediately: `source /etc/profile.d/2O9.sh`.
 
 A user's `home.nix` overlays on top of the global config — packages and
 settings in `home.nix` are added to that user's `~/.local/` only, without
-affecting anyone else. The merge order (§7 above) determines what wins.
-
-The shell integration is a single line: `PATH="~/.local/bin:$PATH"`. 2O9's
-install process adds it to `/etc/profile.d/2O9.sh` so every new shell picks it
-up automatically.
+affecting anyone else. The merge order (below) determines what wins.
 
 ### Merge order (most-specific wins)
 
@@ -635,11 +630,11 @@ $ 209 apply
  3. lib209 resolves neovim deps       ──►  transaction plan
  4. store adapter: pkg.tar.zst ──► /nix/store/x3f-neovim-0.9.5
     symlink farm: ~/.local/bin/nvim → /nix/store/x3f-neovim-0.9.5/bin/nvim
-                  ~/.local/etc/nvim → /nix/store/x3f-neovim-0.9.5/etc/nvim
+                  /etc/nvim         → /nix/store/x3f-neovim-0.9.5/etc/nvim
  5. AUR helper: chromium PKGBUILD → review → makepkg (CFLAGS from 2O9.nix) → pkg.tar.zst
  6. store adapter: ──► /nix/store/a91-chromium-120
     symlink farm: ~/.local/bin/chromium → /nix/store/a91-chromium-120/bin/chromium
-                  ~/.local/etc/chromium → /nix/store/a91-chromium-120/etc/chromium
+                  /etc/chromium         → /nix/store/a91-chromium-120/etc/chromium
  7. commit generation #42  (profile symlink swapped)
 ✓ done.  rollback with: 209 41 rollback
 ```
@@ -690,8 +685,10 @@ $ 209 gc                    # garbage-collect unreferenced store paths
 2O9/                              # GPL-2.0-only
 ├── meson.build                   # top-level, pulls in subprojects
 ├── subprojects/
-│   └── pacman/                   # pacman source, copied in (git subtree) & modified
-│       └── MODIFICATIONS.md      # log of every 2O9 change to the vendored tree
+│   ├── pacman/                   # pacman source, copied in (git subtree) & modified
+│   │   └── MODIFICATIONS.md      # log of every 2O9 change to the vendored tree
+│   └── nix-eval/                 # Nix evaluator source, copied in & modified
+│       └── MODIFICATIONS.md      # log of every 2O9 change to the evaluator
 ├── src/
 │   ├── cli/                      # unified front-end (C) — builds the `209` binary
 │   ├── aur/                      # paru logic, ported to C  (NEW)
@@ -732,7 +729,7 @@ rethinking — which is exactly why it's first.
 | **0 — Foundation** | Repo, meson build, copy pacman into `subprojects/`, C→`nix` subprocess spike, name/license settled | `209 -V` builds; one C program can `nix-store --add` a file | Low |
 | **1 — Store adapter MVP** | One binary package → store → symlink farm; one profile; one rollback | `209 sl install` → store path + symlink; `209 1 rollback` restores | **HIGH** |
 | **2 — paru → C port** | AUR RPC, clone, review, makepkg, into the store; build optimization | `209 <pkg> aur build` works end-to-end with custom CFLAGS | Medium |
-| **3 — Declarative engine** | own Nix evaluator → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
+| **3 — Declarative engine** | own Nix evaluator (copied in, like lib209) → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
 | **4 — Trakker** | ptrace-based sandbox, syscall tracing, network/write blocking, redirect | `209 some-app trakker --no-net` runs and produces trace JSON | Medium |
 | **5 — Polish** | Unified CLI, hooks, user scope, docs, packaging | distro-installable, documented | Medium |
 
@@ -760,12 +757,11 @@ Phase 1 alone is a useful, shippable proof-of-concept even if later phases stall
   today. The store makes it visible earlier (at generation-commit time) rather
   than at install time, which is actually better — but it still needs a conflict
   resolution strategy.
-- **Services after rollback.** When you rollback, the 2O9 daemon reapplies the
-  symlink farm for all logged-in users. Running processes keep their old binaries
-  (via open FDs). Services that need restarting after a rollback (e.g. a daemon
-  whose binary changed) are not automatically restarted by 209d — it only
-  manages symlinks, not service lifecycles. Options for automatic service
-  restarts include: a post-rollback hook list in `2O9.nix`, systemd integration,
-  or just documenting that users should check. No decision yet.
+- **Services after rollback.** When you rollback, symlinks change but running
+  processes keep their old binaries (via open FDs). Services that need
+  restarting after a rollback (e.g. a daemon whose binary changed) are not
+  automatically restarted. Options include: a post-rollback hook list in
+  `2O9.nix`, systemd integration, or just documenting that users should check.
+  No decision yet.
 - **Scope realism.** "Full Nix store on pacman" is a multi-year, team-scale effort.
   The plan is structured so each phase produces something useful on its own.
