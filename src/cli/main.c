@@ -26,6 +26,7 @@
 #include "aur/build.h"
 #include "aur/resolver.h"
 #include "declarative/reconcile.h"
+#include "trakker/trakker.h"
 #include "nix_eval.h"
 
 #ifndef PACKAGE
@@ -1486,10 +1487,139 @@ int main(int argc, char *argv[])
                 return aur_review(argv[1], build_dir);
         }
 
-        /* Trakker */
+        /* Trakker: 209 <subject> trakker [flags] [command] */
         if (strcmp(verb, "trakker") == 0) {
-                fprintf(stderr, "209: trakker not yet implemented (Phase 4)\n");
-                return 1;
+                /* Parse trakker flags and build the command to run.
+                 * Syntax: 209 <subject> trakker [--no-net] [--no-write]
+                 *                              [--redirect-writes <dir>]
+                 *                              [--allow-net port=<port>]
+                 *                              [-- <command> [args...]]
+                 *
+                 * If -- is not provided, the subject itself is the command
+                 * (e.g. `209 some-app trakker` runs some-app). */
+                trakker_policy_t policy = {0};
+                const char **cmd_argv = NULL;
+                size_t cmd_argc = 0;
+
+                /* Parse flags from argv[3...] */
+                int i = 3;
+                while (i < argc) {
+                        if (strcmp(argv[i], "--no-net") == 0) {
+                                policy.no_net = 1;
+                                i++;
+                        } else if (strcmp(argv[i], "--no-write") == 0) {
+                                policy.no_write = 1;
+                                i++;
+                        } else if (strcmp(argv[i], "--redirect-writes") == 0 && i + 1 < argc) {
+                                policy.redirect_writes = strdup(argv[i + 1]);
+                                i += 2;
+                        } else if (strcmp(argv[i], "--allow-net") == 0 && i + 1 < argc) {
+                                /* Parse "port=443" */
+                                const char *val = argv[i + 1];
+                                if (strncmp(val, "port=", 5) == 0) {
+                                        policy.allow_net_count++;
+                                        policy.allow_net_ports = realloc(
+                                                policy.allow_net_ports,
+                                                policy.allow_net_count * sizeof(char *));
+                                        policy.allow_net_ports[policy.allow_net_count - 1] =
+                                                strdup(val + 5);
+                                }
+                                i += 2;
+                        } else if (strcmp(argv[i], "--") == 0) {
+                                /* Everything after -- is the command */
+                                i++;
+                                break;
+                        } else {
+                                /* Unknown flag or start of command */
+                                break;
+                        }
+                }
+
+                /* Build command argv */
+                if (i < argc) {
+                        /* Command specified after flags or -- */
+                        cmd_argc = argc - i;
+                        cmd_argv = malloc((cmd_argc + 1) * sizeof(char *));
+                        for (size_t j = 0; j < cmd_argc; j++)
+                                cmd_argv[j] = argv[i + j];
+                        cmd_argv[cmd_argc] = NULL;
+                } else {
+                        /* No command specified — use the subject as the command */
+                        cmd_argc = 1;
+                        cmd_argv = malloc((cmd_argc + 1) * sizeof(char *));
+                        cmd_argv[0] = subject;
+                        cmd_argv[1] = NULL;
+                }
+
+                printf("209: running under trakker: %s", cmd_argv[0]);
+                for (size_t j = 1; j < cmd_argc; j++)
+                        printf(" %s", cmd_argv[j]);
+                printf("\n");
+
+                if (policy.no_net) printf("  policy: network blocked\n");
+                if (policy.no_write) printf("  policy: writes blocked\n");
+                if (policy.redirect_writes)
+                        printf("  policy: writes redirected to %s\n",
+                               policy.redirect_writes);
+                if (policy.allow_net_count > 0) {
+                        printf("  policy: allowed ports:");
+                        for (size_t j = 0; j < policy.allow_net_count; j++)
+                                printf(" %s", policy.allow_net_ports[j]);
+                        printf("\n");
+                }
+
+                /* Run the command under trakker */
+                trak_result_t *result = trakker_run(cmd_argv, cmd_argc, &policy);
+
+                if (!result) {
+                        fprintf(stderr, "209: trakker failed to start\n");
+                        free(cmd_argv);
+                        trakker_policy_free(&policy);
+                        return 1;
+                }
+
+                printf("\n─── Trakker Report ───\n");
+                printf("Command:   %s\n", result->command);
+                printf("Exit code: %d\n", result->exit_code);
+                printf("Duration:  %lu ms\n", result->duration_ms);
+                printf("Events:    %zu\n", result->event_count);
+
+                /* Print summary by category */
+                size_t reads = 0, writes = 0, creates = 0, deletes = 0;
+                size_t connects = 0, blocked = 0, forks = 0, execs = 0;
+                trak_event_t *e = result->events;
+                while (e) {
+                        switch (e->type) {
+                        case TRAK_FILE_READ:   reads++; break;
+                        case TRAK_FILE_WRITE:  writes++; break;
+                        case TRAK_FILE_CREATE: creates++; break;
+                        case TRAK_FILE_DELETE: deletes++; break;
+                        case TRAK_NET_CONNECT: connects++; break;
+                        case TRAK_NET_BLOCKED: blocked++; break;
+                        case TRAK_PROC_FORK:   forks++; break;
+                        case TRAK_PROC_EXEC:   execs++; break;
+                        default: break;
+                        }
+                        e = e->next;
+                }
+
+                if (reads + writes + creates + deletes > 0)
+                        printf("Files:     %zu reads, %zu writes, %zu creates, %zu deletes\n",
+                               reads, writes, creates, deletes);
+                if (connects + blocked > 0)
+                        printf("Network:   %zu connects, %zu blocked\n", connects, blocked);
+                if (forks + execs > 0)
+                        printf("Processes: %zu forks, %zu execs\n", forks, execs);
+
+                /* Write full JSON trace to stderr (or a file if desired) */
+                printf("\n─── JSON Trace ───\n");
+                trakker_result_write_json(result, stdout);
+
+                int rc = result->exit_code;
+                trakker_result_free(result);
+                free(cmd_argv);
+                trakker_policy_free(&policy);
+                return rc == 0 ? 0 : 1;
         }
 
         /* Rollback / pin — subject is a generation number */
