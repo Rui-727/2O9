@@ -50,12 +50,22 @@ config_h = configure_file(
   output : 'config.h',
   configuration : conf)
 
+# ── External dependencies ─────────────────────────────────────────
+# libarchive: system package. pacman -S libarchive / apt install libarchive-dev
+# libzstd:    system package. needed for .pkg.tar.zst support
+libarchive_dep = dependency('libarchive', version : '>=3.0.0', required : false)
+libzstd_dep = dependency('libzstd', version : '>=1.4.0', required : false)
+
+if libarchive_dep.found()
+  message('libarchive: found')
+else
+  message('libarchive: NOT found — install libarchive-dev to build lib209')
+endif
+
 # ── lib209 (vendored libalpm) ─────────────────────────────────────
 # Build libalpm from the vendored pacman source as lib209.a.
-# Disabled by default until libarchive-dev is available.
-lib209_dep = dependency('', required : false)
-
-if get_option('build-lib209')
+# Requires libarchive-dev.
+if get_option('build-lib209') and libarchive_dep.found()
   subdir('subprojects/pacman')
 endif
 
