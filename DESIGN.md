@@ -14,7 +14,7 @@ into a single tool.
 
 | Job | Today | In 2O9 |
 |---|---|---|
-| Resolve & install binary packages | `pacman` (libalpm, C) | **lib209** (libalpm, modified in-tree) |
+| Resolve & install binary packages | `pacman` (libalpm, C) | **lib2O9** (libalpm, modified in-tree) |
 | Build & install from the AUR | `paru` (Rust) | **rewritten in C** |
 | Declarative, reproducible system state | Nix / NixOS | `/nix/store` + Nix-syntax config |
 
@@ -42,7 +42,7 @@ These were settled up front and constrain the design:
 3. **No fork of pacman — but the source lives in our tree and we edit it.**
    pacman's source is **copied into our git tree** (`git subtree add` from
    upstream) under `subprojects/pacman/` and **modified directly** there. The
-   result is **lib209** — our modified build of libalpm, statically linked into
+   result is **lib2O9** — our modified build of libalpm, statically linked into
    the `209` binary. We do not publish a competing pacman; we ship 2O9 only.
 4. **GPL-2.0-only.** Inherited from pacman. The paru C port is original C code,
    so it inherits the project license cleanly.
@@ -80,15 +80,15 @@ package sources. 2O9 is an Arch Linux package manager that puts files in
 `/nix/store/`.
 
 On `209 apply`, the engine evaluates `2O9.nix` and feeds the `pacman` block
-**directly into lib209's in-memory API** (`alpm_option_set`,
-`alpm_db_register_sync`, etc.). lib209 is never pointed at a config file; it is
+**directly into lib2O9's in-memory API** (`alpm_option_set`,
+`alpm_db_register_sync`, etc.). lib2O9 is never pointed at a config file; it is
 configured programmatically from the manifest, so the declaration is the single
 source of truth with nothing to drift out of sync.
 
 ### Two problems to solve
 
 Putting packages in `/nix/store` instead of `/` creates two sub-problems, not
-one. Both are solved by modifying libalpm into lib209.
+one. Both are solved by modifying libalpm into lib2O9.
 
 **Problem 1: Making files visible.** A package in `/nix/store/<hash>-firefox/`
 has its binary at `/nix/store/<hash>-firefox/bin/firefox`, not somewhere on
@@ -121,16 +121,16 @@ binaries and libraries are symlinked into `~/.local/`.
 `/var/lib/pacman/local/` to know what's installed. It expects files at canonical
 paths like `/usr/bin/firefox`. But in 2O9, nothing goes to `/usr/bin/` —
 it goes to `~/.local/bin/`. The solver still breaks, because it expects the
-old filesystem model. We fix it in lib209.
+old filesystem model. We fix it in lib2O9.
 
-We solve this in lib209: the "what's installed" query is rewritten to read from
+We solve this in lib2O9: the "what's installed" query is rewritten to read from
 the generation DB instead of `/var/lib/pacman/local/`. The solver sees a
 coherent installed set drawn from the current generation — which packages are in
 it, what versions, what deps. It doesn't care where the files physically live;
 it only needs the metadata. The generation DB provides that metadata, and the
 solver works as before.
 
-Both problems are internal to lib209. No external hack, no shim layer, no
+Both problems are internal to lib2O9. No external hack, no shim layer, no
 compatibility bridge. We modify the library to match our model.
 
 ---
@@ -159,7 +159,7 @@ compatibility bridge. We modify the library to match our model.
        └──────────┬───────────┘
                   ▼
 ┌──────────────────────────────────────────────────────────┐
-│  lib209 (libalpm, modified in-tree)                      │
+│  lib2O9 (libalpm, modified in-tree)                      │
 │  dep resolution · repo sync · db parse · hooks           │
 │  reads installed set from generation DB, not /var/lib    │
 │  install backend dispatches to store adapter              │
@@ -182,7 +182,7 @@ Six components:
 3. **AUR Helper** — builds packages that aren't in binary repos, with build
    optimization (see §5.2).
 4. **Trakker** — execution sandbox and trace recorder (see §7).
-5. **lib209** (libalpm, modified in-tree) — solver reads from generation DB,
+5. **lib2O9** (libalpm, modified in-tree) — solver reads from generation DB,
    install backend dispatches to store adapter.
 6. **Store Adapter** — puts packages in the store, then symlinks them into view.
 
@@ -252,7 +252,7 @@ that actually works via the environment:
 | AUR RPC (`/rpc?v=5`) | **libcurl** + **cJSON** |
 | Clone / checkout PKGBUILDs | **libgit2** |
 | File-based PKGBUILD review & diff | custom TTY renderer + a diff library |
-| Recursive AUR dependency resolution | port of paru's resolver over lib209 |
+| Recursive AUR dependency resolution | port of paru's resolver over lib2O9 |
 | `makepkg` orchestration | `fork`/`exec` makepkg, capture `.pkg.tar.*` |
 | clean-after, news, mflags | direct ports from `paru.conf` semantics |
 | config | `2O9.nix` (see §7) |
@@ -312,12 +312,12 @@ The user writes `2O9.nix` (global) and/or `home.nix` (user scope). This is a
 real Nix file — the language, the evaluator, the store, all of it.
 
 The engine evaluates the file and produces a JSON manifest. We copy the Nix
-evaluator source into our tree (same pattern as lib209 — copy, then modify
+evaluator source into our tree (same pattern as lib2O9 — copy, then modify
 heavily) under `subprojects/nix-eval/`. It builds as a C library that the
 declarative engine calls directly — no `nix eval` subprocess, no dependency
 on the Nix CLI for configuration parsing. The store is still Nix's store
 (we shell out to `nix-store` for that), but configuration evaluation is
-ours. Same approach as lib209: take the existing code, make it ours.
+ours. Same approach as lib2O9: take the existing code, make it ours.
 
 What the user writes (`/etc/2O9/2O9.nix`):
 
@@ -366,7 +366,7 @@ What the engine produces (JSON manifest):
 ```
 
 The `pacman` block **is** `2O9.nix` — there is no `pacman.conf`. On `209 apply`
-the engine feeds the `pacman` block **directly into lib209's in-memory API**.
+the engine feeds the `pacman` block **directly into lib2O9's in-memory API**.
 The declaration is the single source of truth.
 
 The **reconciler** diffs manifest ↔ current generation DB and produces a
@@ -377,7 +377,7 @@ transaction:
   pacman_options_changed: bool, services_on: [...], services_off: [...] }
 ```
 
-The transaction is executed through lib209 + the AUR helper + the store adapter.
+The transaction is executed through lib2O9 + the AUR helper + the store adapter.
 On success → `commit_generation()`. On failure → abort; the profile is untouched,
 so the system stays consistent.
 
@@ -425,19 +425,26 @@ keep working. Scope (global vs user) is selected by flag / config (§7).
 
 ---
 
-## 6. lib209 — libalpm, modified in-tree
+## 6. lib2O9 — libalpm + nix evaluator, merged in-tree
 
 We don't fork pacman upstream and we don't build against it untouched. We do
 something in between: **copy the source into our tree and modify it directly**.
-The result is **lib209** — our build of libalpm, statically linked into the
-`209` binary.
+The result is **lib2O9** — a single static library that merges our modified
+libalpm with our modified Nix evaluator, statically linked into the `209` binary.
+
+Both components live under `lib/2O9/` — `alpm/` for the modified libalpm,
+`nix/` for the modified evaluator. They're built into one `lib2O9.a`. There
+is no separate lib209, no separate nix-eval library. One library, one build
+step, one thing to link.
 
 **What we do:**
 - pacman's source is pulled into the repo once via `git subtree add` from
   `https://gitlab.archlinux.org/pacman/pacman`, landing under
-  `subprojects/pacman/`. From that point it's **our copy**, committed and version-
+  `lib/2O9/alpm/`. From that point it's **our copy**, committed and version-
   controlled alongside 2O9's own code.
-- It builds a static `lib209.a` (and the `makepkg` / database utilities we need).
+- The Nix evaluator is pulled from `https://github.com/NixOS/nix`, landing
+  under `lib/2O9/nix/`. Same pattern — copy, then modify.
+- Both build into a single static `lib2O9.a`.
 - We **edit the vendored source directly** — no separate patch series overlaid at
   build time. The modifications are real commits in 2O9's history, visible to
   `git log` and `git blame`.
@@ -450,11 +457,11 @@ The result is **lib209** — our build of libalpm, statically linked into the
 - The downside is real: upstream changes can't be a clean `git am`. We re-pull
   with `git subtree pull` and **resolve conflicts in the modified tree**. To make
   this tractable we keep the modified surface **small and isolated** (see target
-  list below) and record each touch in `subprojects/pacman/MODIFICATIONS.md`.
+  list below) and record each touch in `lib/2O9/alpm/MODIFICATIONS.md`.
 
 **What "no fork" still means:**
 - We are **not** publishing a competing pacman binary or maintaining pacman as a
-  separate project. lib209 is an internal build artifact of 2O9, consumed only
+  separate project. lib2O9 is an internal build artifact of 2O9, consumed only
   by 2O9.
 
 **The modification targets (refined in Phase 1, recorded in MODIFICATIONS.md):**
@@ -465,7 +472,7 @@ The result is **lib209** — our build of libalpm, statically linked into the
    generation DB, not from `/var/lib/pacman/local/`. This is the modification
    that makes the store model work without lying to the solver — it sees a
    coherent installed set, just sourced from a different place.
-3. **Config entrypoint**: lib209 is configured programmatically from the
+3. **Config entrypoint**: lib2O9 is configured programmatically from the
    manifest, never from `pacman.conf`. The `alpm_option_set` /
    `alpm_db_register_sync` API already supports this; we just remove the
    config-file path entirely.
@@ -629,7 +636,7 @@ implementation sits in `src/trakker/` and uses Linux's `ptrace` API directly
 $ 209 apply
  1. eval 2O9.nix           ──►  manifest JSON
  2. reconcile(manifest, current-gen)  ──►  { +neovim, -old-editor, +chromium(AUR) }
- 3. lib209 resolves neovim deps       ──►  transaction plan
+ 3. lib2O9 resolves neovim deps       ──►  transaction plan
  4. store adapter: pkg.tar.zst ──► /nix/store/x3f-neovim-0.9.5
     symlink farm: ~/.local/bin/nvim → /nix/store/x3f-neovim-0.9.5/bin/nvim
                   /etc/nvim         → /nix/store/x3f-neovim-0.9.5/etc/nvim
@@ -686,18 +693,18 @@ $ 209 gc                    # garbage-collect unreferenced store paths
 ```
 2O9/                              # GPL-2.0-only
 ├── Makefile                      # build system
-├── subprojects/
-│   ├── pacman/                   # pacman source, copied in (git subtree) & modified
-│   │   └── MODIFICATIONS.md      # log of every 2O9 change to the vendored tree
-│   └── nix/                      # Nix evaluator source, copied in & modified
-│       └── MODIFICATIONS.md      # log of every 2O9 change to the evaluator
+├── lib/2O9/                      # lib2O9 — one static library, merged from:
+│   ├── alpm/                     #   modified libalpm (from pacman, copied in & edited)
+│   │   └── MODIFICATIONS.md      #   log of every 2O9 change
+│   ├── nix/                      #   modified Nix evaluator (copied in & edited)
+│   │   └── MODIFICATIONS.md      #   log of every 2O9 change
+│   └── common/                   #   shared utils (ini.c, util-common.c)
 ├── src/
 │   ├── cli/                      # unified front-end (C) — builds the `209` binary
 │   ├── aur/                      # paru logic, ported to C  (NEW)
 │   ├── declarative/              # reconcile engine        (NEW)
 │   ├── store/                    # store adapter           (NEW)
 │   └── trakker/                  # sandbox + trace recorder(NEW)
-├── lib/2O9/                      # shared internal library (config, nix-spawn, db)
 ├── scripts/                      # hooks, makepkg wrappers, activation
 ├── test/                         # unit + integration + generation-rollback tests
 └── docs/
@@ -709,7 +716,8 @@ Build system: **make** (one Makefile, no dependencies beyond a C compiler and ma
 
 | Dep | Used by | Notes |
 |---|---|---|
-| `lib209` (copied-in & modified) | core | static `lib209.a` built from `subprojects/pacman/` |
+| `lib2O9` (copied-in & modified) | core | static `lib2O9.a` — merged libalpm + nix evaluator |
+| `libarchive` | lib2O9 | for .pkg.tar.zst extraction |
 | `libcurl` | AUR helper | AUR RPC |
 | `libgit2` | AUR helper | clone PKGBUILDs |
 | `cJSON` | AUR helper, declarative | JSON parse/emit |
@@ -721,7 +729,7 @@ Build system: **make** (one Makefile, no dependencies beyond a C compiler and ma
 
 ## 10. Phased roadmap (risk-first)
 
-Phase 1 is the make-or-break. If lib209 can't cleanly remap its installed-set
+Phase 1 is the make-or-break. If lib2O9 can't cleanly remap its installed-set
 query and install backend, the "full Nix store on pacman" premise needs
 rethinking — which is exactly why it's first.
 
@@ -730,7 +738,7 @@ rethinking — which is exactly why it's first.
 | **0 — Foundation** | Repo, meson build, copy pacman into `subprojects/`, C→`nix` subprocess spike, name/license settled | `209 -V` builds; one C program can `nix-store --add` a file | Low |
 | **1 — Store adapter MVP** | One binary package → store → symlink farm; one profile; one rollback | `209 sl install` → store path + symlink; `209 1 rollback` restores | **HIGH** |
 | **2 — paru → C port** | AUR RPC, clone, review, makepkg, into the store; build optimization | `209 <pkg> aur build` works end-to-end with custom CFLAGS | Medium |
-| **3 — Declarative engine** | own Nix evaluator (copied in, like lib209) → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
+| **3 — Declarative engine** | own Nix evaluator (copied in, like lib2O9) → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
 | **4 — Trakker** | ptrace-based sandbox, syscall tracing, network/write blocking, redirect | `209 some-app trakker --no-net` runs and produces trace JSON | Medium |
 | **5 — Polish** | Unified CLI, hooks, user scope, docs, packaging | distro-installable, documented | Medium |
 
