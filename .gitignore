@@ -3,6 +3,9 @@ build/
 builddir/
 .subprojects/
 
+# Generated config
+config.h
+
 # Compiled objects
 *.o
 *.a

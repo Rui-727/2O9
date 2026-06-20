@@ -1,0 +1,68 @@
+project('2O9',
+        'c',
+        version : '0.0.1',
+        license : 'GPL-2.0-only',
+        default_options : [
+          'c_std=gnu11',
+          'prefix=/usr',
+          'sysconfdir=/etc',
+          'localstatedir=/var',
+        ],
+        meson_version : '>= 0.51')
+
+cc = meson.get_compiler('c')
+
+# ── Version ────────────────────────────────────────────────────────
+# If building from git, try to get a descriptive version; otherwise
+# fall back to the project version set above.
+if get_option('use-git-version')
+  git = find_program('git', required : false)
+  if git.found()
+    PACKAGE_VERSION = run_command(git, 'describe', '--abbrev=4', '--dirty',
+                                  check : false).stdout().strip()
+    if PACKAGE_VERSION == ''
+      PACKAGE_VERSION = meson.project_version()
+    endif
+  else
+    PACKAGE_VERSION = meson.project_version()
+  endif
+else
+  PACKAGE_VERSION = meson.project_version()
+endif
+
+message('2O9 version: ' + PACKAGE_VERSION)
+
+# ── Configuration ──────────────────────────────────────────────────
+conf = configuration_data()
+conf.set('_GNU_SOURCE', true)
+conf.set_quoted('PACKAGE', '2O9')
+conf.set_quoted('PACKAGE_VERSION', PACKAGE_VERSION)
+conf.set_quoted('SYSCONFDIR', join_paths(get_option('prefix'), get_option('sysconfdir')))
+conf.set_quoted('LOCALSTATEDIR', join_paths(get_option('prefix'), get_option('localstatedir')))
+conf.set_quoted('DBPATH', '/var/lib/2O9/')
+conf.set_quoted('CACHEDIR', '/var/cache/2O9/pkg/')
+conf.set_quoted('CONFIG_PATH', '/etc/2O9/2O9.nix')
+conf.set_quoted('STORE_ROOT', '/nix/store')
+conf.set_quoted('PROFILE_DIR', '/nix/var/nix/profiles/per-user/2O9-system')
+conf.set_quoted('USER_PROFILE_DIR', '/.local/state/2O9/profile')
+conf.set_quoted('BIN_DIR', '/.local/bin')
+conf.set_quoted('LIB_DIR', '/.local/lib')
+
+config_h = configure_file(
+  output : 'config.h',
+  configuration : conf)
+
+# ── lib209 (vendored libalpm) ─────────────────────────────────────
+# Build libalpm from the vendored pacman source as lib209.a.
+# Disabled by default until libarchive-dev is available.
+lib209_dep = dependency('', required : false)
+
+if get_option('build-lib209')
+  subdir('subprojects/pacman')
+endif
+
+# ── 209 binary ────────────────────────────────────────────────────
+subdir('src/cli')
+
+# ── store adapter (Phase 0 spike) ────────────────────────────────
+subdir('src/store')

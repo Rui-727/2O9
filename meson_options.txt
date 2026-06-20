@@ -1,0 +1,9 @@
+option('use-git-version',
+       type : 'boolean',
+       value : false,
+       description : 'Use git describe for version string')
+
+option('build-lib209',
+       type : 'boolean',
+       value : false,
+       description : 'Build lib209 (vendored libalpm) — needs libarchive-dev')
