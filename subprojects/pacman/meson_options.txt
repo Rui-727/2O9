@@ -1,4 +1,0 @@
-# lib209 build options — minimal, only what we need
-
-option('crypto', type : 'combo', choices : ['openssl', 'nettle'],
-       description : 'select crypto implementation')

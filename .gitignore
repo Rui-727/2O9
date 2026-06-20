@@ -1,17 +1,7 @@
-# Build artifacts (meson / ninja)
-build/
-builddir/
-.subprojects/
-
-# Generated config
-config.h
-
-# Compiled objects
+# Build artifacts
 *.o
-*.a
-*.so
-*.so.*
-[out]
+209
+test-aur-rpc
 
 # Editor / OS noise
 *.swp

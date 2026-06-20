@@ -685,11 +685,11 @@ $ 209 gc                    # garbage-collect unreferenced store paths
 
 ```
 2O9/                              # GPL-2.0-only
-├── meson.build                   # top-level, pulls in subprojects
+├── Makefile                      # build system
 ├── subprojects/
 │   ├── pacman/                   # pacman source, copied in (git subtree) & modified
 │   │   └── MODIFICATIONS.md      # log of every 2O9 change to the vendored tree
-│   └── nix-eval/                 # Nix evaluator source, copied in & modified
+│   └── nix/                      # Nix evaluator source, copied in & modified
 │       └── MODIFICATIONS.md      # log of every 2O9 change to the evaluator
 ├── src/
 │   ├── cli/                      # unified front-end (C) — builds the `209` binary
@@ -703,8 +703,7 @@ $ 209 gc                    # garbage-collect unreferenced store paths
 └── docs/
 ```
 
-Build system: **meson + ninja** (what pacman already uses — minimises friction
-with the copied-in tree under `subprojects/pacman/`).
+Build system: **make** (one Makefile, no dependencies beyond a C compiler and make).
 
 ### External build/runtime dependencies
 

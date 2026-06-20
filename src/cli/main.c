@@ -16,11 +16,17 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
-#include <config.h>
 
 #include "store/store.h"
 #include "declarative/gen.h"
 #include "store/symlinks.h"
+
+#ifndef PACKAGE
+#define PACKAGE "2O9"
+#endif
+#ifndef PACKAGE_VERSION
+#define PACKAGE_VERSION "0.0.1"
+#endif
 
 #define VERSION_STR PACKAGE " " PACKAGE_VERSION
 
