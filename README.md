@@ -1,7 +1,7 @@
 # 2O9
 
 **2O9** (stylized name; the binary is **`209`**) is a unified package manager
-that combines three things into one tool:
+that combines four things into one tool:
 
 1. **pacman's engine** — libalpm, modified in-tree into **lib209**: dependency
    resolution, repository sync, database parsing, and hooks. The solver reads
@@ -12,6 +12,9 @@ that combines three things into one tool:
 3. **A real `/nix/store`** — content-addressed storage with atomic generations,
    driven by a **declarative** (Nix-syntax) configuration describing desired
    system and per-user state.
+4. **Trakker** — execution sandbox and trace recorder: ptrace-based syscall
+   tracing, network/write blocking, file-write redirection, and JSON trace
+   output. Run any command sandboxed: `209 <cmd> trakker --no-net`.
 
 Rollback is just a symlink swap — there is **no boot-time rollback machinery**.
 Activation repoints a generation symlink; that's it.

@@ -170,15 +170,16 @@ compatibility bridge. We modify the library to match our model.
    real /nix/store + nix daemon  (external C++ dependency)
 ```
 
-Five components:
+Six components:
 
 1. **Unified CLI** — entrypoint, dispatch.
 2. **Declarative Engine** — turns `2O9.nix` into a transaction.
 3. **AUR Helper** — builds packages that aren't in binary repos, with build
    optimization (see §5.2).
-4. **lib209** (libalpm, modified in-tree) — solver reads from generation DB,
+4. **Trakker** — execution sandbox and trace recorder (see §7).
+5. **lib209** (libalpm, modified in-tree) — solver reads from generation DB,
    install backend dispatches to store adapter.
-5. **Store Adapter** — puts packages in the store, then symlinks them into view.
+6. **Store Adapter** — puts packages in the store, then symlinks them into view.
 
 ---
 
@@ -209,9 +210,13 @@ files visible at their conventional paths.
   `n`. Instant, because files never move. `209 generations` lists them:
 
   ```
-  #1  2024-03-15 10:30   3 packages
-  #2  2024-03-16 14:22   5 packages   ← current
+  #1  2024-03-15 10:30   3 packages   +firefox +neovim +curl
+  #2  2024-03-16 14:22   5 packages   +htop +btop  -old-editor  ← current
   ```
+
+  Each generation shows what changed relative to the one before it: `+pkg`
+  for additions, `-pkg` for removals. `209 generations` is a log of every
+  mutation, not just a list of snapshots.
 
 - **Garbage collection.** Store paths that belong to no generation are eligible
   for GC. `209 gc` runs `nix-collect-garbage`. By default, only the current
@@ -299,12 +304,12 @@ up the optimization automatically. Packages that hardcode their own flags don't
 The user writes `2O9.nix` (global) and/or `home.nix` (user scope). This is a
 real Nix file — the language, the evaluator, the store, all of it.
 
-The engine evaluates the file and produces a JSON manifest. How that evaluation
-happens is an implementation detail, not a constraint. The initial
-implementation shells out to `nix eval --json --impure ./2O9.nix`. If that
-proves too fragile or too slow, we replace it — parse the Nix file ourselves,
-cache the result, or write our own evaluator. The interface is stable:
-`2O9.nix` in, JSON manifest out. What happens in between is ours to change.
+The engine evaluates the file and produces a JSON manifest. We write our own
+evaluator — no `nix eval` subprocess, no dependency on the Nix CLI for
+configuration parsing. The store is still Nix's store (we shell out to
+`nix-store` for that), but configuration evaluation is ours. This avoids the
+fragility and latency of shelling out to `nix eval` on every `209 apply`,
+and means we control the evaluation semantics.
 
 What the user writes (`/etc/2O9/2O9.nix`):
 
@@ -383,13 +388,14 @@ pacman's `src/pacman/` frontend is the base for the CLI. The **binary is `209`**
 
 | Command | Meaning | Origin |
 |---|---|---|
-| `209 <pkg> install` | Install a package | pacman |
+| `209 <pkg> install` | Install a package temporarily (not in `2O9.nix`) | pacman |
 | `209 <pkg> remove` | Remove a package | pacman |
 | `209 <pkg> info` | Show package info | pacman |
 | `209 <term> search` | Search repos | pacman |
 | `209 <pkg> aur build` | Build from AUR | paru |
 | `209 <term> aur search` | Search AUR | paru |
 | `209 <pkg> aur review` | Review PKGBUILD diff | paru |
+| `209 <cmd> trakker` | Run command in sandbox, record trace | new |
 | `209 apply` | Apply declarative config | new |
 | `209 <n> rollback` | Roll back to generation #n | new |
 | `209 <n> pin` | Pin a generation (protect from GC) | new |
@@ -482,27 +488,99 @@ built-in defaults
       → CLI flags
 ```
 
-### Imperative and declarative coexistence
+### Imperative installs are temporary
 
-`209 apply` reads `2O9.nix` and reconciles it with the current system state.
-But what about packages you installed imperatively with `209 nginx install`?
+`209 <pkg> install` is for temporary use — testing something, debugging,
+one-off needs. The package lands in the current generation and works
+immediately. But it's not in `2O9.nix`, so the next `209 apply` will
+remove it.
 
-**The rule is simple: `2O9.nix` is the source of truth. `209 apply` makes the
-system match the file.**
+**`2O9.nix` is the source of truth. `209 apply` makes the system match the
+file.**
 
-If you `209 nginx install` imperatively, nginx gets added to the current
-generation. It works. But the next time you `209 apply`, the reconciler compares
-the current generation against `2O9.nix`. If nginx isn't in the file, it gets
-removed. If it is, it stays. The Nix file wins.
+If you `209 nginx install` and then `209 apply`, the reconciler shows the
+diff before acting:
 
-This means: if you want an imperative install to persist, add it to `2O9.nix`.
-`209 apply` can tell you what would be removed (the diff) before it acts, so
-you're never surprised. And you can always `209 <n> rollback` to undo an apply
-that removed something you wanted.
+```
+$ 209 apply
+ reconciling manifest ↔ generation #42...
+ - nginx (not in 2O9.nix, was installed temporarily)
+ this package would be removed. proceed? [y/N]
+```
 
-There is no hidden overlay, no "layer on top of the generation." The generation
-is what it is. The Nix file declares what it should be. `209 apply` closes the
-gap.
+To keep it, add it to `2O9.nix` first. To discard it, say yes. To think
+about it, say no — nothing happens.
+
+This is intentional. Imperative installs are ephemeral. If you want
+something permanent, declare it. No hidden overlay, no "layer on top of the
+generation." The generation is what it is. The Nix file declares what it
+should be. `209 apply` closes the gap.
+
+### Trakker — execution sandbox and trace recorder
+
+`209 trakker <cmd>` runs a command inside 2O9's sandbox, recording everything
+it does and optionally restricting what it's allowed to do.
+
+**What trakker records:**
+- **File I/O** — every file opened, created, modified, or deleted. Full
+  before/after paths.
+- **Network** — every connection opened (address, port, protocol).
+- **Process** — fork/exec, signals, exit code.
+- **Memory** — mmap calls, page faults (summary, not full dump).
+- **Registers** — register state at syscall entry (for debugging/reversing).
+
+**What trakker can restrict (via flags):**
+- `--no-net` — block all network access. Any socket() / connect() call fails.
+- `--redirect-writes /tmp/trakker` — file writes are redirected to a
+  specified directory instead of their real target. The program thinks it
+  wrote to `/etc/foo`; the data actually landed in
+  `/tmp/trakker/etc/foo`. Reads still see the real filesystem.
+- `--no-write` — block all file writes entirely.
+- `--allow-net port=443` — allow only specific network destinations.
+
+**How it works:** trakker uses `ptrace` (or `seccomp`-bpf for filtering
+only) to intercept syscalls. On each syscall, it records the action and
+checks it against the restriction policy. Blocked syscalls return `-EPERM`
+to the traced process. Redirected writes are handled by intercepting
+`open()`/`creat()`, rewriting the path, and letting the call proceed to the
+redirected destination.
+
+**Use cases:**
+- `209 some-app trakker --no-net` — run an app with no network access.
+- `209 pkg trakker --redirect-writes /tmp/test install` — install a package
+  but catch every file it would write, without actually writing it.
+- `209 unknown-bin trakker` — run an untrusted binary and see what it does
+  before trusting it.
+- `209 aur-pkg trakker --redirect-writes /tmp/aur-review aur build` — build
+  an AUR package but capture all writes for review.
+
+Trakker output is a JSON trace log:
+
+```json
+{
+  "command": "./suspicious-app",
+  "exit_code": 0,
+  "duration_ms": 1234,
+  "files": {
+    "read": ["/etc/resolv.conf", "/usr/lib/libc.so.6"],
+    "write": ["/tmp/trakker/home/user/.config/app/config.toml"],
+    "create": ["/tmp/trakker/home/user/.cache/app/data.db"],
+    "delete": []
+  },
+  "network": {
+    "blocked": ["connect(142.250.80.46:443)"],
+    "allowed": []
+  },
+  "processes": {
+    "forked": [{ "pid": 1234, "command": "/usr/bin/curl" }],
+    "exec": []
+  }
+}
+```
+
+Trakker is built into the `209` binary. It is not a separate tool. The
+implementation sits in `src/trakker/` and uses Linux's `ptrace` API directly
+— no external tracing dependencies.
 
 ---
 
@@ -578,7 +656,8 @@ $ 209 gc                    # garbage-collect unreferenced store paths
 │   ├── cli/                      # unified front-end (C) — builds the `209` binary
 │   ├── aur/                      # paru logic, ported to C  (NEW)
 │   ├── declarative/              # reconcile engine        (NEW)
-│   └── store/                    # store adapter           (NEW)
+│   ├── store/                    # store adapter           (NEW)
+│   └── trakker/                  # sandbox + trace recorder(NEW)
 ├── lib/2O9/                      # shared internal library (config, nix-spawn, db)
 ├── scripts/                      # hooks, makepkg wrappers, activation
 ├── test/                         # unit + integration + generation-rollback tests
@@ -613,8 +692,9 @@ rethinking — which is exactly why it's first.
 | **0 — Foundation** | Repo, meson build, copy pacman into `subprojects/`, C→`nix` subprocess spike, name/license settled | `209 -V` builds; one C program can `nix-store --add` a file | Low |
 | **1 — Store adapter MVP** | One binary package → store → symlink farm; one profile; one rollback | `209 sl install` → store path + symlink; `209 1 rollback` restores | **HIGH** |
 | **2 — paru → C port** | AUR RPC, clone, review, makepkg, into the store; build optimization | `209 <pkg> aur build` works end-to-end with custom CFLAGS | Medium |
-| **3 — Declarative engine** | eval manifest → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
-| **4 — Polish** | Unified CLI, hooks, user scope, docs, packaging | distro-installable, documented | Medium |
+| **3 — Declarative engine** | own Nix evaluator → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
+| **4 — Trakker** | ptrace-based sandbox, syscall tracing, network/write blocking, redirect | `209 some-app trakker --no-net` runs and produces trace JSON | Medium |
+| **5 — Polish** | Unified CLI, hooks, user scope, docs, packaging | distro-installable, documented | Medium |
 
 Phase 1 alone is a useful, shippable proof-of-concept even if later phases stall.
 
