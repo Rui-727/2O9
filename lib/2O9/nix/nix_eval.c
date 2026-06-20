@@ -120,37 +120,6 @@ nix_value_t *nix_env_lookup(nix_env_t *env, const char *name)
     return nix_env_lookup(env->parent, name);
 }
 
-/* ── Lexer (stub) ─────────────────────────────────────────────────── */
-
-struct nix_lexer {
-    const char *src;
-    size_t      len;
-    size_t      pos;
-    int         line;
-    int         col;
-};
-
-nix_lexer_t *nix_lexer_new(const char *source, size_t len)
-{
-    nix_lexer_t *lex = calloc(1, sizeof(*lex));
-    if (lex) {
-        lex->src  = source;
-        lex->len  = len;
-        lex->line = 1;
-        lex->col  = 1;
-    }
-    return lex;
-}
-
-void nix_lexer_free(nix_lexer_t *lex) { free(lex); }
-
-nix_token_t nix_lexer_next(nix_lexer_t *lex)
-{
-    nix_token_t tok = { .type = NIX_TOK_EOF, .line = lex->line, .col = lex->col };
-    /* TODO: implement full Nix lexer in Phase 3 */
-    return tok;
-}
-
 /* ── Parser (stub) ────────────────────────────────────────────────── */
 
 nix_ast_t *nix_parse(const char *source, size_t len, char **error)

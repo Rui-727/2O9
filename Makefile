@@ -21,7 +21,7 @@ DEFS = -D_GNU_SOURCE \
        -DBIN_DIR='"/.local/bin"' \
        -DLIB_DIR='"/.local/lib"'
 
-INCS = -Isrc -Isrc/store -Isrc/declarative -Isrc/aur
+INCS = -Isrc -Isrc/store -Isrc/declarative -Isrc/aur -Ilib/2O9/nix
 
 LIBS = -lcurl
 
@@ -29,12 +29,13 @@ CLI_SRC   = src/cli/main.c
 STORE_SRC = src/store/store.c src/store/symlinks.c
 DECL_SRC  = src/declarative/gen.c
 AUR_SRC   = src/aur/aur_rpc.c src/aur/cJSON.c src/aur/aur_build.c src/aur/aur_resolve.c
+NIX_SRC   = lib/2O9/nix/nix_eval.c lib/2O9/nix/nix_lexer.c
 
-SRC = $(CLI_SRC) $(STORE_SRC) $(DECL_SRC) $(AUR_SRC)
+SRC = $(CLI_SRC) $(STORE_SRC) $(DECL_SRC) $(AUR_SRC) $(NIX_SRC)
 
 OBJ = $(SRC:.c=.o)
 
-all: 209 test-aur-rpc
+all: 209 test-aur-rpc test-nix-lexer
 
 209: $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
@@ -42,11 +43,14 @@ all: 209 test-aur-rpc
 test-aur-rpc: src/aur/test_aur_rpc.o src/aur/aur_rpc.o src/aur/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^ -lcurl
 
+test-nix-lexer: lib/2O9/nix/test_nix_lexer.o lib/2O9/nix/nix_lexer.o lib/2O9/nix/nix_eval.o
+	$(CC) $(CFLAGS) -o $@ $^
+
 %.o: %.c
 	$(CC) $(CFLAGS) $(DEFS) $(INCS) -c -o $@ $<
 
 clean:
-	rm -f 209 test-aur-rpc $(OBJ) src/aur/test_aur_rpc.o
+	rm -f 209 test-aur-rpc test-nix-lexer $(OBJ) src/aur/test_aur_rpc.o lib/2O9/nix/test_nix_lexer.o
 
 install: 209
 	install -d $(DESTDIR)$(PREFIX)/bin
