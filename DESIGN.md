@@ -89,34 +89,39 @@ Putting packages in `/nix/store` instead of `/` creates two sub-problems, not
 one. Both are solved by modifying libalpm into lib209.
 
 **Problem 1: Making files visible.** A package in `/nix/store/<hash>-firefox/`
-has its binary at `/nix/store/<hash>-firefox/bin/firefox`, not
-`/usr/bin/firefox`. The answer is a **symlink farm**: each generation creates
-symlinks from conventional paths into the store.
+has its binary at `/nix/store/<hash>-firefox/bin/firefox`, not somewhere on
+`$PATH`. The answer is a **symlink farm** — but the symlinks go into each
+user's `~/.local/`, not into `/usr/bin/` or any system path.
 
 ```
 /nix/store/x3f-firefox-120/bin/firefox
 /nix/store/x3f-firefox-120/etc/firefox/...
-/nix/store/x3f-firefox-120/lib/firefox/...
 /nix/store/a91-neovim-0.9/bin/nvim
 /nix/store/a91-neovim-0.9/etc/nvim/...
           │
-          ▼  symlink farm (generation #42)
-/usr/bin/firefox  →  /nix/store/x3f-firefox-120/bin/firefox
-/usr/bin/nvim     →  /nix/store/a91-neovim-0.9/bin/nvim
-/etc/firefox      →  /nix/store/x3f-firefox-120/etc/firefox
-/etc/nvim         →  /nix/store/a91-neovim-0.9/etc/nvim
+          ▼  symlink farm (generation #42, for user alice)
+~/.local/bin/firefox   →  /nix/store/x3f-firefox-120/bin/firefox
+~/.local/bin/nvim      →  /nix/store/a91-neovim-0.9/bin/nvim
+~/.local/etc/firefox   →  /nix/store/x3f-firefox-120/etc/firefox
+~/.local/etc/nvim      →  /nix/store/a91-neovim-0.9/etc/nvim
 ```
 
-`/etc` files follow the same pattern as `/bin` and `/lib`: they live in the
-store and are symlinked into place. User edits to `/etc/foo` follow the symlink
-and write into the store — which means those edits are part of that generation.
-A rollback restores the old `/etc` symlinks, which point to the old store paths.
-(If you want persistent `/etc` edits across generations, that's what the Nix
-file is for — declare it there.)
+The user's shell includes `~/.local/bin` in `$PATH`. That's it. No system-wide
+`/usr/bin` symlinks. Every user gets their own symlink farm in their own
+`~/.local/`. Global packages from `2O9.nix` and per-user packages from
+`home.nix` all land in the same place — the user's `~/.local/`.
+
+`/etc` files follow the same pattern: they're symlinked into `~/.local/etc/`.
+User edits to `~/.local/etc/foo` follow the symlink and write into the store —
+which means those edits are part of that generation. A rollback restores the
+old symlinks, which point to the old store paths. (If you want persistent
+config across generations, declare it in the Nix file.)
 
 **Problem 2: Making the solver work.** libalpm's solver reads
 `/var/lib/pacman/local/` to know what's installed. It expects files at canonical
-paths like `/usr/bin/firefox`. If packages are in the store, the solver breaks.
+paths like `/usr/bin/firefox`. But in 2O9, nothing goes to `/usr/bin/` —
+it goes to `~/.local/bin/`. The solver still breaks, because it expects the
+old filesystem model. We fix it in lib209.
 
 We solve this in lib209: the "what's installed" query is rewritten to read from
 the generation DB instead of `/var/lib/pacman/local/`. The solver sees a
@@ -197,7 +202,8 @@ files visible at their conventional paths.
 
 - **Symlink farm builder**
   For each store path in a generation, create symlinks from conventional
-  locations (`/usr/bin/`, `/usr/lib/`, `/usr/share/`, `/etc/`) into the store.
+  locations (`~/.local/bin/`, `~/.local/lib/`, `~/.local/share/`, `~/.local/etc/`)
+  into the store.
   A **generation** = an ordered set of store paths + the symlink-farm manifest
   (the union view). `commit_generation()` atomically swaps the active profile
   symlink via `rename(2)` — that's the rollback primitive.
@@ -478,31 +484,40 @@ for everything:
 
 ### How profiles work — the 2O9 daemon
 
+Symlinks go into each user's `~/.local/`. The shell has `~/.local/bin` in
+`$PATH`. That's the visibility mechanism — no system-path writes, no
+`/usr/bin/` symlinks, no root needed for user packages.
+
 The global `2O9.nix` applies to **all users**. When `209 apply` runs, it
 evaluates the Nix file and produces one manifest for the whole system. Then it
-builds a symlink farm for each logged-in user, on **their** profile path:
+builds the symlink farm in each logged-in user's `~/.local/`:
 
 ```
 /etc/2O9/2O9.nix
         │
         ▼  209 apply (one manifest for everyone)
         │
-        ├── user alice:  ~/.local/state/2O9/profile  →  generation #42 symlink farm
-        ├── user bob:    ~/.local/state/2O9/profile  →  generation #42 symlink farm
-        └── system:      /nix/var/nix/profiles/per-user/2O9-system  →  generation #42
+        ├── user alice:  ~/.local/bin/*, ~/.local/etc/*, ~/.local/lib/*  →  store
+        ├── user bob:    ~/.local/bin/*, ~/.local/etc/*, ~/.local/lib/*  →  store
+        └── system:      /usr/bin/*, /usr/lib/*, /etc/*  →  store  (root only)
 ```
 
 The **2O9 daemon** (`209d`) runs in the background and tracks which users are
 logged in. When a new generation is committed, the daemon reapplies the symlink
-farm on each logged-in user's profile path. That's the whole job: watch for new
-generations, apply them to everyone who's logged in.
+farm in each logged-in user's `~/.local/`. That's the whole job: watch for new
+generations, apply symlinks on their path.
+
+System-level symlinks (`/usr/bin/`, `/usr/lib/`, `/etc/`) only exist for root
+and system services — they require root to create. User packages never touch
+system paths.
 
 A user's `home.nix` overlays on top of the global config — packages and
-settings in `home.nix` are added to that user's profile only, without affecting
-anyone else. The merge order (§7 above) determines what wins.
+settings in `home.nix` are added to that user's `~/.local/` only, without
+affecting anyone else. The merge order (§7 above) determines what wins.
 
-Per-user profiles use Nix's user-profile mechanism so unprivileged installs work
-without root, mirroring `nix profile` semantics.
+The shell integration is a single line: `PATH="~/.local/bin:$PATH"`. 2O9's
+install process adds it to `/etc/profile.d/2O9.sh` so every new shell picks it
+up automatically.
 
 ### Merge order (most-specific wins)
 
@@ -619,12 +634,12 @@ $ 209 apply
  2. reconcile(manifest, current-gen)  ──►  { +neovim, -old-editor, +chromium(AUR) }
  3. lib209 resolves neovim deps       ──►  transaction plan
  4. store adapter: pkg.tar.zst ──► /nix/store/x3f-neovim-0.9.5
-    symlink farm: /usr/bin/nvim → /nix/store/x3f-neovim-0.9.5/bin/nvim
-                  /etc/nvim     → /nix/store/x3f-neovim-0.9.5/etc/nvim
+    symlink farm: ~/.local/bin/nvim → /nix/store/x3f-neovim-0.9.5/bin/nvim
+                  ~/.local/etc/nvim → /nix/store/x3f-neovim-0.9.5/etc/nvim
  5. AUR helper: chromium PKGBUILD → review → makepkg (CFLAGS from 2O9.nix) → pkg.tar.zst
  6. store adapter: ──► /nix/store/a91-chromium-120
-    symlink farm: /usr/bin/chromium → /nix/store/a91-chromium-120/bin/chromium
-                  /etc/chromium     → /nix/store/a91-chromium-120/etc/chromium
+    symlink farm: ~/.local/bin/chromium → /nix/store/a91-chromium-120/bin/chromium
+                  ~/.local/etc/chromium → /nix/store/a91-chromium-120/etc/chromium
  7. commit generation #42  (profile symlink swapped)
 ✓ done.  rollback with: 209 41 rollback
 ```
@@ -741,7 +756,7 @@ Phase 1 alone is a useful, shippable proof-of-concept even if later phases stall
   run at generation-activation time, not at package-build time. Deferred to
   Phase 4 but flagged now.
 - **Symlink conflicts.** Two packages shipping the same path (e.g. both install
-  `/usr/bin/foo`) is a conflict in the symlink farm, just as it is in pacman
+  `~/.local/bin/foo`) is a conflict in the symlink farm, just as it is in pacman
   today. The store makes it visible earlier (at generation-commit time) rather
   than at install time, which is actually better — but it still needs a conflict
   resolution strategy.
