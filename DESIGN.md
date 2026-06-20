@@ -2,9 +2,9 @@
 
 **Working title:** 2O9 (stylized; the binary is `209`)
 **License:** GPL-2.0-only (inherited from pacman, the engine we link against)
-**Scope of this document:** architecture and integration strategy for combining
-pacman's libalpm, a C rewrite of paru's AUR workflow, and a real `/nix/store`
-with declarative configuration — into a single tool.
+**Scope of this document:** architecture for combining pacman's libalpm, a C rewrite
+of paru's AUR workflow, and a real `/nix/store` with declarative configuration —
+into a single tool.
 
 ---
 
@@ -51,39 +51,57 @@ These were settled up front and constrain the design:
 
 ---
 
-## 3. The core problem
+## 3. The core idea — `pacman.conf` becomes `2O9.nix`
 
-pacman and Nix have **opposite** filesystem models. This is the single hardest
-problem and the design is built around solving it.
+Everything starts from one observation: `pacman.conf` is already a declarative
+document — it lists what repos exist, what options are set, what packages to
+ignore. It just happens to live in an ini-like format that drifts and can't be
+versioned cleanly.
 
-| | pacman | Nix |
-|---|---|---|
-| Install target | `/` (root overlay) | `/nix/store/<hash>-name` |
-| Bookkeeping | `/var/lib/pacman/local/*` (files at canonical paths) | store paths + symlink profiles |
-| Multiple versions coexist | No (conflict = error) | Yes (distinguished by hash) |
-| Rollback | Manual / snapshots | Atomic generation switch |
+2O9 takes that and makes it real:
 
-If files go to `/nix/store`, pacman's local-db bookkeeping breaks — it expects
-`/usr/bin/firefox`, not `/nix/store/abc-firefox/bin/firefox`. If we lie to libalpm
-and keep extracting to `/`, we lose everything the store buys us.
+```
+pacman.conf  ──►  2O9.nix  (declarative, versionable, evaluable)
+                    │
+                    ├── pacman options  (SigLevel, ParallelDownloads, IgnorePkg, repos…)
+                    ├── package list    (binary + AUR)
+                    ├── AUR config      (build flags, optimizations — see §5.2)
+                    └── services        (what's enabled)
+```
 
-### The resolution: a store adapter behind libalpm
+There is **no `pacman.conf` file of any kind**. The `[options]` and `[repo]`
+sections are Nix attributes, and on `209 apply` the declarative engine feeds
+them **directly into libalpm's in-memory API** (`alpm_option_set`,
+`alpm_db_register_sync`, etc.). libalpm is never pointed at a config file; it
+is configured programmatically from the manifest, so the declaration is the
+single source of truth with nothing to drift out of sync.
 
-We treat libalpm as the **solver + metadata + hooks engine** and intercept its
-**install backend**. Instead of extracting a `.pkg.tar.zst` to `/`:
+### The store problem: `/nix/store/<hash>/bin`
 
-1. Extract to a staging directory.
-2. Compute a content-addressed hash over the unpacked tree (gives reproducibility
-   *by content* — note Arch pkgs are **not** Nix derivations, so we get
-   content-addressing, not Nix's deep input purity; see §11).
-3. Register the path in `/nix/store` via `nix-store --add-fixed`.
-4. Record the mapping `pacman-pkg → store-path` in 209's **generation database**.
-5. Repoint the active **profile symlink** to a generation that union-symlinks the
-   constituent store paths into view.
+When a package lands in `/nix/store/<hash>-pkgname/`, its files are at paths
+like `/nix/store/<hash>-firefox/bin/firefox`, not `/usr/bin/firefox`. The only
+hard problem is making those files appear where the system expects them.
 
-The pacman local DB is **kept but repurposed**: it continues to hold package
-metadata (deps, version, files-list) so pacman/AUR tooling stays sane, but its
-"installed path" semantics now point into the store.
+The answer is straightforward: **symlink farm**. Each generation is a set of
+union symlinks that map `/nix/store/<hash>/bin/*` → `/usr/bin/*`,
+`/nix/store/<hash>/lib/*` → `/usr/lib/*`, and so on. The profile symlink points
+at a generation; swapping that symlink is rollback.
+
+```
+/nix/store/x3f-firefox-120/bin/firefox
+/nix/store/x3f-firefox-120/lib/firefox/...
+/nix/store/a91-neovim-0.9/bin/nvim
+          │
+          ▼  symlink farm (generation #42)
+/usr/bin/firefox  →  /nix/store/x3f-firefox-120/bin/firefox
+/usr/bin/nvim     →  /nix/store/a91-neovim-0.9/bin/nvim
+/usr/lib/firefox  →  /nix/store/x3f-firefox-120/lib/firefox
+```
+
+That's it. No grand filesystem model clash — just symlinks from store paths to
+their conventional locations. The pacman local DB is kept for metadata (deps,
+version, files-list) so tooling stays sane, but "installed paths" now point into
+the store.
 
 ---
 
@@ -92,8 +110,8 @@ metadata (deps, version, files-list) so pacman/AUR tooling stays sane, but its
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  Unified CLI  (C)                                         │
-│  install | remove | search | aur | apply | rollback |    │
-│  generations | sync | news                                │
+│  <subject> <verb> — SOV order                            │
+│  nginx install | firefox remove | aur search | apply     │
 └──────────────┬───────────────────────────────────────────┘
                │
       ┌────────┴─────────┐
@@ -118,7 +136,7 @@ metadata (deps, version, files-list) so pacman/AUR tooling stays sane, but its
                            ▼
 ┌──────────────────────────────────────────────────────────┐
 │  Store Adapter (C)                                       │
-│  content-hash → nix-store --add → profile → generation   │
+│  pkg → /nix/store/<hash> → symlink farm → generation     │
 │  (orchestrates the `nix` binary via subprocess / JSON)   │
 └──────────────────────────────────────────────────────────┘
         │ subprocess / JSON
@@ -129,33 +147,35 @@ metadata (deps, version, files-list) so pacman/AUR tooling stays sane, but its
 Five components:
 
 1. **Unified CLI** — entrypoint, dispatch.
-2. **Declarative Engine** — turns config into a transaction.
-3. **AUR Helper** — builds packages that aren't in binary repos.
+2. **Declarative Engine** — turns `2O9.nix` into a transaction.
+3. **AUR Helper** — builds packages that aren't in binary repos, with
+   Gentoo-style build optimization (see §5.2).
 4. **libalpm** (copied-in, modified pacman tree) — solver + metadata + hooks.
-5. **Store Adapter** — the keystone; bridges libalpm's install path to the store.
+5. **Store Adapter** — puts packages in the store, then symlinks them into view.
 
 ---
 
 ## 5. Component designs
 
-### 5.1 Store Adapter (C) — the keystone
+### 5.1 Store Adapter (C) — symlink farm manager
 
-The adapter owns the boundary between libalpm's filesystem model and Nix's. It
-has one job: take a package and make it appear in the store, then in a profile.
+The adapter has one job: take a package, put it in the store, then make its
+files visible at their conventional paths.
 
 - **`stage_and_register(pkg, files)`**
   Extract `.pkg.tar.zst` to a staging dir → compute tree hash →
   `nix-store --add-fixed --recursive sha256 <staging>` → returns the store path.
   Idempotent: if the path already exists in the store, skip (dedup by content).
 
-- **Profile manager**
-  A **generation** = an ordered set of store paths + a symlink-farm manifest
+- **Symlink farm builder**
+  For each store path in a generation, create symlinks from conventional
+  locations (`/usr/bin/`, `/usr/lib/`, `/usr/share/`, etc.) into the store.
+  A **generation** = an ordered set of store paths + the symlink-farm manifest
   (the union view). `commit_generation()` atomically swaps the active profile
   symlink via `rename(2)` — that's the rollback primitive.
 
 - **Mapping table** (under `/var/lib/2O9`, format TBD between SQLite and a plain
-  directory of files): `pkgname-version → store-path → generation-id`. (Path uses
-  the stylized name; the command you run is `209`.)
+  directory of files): `pkgname-version → store-path → generation-id`.
 
 - **Rollback** = pick a prior generation id, repoint the profile symlink. Instant,
   because files never move. There is no "uninstall then reinstall"; the symlink
@@ -165,9 +185,10 @@ has one job: take a package and make it appear in the store, then in a profile.
   `nix-store --realise`, `nix-store --query`, `nix profile`, `nix-collect-garbage`.
   In/out is JSON or line-oriented stdout. We never `dlopen` or link Nix's C++.
 
-### 5.2 AUR Helper — paru ported to C
+### 5.2 AUR Helper — paru ported to C, with Gentoo-style build optimization
 
-Paru's responsibilities, mapped onto C libraries:
+Paru's responsibilities, mapped onto C libraries — plus a build-optimization
+layer inspired by Gentoo's `make.conf`:
 
 | paru (Rust) concern | C implementation in 2O9 |
 |---|---|
@@ -181,6 +202,68 @@ Paru's responsibilities, mapped onto C libraries:
 
 The resulting `.pkg.tar.*` is handed to the **store adapter** (not `pacman -U`),
 so AUR packages land in the store alongside binary ones.
+
+#### Build optimization (Gentoo-style)
+
+2O9's AUR config exposes the same knobs Gentoo users know from `make.conf`,
+so AUR packages are built with the user's chosen compiler flags and feature
+toggles instead of the upstream PKGBUILD defaults:
+
+```nix
+# In 2O9.nix, under aur:
+aur = {
+  # Per-package USE-style flags — enable/disable optional features
+  # before building. These are injected into the PKGBUILD's
+  # environment as environment variables or build flags.
+  flags = {
+    # Global defaults (applied to every AUR build unless overridden)
+    "*" = {
+      MAKEOPTS = "-j$(nproc)";
+      # Strip debug symbols for smaller packages
+      OPTIONS = [ "strip" "!debug" ];
+    };
+    # Per-package overrides
+    "ffmpeg" = {
+      ENABLE = [ "nvenc" "vaapi" "vulkan" ];
+      DISABLE = [ "alsa" ];
+      CFLAGS = "-march=native -O3 -pipe";
+    };
+    "neovim" = {
+      ENABLE = [ "lua" "python" ];
+    };
+  };
+
+  # Compiler optimization profiles — select one or define your own
+  # These expand into CFLAGS / CXXFLAGS / LDFLAGS for makepkg
+  optimize = {
+    profile = "native";   # native | safe | aggressive | custom
+    # Or explicit:
+    # CFLAGS    = "-march=native -O3 -pipe -fno-plt";
+    # CXXFLAGS  = "-march=native -O3 -pipe -fno-plt";
+    # LDFLAGS   = "-Wl,-O1 -Wl,--as-needed";
+    # RUSTFLAGS = "-C target-cpu=native";
+  };
+
+  # Parallel build jobs (overrides makepkg.conf MAKEFLAGS)
+  jobs = "auto";  # auto = nproc, or an integer
+};
+```
+
+The mapping from Gentoo concepts:
+
+| Gentoo (`make.conf`) | 2O9 (`2O9.nix` → `aur.flags`) | Effect |
+|---|---|---|
+| `USE="nvenc vaapi -alsa"` | `ENABLE = [ "nvenc" "vaapi" ]; DISABLE = [ "alsa" ]` | Feature toggles injected into PKGBUILD environment |
+| `CFLAGS="-march=native -O3"` | `optimize.CFLAGS = "..."` or `optimize.profile = "native"` | Compiler flags for all C/C++ AUR builds |
+| `MAKEOPTS="-j8"` | `jobs = 8` or `flags."*".MAKEOPTS` | Parallel build jobs |
+| `FEATURES="strip"` | `OPTIONS = [ "strip" ]` | Build-time features |
+
+The build optimization layer works by **patching the environment** that
+`makepkg` sees — it writes a temporary `makepkg.conf` overlay with the user's
+flags before invoking `makepkg`. The PKGBUILD itself is not modified; flags
+are injected via the environment, matching how Arch's own `makepkg.conf`
+works. Packages that respect standard build variables (`CFLAGS`, `CMAKEFLAGS`,
+etc.) pick up the optimization automatically.
 
 ### 5.3 Declarative Engine (C)
 
@@ -206,13 +289,10 @@ which yields a JSON **manifest**:
 }
 ```
 
-The `pacman` block **is** `2O9.nix` — there is no `pacman.conf`, not even a
-generated one. `[options]` and `[repo]` sections are expressed as Nix
-attributes, and on `209 apply` the declarative engine feeds them **directly into
-libalpm's in-memory API** (`alpm_option_set`, `alpm_db_register_sync`, etc.).
-libalpm is never pointed at a config file; it is configured programmatically from
-the manifest, so the declaration is the single source of truth with nothing to
-drift out of sync.
+The `pacman` block **is** `2O9.nix` — there is no `pacman.conf`. `[options]`
+and `[repo]` sections are Nix attributes, and on `209 apply` the declarative
+engine feeds them **directly into libalpm's in-memory API**. The declaration is
+the single source of truth with nothing to drift out of sync.
 
 The **reconciler** diffs manifest ↔ current generation DB and produces a
 transaction:
@@ -223,24 +303,44 @@ transaction:
 ```
 
 The transaction is executed through libalpm (configured in-memory from the
-manifest — no `pacman.conf` file) + the AUR helper + the store adapter.
+manifest) + the AUR helper + the store adapter.
 On success → `commit_generation()`. On failure → abort; the profile is untouched,
 so the system stays consistent. Because generations are symlinks, a half-applied
 transaction simply never gets its generation committed.
 
-### 5.4 Unified CLI
+### 5.4 Unified CLI — SOV order
+
+The CLI uses **Subject-Object-Verb** order. This is a deliberate design choice,
+not an aesthetic quirk.
+
+`209 nginx install` reads as "nginx. install. now." — direct, declarative,
+no ceremony. `209 install nginx` reads as "Excuse me, could you please install
+nginx if you have a moment?" — too polite for PID 1.
 
 pacman's `src/pacman/` frontend is the base for the CLI. The **binary is `209`**
-(numeric); the project/branding name is 2O9. Layered verbs:
+(numeric); the project/branding name is 2O9. Commands:
 
-| Verb | Origin | Scope |
+| Command | Meaning | Origin |
 |---|---|---|
-| `install` / `remove` / `sync` / `search` / `info` | pacman | both |
-| `aur` (search/build/review) | paru | both |
-| `apply` | new (declarative) | both |
-| `rollback <gen>` | new | both |
-| `generations` | new | both |
-| `news` | paru | both |
+| `209 <pkg> install` | Install a package | pacman |
+| `209 <pkg> remove` | Remove a package | pacman |
+| `209 <pkg> info` | Show package info | pacman |
+| `209 <term> search` | Search repos | pacman |
+| `209 <pkg> aur build` | Build from AUR | paru |
+| `209 <term> aur search` | Search AUR | paru |
+| `209 <pkg> aur review` | Review PKGBUILD diff | paru |
+| `209 apply` | Apply declarative config | new |
+| `209 <gen> rollback` | Roll back to generation | new |
+| `209 generations` | List generations | new |
+| `209 sync` | Sync repo databases | pacman |
+| `209 news` | Show Arch news | paru |
+
+**Special subjects:** `apply`, `generations`, `sync`, `news` are zero-argument
+commands — they have no subject, only a verb. These are the exceptions that
+prove the rule: they operate on the system as a whole, not on a named thing.
+
+**Multi-subject:** `209 nginx firefox install` installs both. The verb comes last,
+applied to everything before it.
 
 Backwards-compatible flags are preserved so existing muscle memory and scripts
 keep working. Scope (global vs user) is selected by flag / config (§7).
@@ -310,23 +410,24 @@ built-in defaults
 
 ### Two file kinds per scope
 
-- **`config.toml`** — *imperative tool settings*: AUR RPC URL, makepkg flags,
-  review policy, clean-after, news source. Successor to `paru.conf`. **Not** the
-  successor to `pacman.conf` — pacman's content is declarative state, so it lives
-  in the Nix file (see below).
+- **`config.toml`** — *imperative tool settings*: AUR RPC URL, review policy,
+  clean-after, news source. Successor to `paru.conf`. **Not** the successor to
+  `pacman.conf` — pacman's content is declarative state, so it lives in the Nix
+  file (see below).
 - **`*.nix`** — the *declarative manifest* (the file is conventionally named
   `2O9.nix`). Everything that is system **state**, not tool behavior: the package
-  list, the AUR list, services, **and the full `pacman.conf` content** (`[options]`
-  like `SigLevel`/`ParallelDownloads`/`IgnorePkg`, plus `[repo]` sections with
-  their server URLs). Evaluated by `nix eval --json` into the manifest the
-  reconciler consumes. There is **no `pacman.conf` file of any kind** — the engine
-  feeds the `pacman` block directly into libalpm's in-memory API.
+  list, the AUR list, build optimization flags, services, **and the full
+  `pacman.conf` content** (`[options]` like `SigLevel`/`ParallelDownloads`/
+  `IgnorePkg`, plus `[repo]` sections with their server URLs). Evaluated by
+  `nix eval --json` into the manifest the reconciler consumes. There is **no
+  `pacman.conf` file of any kind** — the engine feeds the `pacman` block directly
+  into libalpm's in-memory API.
 
 The split principle: **tool behavior** → `config.toml`; **what the system is** →
 `2O9.nix`. `pacman.conf` is "what the system is", so it's declarative — and the
 file it lives in *is* `2O9.nix`, with no config file ever written to disk.
 
-The imperative CLI (`209 install foo`) and the declarative path (`209 apply`)
+The imperative CLI (`209 foo install`) and the declarative path (`209 apply`)
 coexist: an imperative install is recorded as a layer on top of the current
 generation, so the system stays declarative-by-default but ad-hoc changes don't
 get lost.
@@ -341,14 +442,25 @@ $ 209 apply
  2. reconcile(manifest, current-gen)  ──►  { +neovim, -old-editor, +chromium(AUR) }
  3. libalpm resolves neovim deps      ──►  transaction plan
  4. store adapter: pkg.tar.zst ──► /nix/store/x3f-neovim-0.9.5
- 5. AUR helper: chromium PKGBUILD → review → makepkg → pkg.tar.zst
+    symlink: /nix/store/x3f-neovim-0.9.5/bin/nvim → /usr/bin/nvim
+ 5. AUR helper: chromium PKGBUILD → review → makepkg (with CFLAGS from 2O9.nix) → pkg.tar.zst
  6. store adapter: ──► /nix/store/a91-chromium-120
+    symlink: /nix/store/a91-chromium-120/bin/chromium → /usr/bin/chromium
  7. commit generation #42  (profile symlink swapped)
- 8. profile now union-symlinks neovim + chromium into view
-✓ done.  rollback with: 209 rollback 41
+ 8. /usr/bin/nvim and /usr/bin/chromium now point into the store
+✓ done.  rollback with: 209 41 rollback
 ```
 
-Each step is independently testable. Step 4 + 7 are the risky ones.
+Imperative equivalent — the same operations, one package at a time:
+
+```
+$ 209 neovim install
+$ 209 chromium aur build
+$ 209 41 rollback
+```
+
+Each step is independently testable. Step 4–6 are the store adapter + symlink
+farm work.
 
 ---
 
@@ -397,8 +509,8 @@ is exactly why it's first.
 | Phase | Goal | Exit criterion | Risk |
 |---|---|---|---|
 | **0 — Foundation** | Repo, meson build, copy pacman into `subprojects/`, C→`nix` subprocess spike, name/license settled | `209 -V` builds; one C program can `nix-store --add` a file | Low |
-| **1 — Store adapter MVP** | One binary package → store; one profile; one rollback | `209 install sl` → store path; `209 rollback` restores | **HIGH** |
-| **2 — paru → C port** | AUR RPC, clone, review, makepkg, into the store | `209 aur <pkg>` works end-to-end | Medium |
+| **1 — Store adapter MVP** | One binary package → store → symlink farm; one profile; one rollback | `209 sl install` → store path + symlink; `209 41 rollback` restores | **HIGH** |
+| **2 — paru → C port** | AUR RPC, clone, review, makepkg, into the store; build optimization flags | `209 <pkg> aur build` works end-to-end with custom CFLAGS | Medium |
 | **3 — Declarative engine** | `nix eval` manifest → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
 | **4 — Polish** | Unified CLI, hooks, user scope, docs, packaging | distro-installable, documented | Medium |
 
@@ -420,9 +532,10 @@ Phase 1 alone is a useful, shippable proof-of-concept even if later phases stall
 - **Hooks & `/etc` conffiles.** pacman runs install scripts and manages `/etc`.
   In a store model these need a strategy (NixOS-style activation scripts). Deferred
   to Phase 4 but flagged now.
-- **Solver/view coherence.** libalpm's solver must see a coherent "installed" set
-  drawn from the generation DB, not `/var/lib/pacman/local`. The fake-view
-  (§6) is the load-bearing piece; if it can't be made reliable, the whole approach
-  is in question. This is the Phase 1 risk.
+- **Symlink conflicts.** Two packages shipping the same path (e.g. both install
+  `/usr/bin/foo`) is a conflict in the symlink farm, just as it is in pacman
+  today. The store makes it visible earlier (at generation-commit time) rather
+  than at install time, which is actually better — but it still needs a conflict
+  resolution strategy.
 - **Scope realism.** "Full Nix store on pacman" is a multi-year, team-scale effort.
   The plan is structured so each phase produces something useful on its own.
