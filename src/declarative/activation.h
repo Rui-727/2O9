@@ -2,7 +2,7 @@
  *
  * Replaces pacman's .install scripts with an idempotent activation
  * phase that runs after packages are extracted into the store but
- * before the new generation is committed.
+ * before the new generation is reported as committed.
  *
  * From DESIGN.md §7 "Install scripts — the activation model":
  *
@@ -13,14 +13,26 @@
  *   5. Create/update users and groups
  *   6. daemon-reload     (systemctl daemon-reload)
  *   7. Enable/disable services (per 2O9.nix services block)
- *   8. Rebuild caches    (icon cache, desktop db, font cache)
+ *   8. Rebuild caches    (icon cache, desktop db, font cache, ldconfig)
  *   9. Start/restart services that changed in this generation
  *
  * All steps are idempotent — safe to run on every 209 apply.
+ * Missing helper tools (exit 127) are treated as non-fatal: a host
+ * without gtk-update-icon-cache just skips that step.
  *
- * Status: SKELETON. Step 7 (services enable/disable) is wired into
- * cmd_apply via activation_services_apply(); the other 8 steps are
- * stubbed with TODOs and will be filled in as Phase 5 polish work.
+ * Implementation notes:
+ *   - Step 2 is a no-op: the symlink farm already handles /etc/ entries
+ *     via the store_manifest is_config flag.
+ *   - Step 5 is a no-op: systemd-sysusers (step 3) covers the standard
+ *     case. Packages needing custom user creation outside sysusers.d
+ *     get a warning (DESIGN.md: "don't run .install scripts").
+ *   - Steps 3 and 4 invoke systemd-sysusers / systemd-tmpfiles with no
+ *     explicit file args, so they scan the default system directories
+ *     where the symlink farm has placed the configs. A future enhancement
+ *     is to pass explicit file lists from the new generation's store paths.
+ *   - Step 9 starts (not restarts) services — restart would disrupt
+ *     running sessions. The user should still reboot for full state
+ *     to take effect (DESIGN.md §7).
  */
 
 #ifndef TWO9_ACTIVATION_H
@@ -32,21 +44,25 @@
  *
  * Called by cmd_apply() after the new generation's packages are in
  * the store and the symlink farm is built, but before the generation
- * is committed.
+ * is reported as committed.
  *
- * Returns 0 on success, -1 on failure (aborts the apply).
+ * txn may be NULL (imperative install path) — services enable/disable
+ * is skipped, but daemon-reload, cache rebuild, and other idempotent
+ * steps still run.
+ *
+ * Returns 0 on success, -1 on failure (currently always returns 0;
+ * individual step failures are logged but non-fatal).
  */
 int activation_run(reconcile_txn_t *txn);
 
 /* Apply just the services step (enable/disable per manifest).
- * This is the only step currently wired up; extracted as a separate
- * function so cmd_apply can call it directly even before the full
- * activation_run() is complete. */
+ * Extracted as a separate function so it can be called independently
+ * (e.g. from tests or future imperative service commands). */
 int activation_services_apply(reconcile_txn_t *txn);
 
 /* Individual phase steps — each idempotent, each logs failures but
  * continues (a failed icon-cache rebuild shouldn't abort the whole
- * apply). These are stubs; implementations land in Phase 5. */
+ * apply). */
 int activation_stop_affected_services(reconcile_txn_t *txn);
 int activation_populate_etc_symlinks(void);
 int activation_apply_sysusers(void);

@@ -43,39 +43,39 @@
  * defined default_pkg_ops struct to work just fine for their needs.
  */
 struct pkg_operations {
-	const char *(*get_base) (alpm_pkg_t *);
-	const char *(*get_desc) (alpm_pkg_t *);
-	const char *(*get_url) (alpm_pkg_t *);
-	alpm_time_t (*get_builddate) (alpm_pkg_t *);
-	alpm_time_t (*get_installdate) (alpm_pkg_t *);
-	const char *(*get_packager) (alpm_pkg_t *);
-	const char *(*get_arch) (alpm_pkg_t *);
-	off_t (*get_isize) (alpm_pkg_t *);
-	alpm_pkgreason_t (*get_reason) (alpm_pkg_t *);
-	int (*get_validation) (alpm_pkg_t *);
-	int (*has_scriptlet) (alpm_pkg_t *);
+        const char *(*get_base) (alpm_pkg_t *);
+        const char *(*get_desc) (alpm_pkg_t *);
+        const char *(*get_url) (alpm_pkg_t *);
+        alpm_time_t (*get_builddate) (alpm_pkg_t *);
+        alpm_time_t (*get_installdate) (alpm_pkg_t *);
+        const char *(*get_packager) (alpm_pkg_t *);
+        const char *(*get_arch) (alpm_pkg_t *);
+        off_t (*get_isize) (alpm_pkg_t *);
+        alpm_pkgreason_t (*get_reason) (alpm_pkg_t *);
+        int (*get_validation) (alpm_pkg_t *);
+        int (*has_scriptlet) (alpm_pkg_t *);
 
-	alpm_list_t *(*get_licenses) (alpm_pkg_t *);
-	alpm_list_t *(*get_groups) (alpm_pkg_t *);
-	alpm_list_t *(*get_depends) (alpm_pkg_t *);
-	alpm_list_t *(*get_optdepends) (alpm_pkg_t *);
-	alpm_list_t *(*get_checkdepends) (alpm_pkg_t *);
-	alpm_list_t *(*get_makedepends) (alpm_pkg_t *);
-	alpm_list_t *(*get_conflicts) (alpm_pkg_t *);
-	alpm_list_t *(*get_provides) (alpm_pkg_t *);
-	alpm_list_t *(*get_replaces) (alpm_pkg_t *);
-	alpm_filelist_t *(*get_files) (alpm_pkg_t *);
-	alpm_list_t *(*get_backup) (alpm_pkg_t *);
+        alpm_list_t *(*get_licenses) (alpm_pkg_t *);
+        alpm_list_t *(*get_groups) (alpm_pkg_t *);
+        alpm_list_t *(*get_depends) (alpm_pkg_t *);
+        alpm_list_t *(*get_optdepends) (alpm_pkg_t *);
+        alpm_list_t *(*get_checkdepends) (alpm_pkg_t *);
+        alpm_list_t *(*get_makedepends) (alpm_pkg_t *);
+        alpm_list_t *(*get_conflicts) (alpm_pkg_t *);
+        alpm_list_t *(*get_provides) (alpm_pkg_t *);
+        alpm_list_t *(*get_replaces) (alpm_pkg_t *);
+        alpm_filelist_t *(*get_files) (alpm_pkg_t *);
+        alpm_list_t *(*get_backup) (alpm_pkg_t *);
 
-	void *(*changelog_open) (alpm_pkg_t *);
-	size_t (*changelog_read) (void *, size_t, const alpm_pkg_t *, void *);
-	int (*changelog_close) (const alpm_pkg_t *, void *);
+        void *(*changelog_open) (alpm_pkg_t *);
+        size_t (*changelog_read) (void *, size_t, const alpm_pkg_t *, void *);
+        int (*changelog_close) (const alpm_pkg_t *, void *);
 
-	struct archive *(*mtree_open) (alpm_pkg_t *);
-	int (*mtree_next) (const alpm_pkg_t *, struct archive *, struct archive_entry **);
-	int (*mtree_close) (const alpm_pkg_t *, struct archive *);
+        struct archive *(*mtree_open) (alpm_pkg_t *);
+        int (*mtree_next) (const alpm_pkg_t *, struct archive *, struct archive_entry **);
+        int (*mtree_close) (const alpm_pkg_t *, struct archive *);
 
-	int (*force_load) (alpm_pkg_t *);
+        int (*force_load) (alpm_pkg_t *);
 };
 
 /** The standard package operations struct. get fields directly from the
@@ -86,60 +86,66 @@ struct pkg_operations {
 extern const struct pkg_operations default_pkg_ops;
 
 struct __alpm_pkg_t {
-	unsigned long name_hash;
-	char *filename;
-	char *base;
-	char *name;
-	char *version;
-	char *desc;
-	char *url;
-	char *packager;
-	char *md5sum;
-	char *sha256sum;
-	char *base64_sig;
-	char *arch;
+        unsigned long name_hash;
+        char *filename;
+        char *base;
+        char *name;
+        char *version;
+        char *desc;
+        char *url;
+        char *packager;
+        char *md5sum;
+        char *sha256sum;
+        char *base64_sig;
+        char *arch;
 
-	alpm_time_t builddate;
-	alpm_time_t installdate;
+        alpm_time_t builddate;
+        alpm_time_t installdate;
 
-	off_t size;
-	off_t isize;
-	off_t download_size;
+        off_t size;
+        off_t isize;
+        off_t download_size;
 
-	alpm_handle_t *handle;
+        alpm_handle_t *handle;
 
-	alpm_list_t *licenses;
-	alpm_list_t *replaces;
-	alpm_list_t *groups;
-	alpm_list_t *backup;
-	alpm_list_t *depends;
-	alpm_list_t *optdepends;
-	alpm_list_t *checkdepends;
-	alpm_list_t *makedepends;
-	alpm_list_t *conflicts;
-	alpm_list_t *provides;
-	alpm_list_t *removes; /* in transaction targets only */
-	alpm_pkg_t *oldpkg; /* in transaction targets only */
+        alpm_list_t *licenses;
+        alpm_list_t *replaces;
+        alpm_list_t *groups;
+        alpm_list_t *backup;
+        alpm_list_t *depends;
+        alpm_list_t *optdepends;
+        alpm_list_t *checkdepends;
+        alpm_list_t *makedepends;
+        alpm_list_t *conflicts;
+        alpm_list_t *provides;
+        alpm_list_t *removes; /* in transaction targets only */
+        alpm_pkg_t *oldpkg; /* in transaction targets only */
 
-	const struct pkg_operations *ops;
+        const struct pkg_operations *ops;
 
-	alpm_filelist_t files;
+        alpm_filelist_t files;
 
-	/* origin == PKG_FROM_FILE, use pkg->origin_data.file
-	 * origin == PKG_FROM_*DB, use pkg->origin_data.db */
-	union {
-		alpm_db_t *db;
-		char *file;
-	} origin_data;
+        /* origin == PKG_FROM_FILE, use pkg->origin_data.file
+         * origin == PKG_FROM_*DB, use pkg->origin_data.db */
+        union {
+                alpm_db_t *db;
+                char *file;
+        } origin_data;
 
-	alpm_pkgfrom_t origin;
-	alpm_pkgreason_t reason;
-	int scriptlet;
+        alpm_pkgfrom_t origin;
+        alpm_pkgreason_t reason;
+        int scriptlet;
 
-	/* Bitfield from alpm_dbinfrq_t */
-	int infolevel;
-	/* Bitfield from alpm_pkgvalidation_t */
-	int validation;
+        /* Bitfield from alpm_dbinfrq_t */
+        int infolevel;
+        /* Bitfield from alpm_pkgvalidation_t */
+        int validation;
+
+        /* 2O9: store path for packages installed via the install_backend
+         * dispatch (MODIFICATIONS.md #1). NULL for packages that went
+         * through pacman's default extraction. Owned by the package,
+         * freed in _alpm_pkg_free(). */
+        char *two9_store_path;
 };
 
 alpm_file_t *_alpm_file_copy(alpm_file_t *dest, const alpm_file_t *src);
@@ -150,10 +156,10 @@ void _alpm_pkg_free(alpm_pkg_t *pkg);
 void _alpm_pkg_free_trans(alpm_pkg_t *pkg);
 
 int _alpm_pkg_validate_internal(alpm_handle_t *handle,
-		const char *pkgfile, alpm_pkg_t *syncpkg, int level,
-		alpm_siglist_t **sigdata, int *validation);
+                const char *pkgfile, alpm_pkg_t *syncpkg, int level,
+                alpm_siglist_t **sigdata, int *validation);
 alpm_pkg_t *_alpm_pkg_load_internal(alpm_handle_t *handle,
-		const char *pkgfile, int full);
+                const char *pkgfile, int full);
 
 int _alpm_pkg_cmp(const void *p1, const void *p2);
 int _alpm_pkg_compare_versions(alpm_pkg_t *local_pkg, alpm_pkg_t *pkg);

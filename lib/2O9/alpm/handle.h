@@ -33,90 +33,104 @@
 
 #define EVENT(h, e) \
 do { \
-	if((h)->eventcb) { \
-		(h)->eventcb((h)->eventcb_ctx, (alpm_event_t *) (e)); \
-	} \
+        if((h)->eventcb) { \
+                (h)->eventcb((h)->eventcb_ctx, (alpm_event_t *) (e)); \
+        } \
 } while(0)
 #define QUESTION(h, q) \
 do { \
-	if((h)->questioncb) { \
-		(h)->questioncb((h)->questioncb_ctx, (alpm_question_t *) (q)); \
-	} \
+        if((h)->questioncb) { \
+                (h)->questioncb((h)->questioncb_ctx, (alpm_question_t *) (q)); \
+        } \
 } while(0)
 #define PROGRESS(h, e, p, per, n, r) \
 do { \
-	if((h)->progresscb) { \
-		(h)->progresscb((h)->progresscb_ctx, e, p, per, n, r); \
-	} \
+        if((h)->progresscb) { \
+                (h)->progresscb((h)->progresscb_ctx, e, p, per, n, r); \
+        } \
 } while(0)
 
 struct __alpm_handle_t {
-	/* internal usage */
-	alpm_db_t *db_local;    /* local db pointer */
-	alpm_list_t *dbs_sync;  /* List of (alpm_db_t *) */
-	FILE *logstream;        /* log file stream pointer */
-	alpm_trans_t *trans;
+        /* internal usage */
+        alpm_db_t *db_local;    /* local db pointer */
+        alpm_list_t *dbs_sync;  /* List of (alpm_db_t *) */
+        FILE *logstream;        /* log file stream pointer */
+        alpm_trans_t *trans;
 
 #ifdef HAVE_LIBCURL
-	/* libcurl handle */
-	CURLM *curlm;
-	alpm_list_t *server_errors;
+        /* libcurl handle */
+        CURLM *curlm;
+        alpm_list_t *server_errors;
 #endif
 
-	unsigned short disable_dl_timeout;
-	unsigned int parallel_downloads; /* number of download streams */
+        unsigned short disable_dl_timeout;
+        unsigned int parallel_downloads; /* number of download streams */
 
 #ifdef HAVE_LIBGPGME
-	alpm_list_t *known_keys;  /* keys verified to be in our keychain */
+        alpm_list_t *known_keys;  /* keys verified to be in our keychain */
 #endif
 
-	/* callback functions */
-	alpm_cb_log logcb;          /* Log callback function */
-	void *logcb_ctx;
-	alpm_cb_download dlcb;      /* Download callback function */
-	void *dlcb_ctx;
-	alpm_cb_fetch fetchcb;      /* Download file callback function */
-	void *fetchcb_ctx;
-	alpm_cb_event eventcb;
-	void *eventcb_ctx;
-	alpm_cb_question questioncb;
-	void *questioncb_ctx;
-	alpm_cb_progress progresscb;
-	void *progresscb_ctx;
+        /* callback functions */
+        alpm_cb_log logcb;          /* Log callback function */
+        void *logcb_ctx;
+        alpm_cb_download dlcb;      /* Download callback function */
+        void *dlcb_ctx;
+        alpm_cb_fetch fetchcb;      /* Download file callback function */
+        void *fetchcb_ctx;
+        alpm_cb_event eventcb;
+        void *eventcb_ctx;
+        alpm_cb_question questioncb;
+        void *questioncb_ctx;
+        alpm_cb_progress progresscb;
+        void *progresscb_ctx;
 
-	/* filesystem paths */
-	char *root;              /* Root path, default '/' */
-	char *dbpath;            /* Base path to pacman's DBs */
-	char *logfile;           /* Name of the log file */
-	char *lockfile;          /* Name of the lock file */
-	char *gpgdir;            /* Directory where GnuPG files are stored */
-	alpm_list_t *cachedirs;  /* Paths to pacman cache directories */
-	alpm_list_t *hookdirs;   /* Paths to hook directories */
-	alpm_list_t *overwrite_files; /* Paths that may be overwritten */
+        /* filesystem paths */
+        char *root;              /* Root path, default '/' */
+        char *dbpath;            /* Base path to pacman's DBs */
+        char *logfile;           /* Name of the log file */
+        char *lockfile;          /* Name of the lock file */
+        char *gpgdir;            /* Directory where GnuPG files are stored */
+        alpm_list_t *cachedirs;  /* Paths to pacman cache directories */
+        alpm_list_t *hookdirs;   /* Paths to hook directories */
+        alpm_list_t *overwrite_files; /* Paths that may be overwritten */
 
-	/* package lists */
-	alpm_list_t *noupgrade;   /* List of packages NOT to be upgraded */
-	alpm_list_t *noextract;   /* List of files NOT to extract */
-	alpm_list_t *ignorepkg;   /* List of packages to ignore */
-	alpm_list_t *ignoregroup; /* List of groups to ignore */
-	alpm_list_t *assumeinstalled;   /* List of virtual packages used to satisfy dependencies */
+        /* package lists */
+        alpm_list_t *noupgrade;   /* List of packages NOT to be upgraded */
+        alpm_list_t *noextract;   /* List of files NOT to extract */
+        alpm_list_t *ignorepkg;   /* List of packages to ignore */
+        alpm_list_t *ignoregroup; /* List of groups to ignore */
+        alpm_list_t *assumeinstalled;   /* List of virtual packages used to satisfy dependencies */
 
-	/* options */
-	alpm_list_t *architectures; /* Architectures of packages we should allow */
-	int usesyslog;           /* Use syslog instead of logfile? */ /* TODO move to frontend */
-	int checkspace;          /* Check disk space before installing */
-	char *dbext;             /* Sync DB extension */
-	int siglevel;            /* Default signature verification level */
-	int localfilesiglevel;   /* Signature verification level for local file
-	                                       upgrade operations */
-	int remotefilesiglevel;  /* Signature verification level for remote file
-	                                       upgrade operations */
+        /* options */
+        alpm_list_t *architectures; /* Architectures of packages we should allow */
+        int usesyslog;           /* Use syslog instead of logfile? */ /* TODO move to frontend */
+        int checkspace;          /* Check disk space before installing */
+        char *dbext;             /* Sync DB extension */
+        int siglevel;            /* Default signature verification level */
+        int localfilesiglevel;   /* Signature verification level for local file
+                                               upgrade operations */
+        int remotefilesiglevel;  /* Signature verification level for remote file
+                                               upgrade operations */
 
-	/* error code */
-	alpm_errno_t pm_errno;
+        /* error code */
+        alpm_errno_t pm_errno;
 
-	/* lock file descriptor */
-	int lockfd;
+        /* lock file descriptor */
+        int lockfd;
+
+        /* 2O9: install backend dispatch — when non-NULL, libalpm's
+         * extract_single_file() calls this instead of extracting to
+         * handle->root. The backend puts files in /nix/store and
+         * returns the store path. When NULL, pacman's default
+         * extraction is preserved. See MODIFICATIONS.md #1. */
+        char *(*install_backend)(alpm_handle_t *handle, alpm_pkg_t *pkg,
+                                 const char *pkgfile_path);
+
+        /* 2O9: installed-set source — when non-NULL, the local DB's
+         * populate step calls this instead of reading
+         * /var/lib/pacman/local/. The callback populates the pkgcache
+         * from the 2O9 generation DB. See MODIFICATIONS.md #2. */
+        int (*installed_set_loader)(alpm_handle_t *handle, alpm_db_t *db);
 };
 
 alpm_handle_t *_alpm_handle_new(void);
@@ -126,6 +140,6 @@ int _alpm_handle_lock(alpm_handle_t *handle);
 int _alpm_handle_unlock(alpm_handle_t *handle);
 
 alpm_errno_t _alpm_set_directory_option(const char *value,
-		char **storage, int must_exist);
+                char **storage, int must_exist);
 
 #endif /* ALPM_HANDLE_H */

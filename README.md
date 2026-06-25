@@ -257,14 +257,31 @@ Honest accounting of what works versus what is planned.
 
 - **Phase 0 — Foundation: DONE.** Repo, Makefile, build works, four targets
   compile and link.
-- **Phase 1 — Store adapter MVP: PARTIAL.** The store adapter (`src/store/`)
-  and symlink farm (`src/store/symlinks.c`) are implemented, as is the
-  file-based generation DB (`src/declarative/gen.c`). The lib2O9 modifications
-  to libalpm are **not yet applied** — all three modifications in
-  `lib/2O9/alpm/MODIFICATIONS.md` are still marked "Planned", none committed.
-  The `209` binary currently operates **independently of libalpm**, using the
-  store adapter and generation DB directly. Phase 1 is the make-or-break work
-  that remains.
+- **Phase 1 — Store adapter MVP: PARTIAL → MODIFICATIONS APPLIED.** The
+  store adapter (`src/store/`) and symlink farm (`src/store/symlinks.c`)
+  are implemented, as is the file-based generation DB
+  (`src/declarative/gen.c`). **All three lib2O9 modifications to vendored
+  libalpm are now applied** to the source tree (see
+  [`lib/2O9/alpm/MODIFICATIONS.md`](./lib/2O9/alpm/MODIFICATIONS.md)):
+  1. **Install backend dispatch** — `alpm_handle_t.install_backend`
+     function pointer checked in `add.c`'s `commit_single_pkg()`; when
+     set, libalpm hands the .pkg.tar.* to the 2O9 store adapter instead
+     of extracting to `handle->root`.
+  2. **Installed-set query** — `alpm_handle_t.installed_set_loader`
+     checked in `be_local.c`'s `local_db_populate()`; when set, libalpm
+     calls it instead of reading `/var/lib/pacman/local/`.
+  3. **Config entrypoint** — new `lib/2O9/alpm/two9_init.c` provides
+     `two9_alpm_init_from_manifest()` which configures an
+     `alpm_handle_t` programmatically from a 2O9 manifest JSON, never
+     reading `/etc/pacman.conf`.
+
+  The modifications are marked with `/* 2O9: ... */` comments per the
+  design spec. **lib2O9 is not yet built into the 209 binary** —
+  building it requires libarchive-dev, openssl-dev, and optionally
+  libgpgme-dev. The `209` binary continues to operate independently of
+  libalpm until those deps are added to the Makefile and `lib2O9.a` is
+  linked. The modifications are real, auditable C code changes ready to
+  be exercised once lib2O9 is built.
 - **Phase 2 — paru → C port: DONE.** AUR RPC client (`src/aur/aur_rpc.c`,
   libcurl), PKGBUILD clone + makepkg orchestration (`aur_build.c`), recursive
   AUR dependency resolver (`aur_resolve.c`). `test-aur-rpc` works against the
@@ -276,19 +293,26 @@ Honest accounting of what works versus what is planned.
   operator precedence levels, `inherit (src) ident;` form, dot-notation
   select for `builtins.*`). 49/49 evaluator tests pass. The generation DB
   and reconciler are implemented. `209 apply` evaluates `2O9.nix` and
-  commits generations. See
+  commits generations. **User-scope `home.nix` is now wired in**:
+  `cmd_apply` evaluates both `~/.config/2O9/home.nix` and
+  `/etc/2O9/2O9.nix`, merges them per DESIGN.md §7 (global wins on
+  conflict, packages concatenate), then reconciles. See
   [`lib/2O9/nix/README.md`](./lib/2O9/nix/README.md) for details.
 - **Phase 4 — Trakker: DONE.** `src/trakker/trakker.c` implements the
   ptrace-based sandbox with the `trakker_policy_t` struct, event recording
   (file, network, process, memory), and all four restriction flags.
-- **Phase 5 — Polish: IN PROGRESS.** The 9-step activation phase skeleton
-  is in place (`src/declarative/activation.{c,h}`) — step 7 (services
-  enable/disable) is real, the other 8 are stubs. `209 news` is implemented
-  (fetches the Arch Linux RSS feed). `209 <pkg> info` and `209 <term> search`
-  work against the local generation DB and fall back to AUR. `test/` and
-  `docs/` directories exist with planning docs. Remaining Phase 5 work:
-  full activation phase implementation, `209 sync` (needs lib2O9), user-scope
-  `home.nix` wiring, packaging.
+- **Phase 5 — Polish: IN PROGRESS.** The 9-step activation phase is
+  fully implemented (`src/declarative/activation.{c,h}`) and wired into
+  `cmd_apply` — runs after the symlink farm, before the final report.
+  All 9 steps invoke real `systemctl`/`systemd-sysusers`/
+  `systemd-tmpfiles`/cache-rebuild commands (or are intentional no-ops
+  where the symlink farm covers them). `209 news` fetches the Arch
+  Linux RSS feed. `209 <pkg> info` and `209 <term> search` work
+  against the local generation DB and fall back to AUR. `209 sync`
+  downloads repo .db files via libcurl to `/var/cache/2O9/pkg/`.
+  `test/` and `docs/` directories exist with planning docs. Remaining
+  Phase 5 work: link lib2O9 into the 209 binary (needs libarchive-dev
+  + openssl-dev), packaging, full integration testing.
 
 ## Roadmap
 

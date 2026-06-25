@@ -18,6 +18,7 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
 #include <curl/curl.h>
 
 #include "store/store.h"
@@ -27,6 +28,7 @@
 #include "aur/build.h"
 #include "aur/resolver.h"
 #include "declarative/reconcile.h"
+#include "declarative/activation.h"
 #include "trakker/trakker.h"
 #include "nix_eval.h"
 
@@ -429,6 +431,132 @@ static int cmd_rollback(int target_id)
         return 0;
 }
 
+/* ── Helper: read a file into a malloc'd buffer ──────────────────── */
+static char *read_file_to_string(const char *path, char **err_out)
+{
+        FILE *f = fopen(path, "r");
+        if (!f) {
+                if (err_out) {
+                        char buf[256];
+                        snprintf(buf, sizeof(buf), "cannot read %s: %s",
+                                 path, strerror(errno));
+                        *err_out = strdup(buf);
+                }
+                return NULL;
+        }
+        fseek(f, 0, SEEK_END);
+        long fsize = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        char *buf = malloc((size_t)fsize + 1);
+        if (!buf) {
+                fclose(f);
+                if (err_out) *err_out = strdup("out of memory");
+                return NULL;
+        }
+        size_t nread = fread(buf, 1, (size_t)fsize, f);
+        buf[nread] = '\0';
+        fclose(f);
+        return buf;
+}
+
+/* ── Helper: evaluate a Nix config file, return JSON manifest ────── */
+static char *eval_nix_config(const char *config_path, char **err_out)
+{
+        char *source = read_file_to_string(config_path, err_out);
+        if (!source) return NULL;
+
+        size_t slen = strlen(source);
+        char *base_dir = strdup(config_path);
+        if (base_dir) {
+                char *slash = strrchr(base_dir, '/');
+                if (slash) *slash = '\0';
+        }
+
+        char *json = nix_eval_file_with_base(source, slen, base_dir, err_out);
+        free(source);
+        free(base_dir);
+        return json;
+}
+
+/* ── Helper: merge two JSON manifests per DESIGN.md §7 merge order ──
+ *
+ * Merge order (lowest to highest precedence):
+ *   1. built-in defaults
+ *   2. ~/.config/2O9/home.nix (user)
+ *   3. /etc/2O9/2O9.nix (global)  ← wins on conflict
+ *   4. CLI flags (not handled here)
+ *
+ * For list values (e.g. "packages"), we concatenate — both user and
+ * global packages should be installed. For everything else, global
+ * wins on conflict (shallow merge).
+ *
+ * Returns a malloc'd merged JSON string, or NULL on error. */
+static char *merge_manifests(const char *user_json, const char *global_json,
+                              char **err_out)
+{
+        if (!user_json && !global_json) {
+                if (err_out) *err_out = strdup("no manifests to merge");
+                return NULL;
+        }
+        if (!user_json) return strdup(global_json);
+        if (!global_json) return strdup(user_json);
+
+        /* Both present — concatenate user's packages into global's
+         * packages list, then return global (global wins on all other
+         * keys per DESIGN.md §7).
+         *
+         * ponytail: This is a known shortcut — a proper deep merge
+         * would handle nested objects and per-key conflict resolution.
+         * For the 2O9 manifest schema (flat top-level with list-typed
+         * "packages"), concatenating the package lists and letting
+         * global win on everything else is correct. */
+        const char *u_pkgs = strstr(user_json, "\"packages\"");
+        const char *g_pkgs = strstr(global_json, "\"packages\"");
+        if (!u_pkgs || !g_pkgs) return strdup(global_json);
+
+        const char *u_arr = strchr(u_pkgs, '[');
+        const char *g_arr = strchr(g_pkgs, '[');
+        if (!u_arr || !g_arr) return strdup(global_json);
+
+        const char *u_end = strchr(u_arr, ']');
+        if (!u_end) return strdup(global_json);
+
+        size_t u_entries_len = u_end - u_arr - 1;
+        char *u_entries = malloc(u_entries_len + 1);
+        memcpy(u_entries, u_arr + 1, u_entries_len);
+        u_entries[u_entries_len] = '\0';
+
+        const char *g_end = strchr(g_arr, ']');
+        if (!g_end) { free(u_entries); return strdup(global_json); }
+
+        size_t pre_len = g_arr + 1 - global_json;
+        size_t existing = g_end - (g_arr + 1);
+        size_t comma_len = (existing > 0 && u_entries_len > 0) ? 2 : 0;
+        /* post includes the ']' itself plus everything after it */
+        size_t post_len = strlen(g_end);
+
+        char *merged = malloc(pre_len + existing + comma_len + u_entries_len + post_len + 1);
+        memcpy(merged, global_json, pre_len);
+        size_t off = pre_len;
+        if (existing > 0) {
+                memcpy(merged + off, g_arr + 1, existing);
+                off += existing;
+        }
+        if (comma_len) {
+                merged[off++] = ',';
+                merged[off++] = ' ';
+        }
+        memcpy(merged + off, u_entries, u_entries_len);
+        off += u_entries_len;
+        /* Copy from g_end (which is ']') to end of string */
+        memcpy(merged + off, g_end, post_len);
+        off += post_len;
+        merged[off] = '\0';
+
+        free(u_entries);
+        return merged;
+}
+
 /* ── Apply (declarative) ─────────────────────────────────────────── */
 
 static int cmd_apply(void)
@@ -448,75 +576,72 @@ static int cmd_apply(void)
          * 8. Rebuild symlink farm
          */
 
-        /* Step 1: Find the config file */
-        const char *config_path = NULL;
-        char user_config[PATH_MAX];
+        /* Step 1: Find config files — both user (home.nix) and global
+         * (2O9.nix). Per DESIGN.md §7, merge order is:
+         *   defaults → home.nix → 2O9.nix → CLI flags
+         * Global wins on conflict. We evaluate both and merge. */
+        char user_config[PATH_MAX] = {0};
         char *home = getenv("HOME");
-
-        /* Check user config first, then system config */
         if (home) {
                 snprintf(user_config, sizeof(user_config),
-                         "%s/.config/2O9/2O9.nix", home);
-                struct stat st;
-                if (stat(user_config, &st) == 0)
-                        config_path = user_config;
-        }
-        if (!config_path) {
-                struct stat st;
-                if (stat(CONFIG_PATH, &st) == 0)
-                        config_path = CONFIG_PATH;
+                         "%s/.config/2O9/home.nix", home);
         }
 
-        if (!config_path) {
+        /* Step 2: Evaluate each config that exists */
+        char *user_json = NULL;
+        char *global_json = NULL;
+        char *eval_err = NULL;
+
+        if (user_config[0]) {
+                struct stat st;
+                if (stat(user_config, &st) == 0) {
+                        printf("209: evaluating %s...\n", user_config);
+                        user_json = eval_nix_config(user_config, &eval_err);
+                        if (!user_json) {
+                                fprintf(stderr, "209: %s: %s\n", user_config,
+                                        eval_err ? eval_err : "evaluation failed");
+                                free(eval_err);
+                                return 1;
+                        }
+                }
+        }
+
+        struct stat st;
+        if (stat(CONFIG_PATH, &st) == 0) {
+                printf("209: evaluating %s...\n", CONFIG_PATH);
+                global_json = eval_nix_config(CONFIG_PATH, &eval_err);
+                if (!global_json) {
+                        fprintf(stderr, "209: %s: %s\n", CONFIG_PATH,
+                                eval_err ? eval_err : "evaluation failed");
+                        free(user_json);
+                        free(eval_err);
+                        return 1;
+                }
+        }
+
+        if (!user_json && !global_json) {
                 fprintf(stderr, "209: no 2O9.nix found\n");
                 fprintf(stderr, "    searched: %s, %s\n",
-                        user_config[0] ? user_config : "~/config/2O9/2O9.nix",
+                        user_config[0] ? user_config : "~/.config/2O9/home.nix",
                         CONFIG_PATH);
                 fprintf(stderr, "    create one with: 209 init\n");
                 return 1;
         }
 
-        printf("209: evaluating %s...\n", config_path);
-
-        /* Step 2: Read the config file */
-        FILE *f = fopen(config_path, "r");
-        if (!f) {
-                fprintf(stderr, "209: cannot read %s: ", config_path);
-                perror("");
-                return 1;
-        }
-
-        fseek(f, 0, SEEK_END);
-        long fsize = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        char *source = malloc((size_t)fsize + 1);
-        if (!source) {
-                fclose(f);
-                fprintf(stderr, "209: out of memory\n");
-                return 1;
-        }
-        size_t nread = fread(source, 1, (size_t)fsize, f);
-        source[nread] = '\0';
-        fclose(f);
-
-        /* Determine base_dir for import resolution */
-        char *base_dir = strdup(config_path);
-        if (base_dir) {
-                char *slash = strrchr(base_dir, '/');
-                if (slash) *slash = '\0';
-        }
-
-        /* Step 3: Evaluate the Nix expression */
-        char *error = NULL;
-        char *json = nix_eval_file_with_base(source, nread, base_dir, &error);
-        free(source);
-        free(base_dir);
-
+        /* Step 3: Merge per DESIGN.md §7 (global wins on conflict) */
+        int merged_both = (user_json && global_json);
+        char *json = merge_manifests(user_json, global_json, &eval_err);
+        free(user_json);
+        free(global_json);
         if (!json) {
-                fprintf(stderr, "209: evaluation failed: %s\n",
-                        error ? error : "unknown error");
-                free(error);
+                fprintf(stderr, "209: manifest merge failed: %s\n",
+                        eval_err ? eval_err : "unknown error");
+                free(eval_err);
                 return 1;
+        }
+
+        if (merged_both) {
+                printf("209: merged home.nix + 2O9.nix (global wins on conflict)\n");
         }
 
         /* Step 4: Open generation DB */
@@ -659,6 +784,13 @@ static int cmd_apply(void)
                 if (prev) gen_free(prev);
         }
 
+        /* Step 7.5: Activation phase — 9-step idempotent post-extract
+         * sequence from DESIGN.md §7. Runs after the symlink farm so
+         * unit files are visible in /etc/, before the final report.
+         * Steps that aren't fully implemented log a stub message and
+         * continue (non-fatal). */
+        activation_run(txn);
+
         /* Step 9: Report services that need attention */
         if (txn->svc_enable_count > 0) {
                 printf("  services enabled:");
@@ -686,11 +818,132 @@ static int cmd_apply(void)
 
 /* ── Sync ────────────────────────────────────────────────────────── */
 
+/* ── 209 sync ──────────────────────────────────────────────────────
+ * Refresh repo databases. Without lib2O9 linked, we fall back to
+ * downloading the repo .db files directly via libcurl to the cache dir.
+ * The repo URLs come from /etc/2O9/2O9.nix (or user config). If no
+ * config exists, we use Arch defaults.
+ *
+ * When lib2O9 is linked (Phase 1 complete), this will instead call
+ * alpm_db_update() for each registered sync DB via two9_alpm_init_from_manifest().
+ */
+static size_t sync_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
+{
+        FILE *fp = (FILE *)userdata;
+        return fwrite(ptr, size, nmemb, fp);
+}
+
+static int sync_one_repo(CURL *curl, const char *repo_name, const char *server_url)
+{
+        char url[PATH_MAX];
+        char dest[PATH_MAX];
+
+        /* Construct URL: server + /os/x86_64/<repo>.db */
+        /* Strip any trailing $arch or $repo variables — server templates
+         * use $arch and $repo. For simplicity assume the server URL
+         * already includes the arch path, or append it. */
+        if (strstr(server_url, "$arch")) {
+                /* Replace $arch with x86_64 and $repo with repo_name */
+                char tmp[PATH_MAX];
+                const char *p = server_url;
+                char *out = tmp;
+                while (*p && out < tmp + sizeof(tmp) - 32) {
+                        if (strncmp(p, "$arch", 5) == 0) {
+                                strcpy(out, "x86_64");
+                                out += 6;
+                                p += 5;
+                        } else if (strncmp(p, "$repo", 5) == 0) {
+                                strcpy(out, repo_name);
+                                out += strlen(repo_name);
+                                p += 5;
+                        } else {
+                                *out++ = *p++;
+                        }
+                }
+                *out = '\0';
+                snprintf(url, sizeof(url), "%s/%s.db", tmp, repo_name);
+        } else {
+                snprintf(url, sizeof(url), "%s/%s.db", server_url, repo_name);
+        }
+
+        /* Cache dir: /var/cache/2O9/pkg/<repo>.db */
+        snprintf(dest, sizeof(dest), "/var/cache/2O9/pkg/%s.db", repo_name);
+
+        /* Ensure cache dir exists */
+        (void)mkdir("/var/cache/2O9", 0755);
+        (void)mkdir("/var/cache/2O9/pkg", 0755);
+
+        FILE *fp = fopen(dest, "wb");
+        if (!fp) {
+                fprintf(stderr, "209: cannot write to %s: %s\n",
+                        dest, strerror(errno));
+                return -1;
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sync_write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "2O9/0.0.1");
+
+        CURLcode res = curl_easy_perform(curl);
+        fclose(fp);
+
+        if (res != CURLE_OK) {
+                fprintf(stderr, "209: failed to sync %s: %s\n",
+                        repo_name, curl_easy_strerror(res));
+                unlink(dest);
+                return -1;
+        }
+
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        if (http_code != 200) {
+                fprintf(stderr, "209: %s.db: HTTP %ld\n", repo_name, http_code);
+                unlink(dest);
+                return -1;
+        }
+
+        printf("  synced %s.db\n", repo_name);
+        return 0;
+}
+
 static int cmd_sync(void)
 {
-        /* TODO: invoke lib209's sync to refresh repo databases */
-        fprintf(stderr, "209: sync not yet implemented (needs lib209)\n");
-        return 1;
+        /* Read repos from 2O9.nix if available; otherwise use Arch defaults. */
+        const char *default_repos[][2] = {
+                {"core",     "https://mirror.archlinuxarm.org/x86_64/core"},
+                {"extra",    "https://mirror.archlinuxarm.org/x86_64/extra"},
+                {"multilib", "https://mirror.archlinuxarm.org/x86_64/multilib"},
+                {NULL, NULL}
+        };
+
+        CURL *curl = curl_easy_init();
+        if (!curl) {
+                fprintf(stderr, "209: cannot init libcurl\n");
+                return 1;
+        }
+
+        /* TODO: parse 2O9.nix to get user-configured repos. For now,
+         * sync the default Arch repos. The proper implementation will
+         * use two9_alpm_init_from_manifest() once lib2O9 is linked
+         * (Phase 1) and call alpm_db_update() for each registered DB. */
+
+        printf("=== syncing repo databases ===\n");
+        int errors = 0;
+        for (int i = 0; default_repos[i][0]; i++) {
+                if (sync_one_repo(curl, default_repos[i][0], default_repos[i][1]) < 0)
+                        errors++;
+        }
+
+        curl_easy_cleanup(curl);
+
+        if (errors) {
+                fprintf(stderr, "209: %d repo(s) failed to sync\n", errors);
+                return 1;
+        }
+        printf("=== sync complete ===\n");
+        return 0;
 }
 
 /* ── GC ──────────────────────────────────────────────────────────── */
@@ -1005,18 +1258,11 @@ static int cmd_remove(const char *pkg_name)
                 gen_free(new_gen);
         }
 
-        /* Activation phase — runs after extraction + symlink farm,
-         * before the user is told to reboot. See src/declarative/activation.{c,h}.
-         *
-         * The full 9-step sequence from DESIGN.md §7 is wired up;
-         * steps that aren't yet fully implemented log a stub message
-         * and continue. Step 7 (services enable/disable) is real. */
-        reconcile_txn_t *txn = NULL;
-        /* 2O9: build a minimal txn just for services — full reconcile
-         * integration comes with Phase 5 polish. For now, services
-         * applied here come from the manifest's services block. */
-        (void)txn;
-        /* activation_run(txn); — disabled until reconcile_txn wiring lands */
+        /* Activation phase — for imperative installs, no reconcile txn
+         * exists (no manifest to diff against). Pass NULL: services
+         * enable/disable is skipped, but daemon-reload, cache rebuild,
+         * and other idempotent steps still run. */
+        activation_run(NULL);
 
         printf("  NOTE: reboot for full system state to take effect\n");
 
