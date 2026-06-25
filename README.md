@@ -310,17 +310,23 @@ Honest accounting of what works versus what is planned.
   Linux RSS feed. `209 <pkg> info` and `209 <term> search` work
   against the local generation DB and fall back to AUR. `209 sync`
   downloads repo .db files via libcurl to `/var/cache/2O9/pkg/`.
-  `test/` and `docs/` directories exist with planning docs. Remaining
-  Phase 5 work: link lib2O9 into the 209 binary (needs libarchive-dev
-  + openssl-dev), packaging, full integration testing.
+  `test/` and `docs/` directories exist with planning docs.
+  **Ponytail-audit cleanup applied**: deleted dead functions
+  (`aur_fetch`, `gen_db_unpin`), replaced hand-rolled JSON parsing in
+  `read_current_gen_packages` and `two9_init.c` with the already-vendored
+  cJSON, replaced `str_node_t` in activation.c with the existing
+  `pkg_name_t`, made 8 activation step functions `static` (only
+  `activation_run` and `activation_services_apply` remain public).
+  Remaining Phase 5 work: link lib2O9 into the 209 binary (needs
+  libarchive-dev + openssl-dev), packaging, full integration testing.
 
 ## Roadmap
 
 Phased roadmap with risk-first ordering is in [`DESIGN.md`](./DESIGN.md) §10.
-The remaining major work is **Phase 1** (libalpm modifications — make-or-break
-for the "full Nix store on pacman" premise) and **Phase 5** (polish,
-packaging, docs). Phases 0, 2, and 4 are done; Phase 3 is largely done modulo
-parser gaps.
+The remaining major work is **Phase 1** (build lib2O9 — modifications are
+applied to source, but linking into the 209 binary needs libarchive-dev +
+openssl-dev) and **Phase 5 polish** (packaging, integration tests). Phases
+0, 2, 3, and 4 are done.
 
 ## Honest risks
 

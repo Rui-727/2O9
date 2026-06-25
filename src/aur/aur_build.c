@@ -153,26 +153,6 @@ int aur_clone(const char *pkg_name, const char *build_dir)
         return 0;
 }
 
-/* ── Fetch ────────────────────────────────────────────────────────── */
-
-int aur_fetch(const char *pkg_name, const char *build_dir)
-{
-        if (!pkg_name || !build_dir) return -1;
-
-        char clone_dir[PATH_MAX];
-        snprintf(clone_dir, sizeof(clone_dir), "%s/%s", build_dir, pkg_name);
-
-        struct stat st;
-        if (stat(clone_dir, &st) != 0 || !S_ISDIR(st.st_mode))
-                return -1;  /* not cloned yet — call aur_clone first */
-
-        /* git -C <dir> pull --rebase */
-        char *argv[] = { "git", "-C", clone_dir, "pull", "--rebase", NULL };
-
-        fprintf(stderr, "  fetching %s...\n", pkg_name);
-        return run_cmd(argv, NULL);
-}
-
 /* ── Review ───────────────────────────────────────────────────────── */
 
 int aur_review(const char *pkg_name, const char *build_dir)

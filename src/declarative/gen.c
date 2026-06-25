@@ -432,7 +432,6 @@ static int set_pinned(gen_db_t *db, int id, int pinned)
 }
 
 int gen_db_pin(gen_db_t *db, int id) { return set_pinned(db, id, 1); }
-int gen_db_unpin(gen_db_t *db, int id) { return set_pinned(db, id, 0); }
 
 /* ── Free ────────────────────────────────────────────────────────── */
 

@@ -81,9 +81,8 @@ int gen_db_rollback(gen_db_t *db, int target_id);
  * Caller must free with gen_list_free(). */
 gen_t **gen_db_list(gen_db_t *db, size_t *count);
 
-/* Pin/unpin a generation (protect from GC) */
+/* Pin a generation (protect from GC) */
 int gen_db_pin(gen_db_t *db, int id);
-int gen_db_unpin(gen_db_t *db, int id);
 
 /* Lock/unlock the DB for mutating operations.
  * gen_db_lock() takes an exclusive, non-blocking flock on

@@ -60,16 +60,11 @@ int activation_run(reconcile_txn_t *txn);
  * (e.g. from tests or future imperative service commands). */
 int activation_services_apply(reconcile_txn_t *txn);
 
-/* Individual phase steps — each idempotent, each logs failures but
- * continues (a failed icon-cache rebuild shouldn't abort the whole
- * apply). */
-int activation_stop_affected_services(reconcile_txn_t *txn);
-int activation_populate_etc_symlinks(void);
-int activation_apply_sysusers(void);
-int activation_apply_tmpfiles(void);
-int activation_update_users_groups(void);
-int activation_daemon_reload(void);
-int activation_rebuild_caches(void);
-int activation_start_changed_services(reconcile_txn_t *txn);
+/* The 8 individual step functions (stop_affected_services,
+ * populate_etc_symlinks, apply_sysusers, apply_tmpfiles,
+ * update_users_groups, daemon_reload, rebuild_caches,
+ * start_changed_services) are static in activation.c — only
+ * activation_run() calls them. If a future caller needs one
+ * directly, promote it to a public declaration here. */
 
 #endif /* TWO9_ACTIVATION_H */

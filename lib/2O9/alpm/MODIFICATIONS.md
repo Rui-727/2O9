@@ -95,9 +95,10 @@ is the single source of truth.
 installed_set_loader callbacks onto an existing handle, activating 2O9
 mode. After this call, modifications #1 and #2 take effect.
 
-The JSON parsing for the manifest is deliberately minimal (hand-rolled,
-no cJSON dependency) — lib2O9 should not depend on src/aur/. The manifest
-subset we need is small and well-structured.
+The manifest JSON is parsed with cJSON, which is already vendored at
+`src/aur/cJSON.{c,h}`. cJSON has no aur/ coupling — it's a generic JSON
+library that just happens to live in that directory. We include it from
+there rather than duplicating JSON parsing logic.
 
 **Marking**: The new file is wholly 2O9 code; no `/* 2O9: */` markers
 needed in vendored source for this modification.

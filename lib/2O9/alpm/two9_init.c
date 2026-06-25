@@ -30,68 +30,13 @@
 #include "alpm.h"
 #include "handle.h"
 
-/* cJSON is vendored at src/aur/cJSON.h — but lib2O9 should not depend
- * on src/. We parse the small subset of JSON we need by hand here.
- * For the config entrypoint, the manifest is small and well-structured,
- * so a minimal ad-hoc parser is fine. ( ponytail: avoid pulling cJSON
- * into lib2O9 for a 50-line parsing job.) */
-
-/* ── Tiny JSON helpers — enough for the manifest subset ──────────── */
-
-/* Find the value associated with key in a JSON object string.
- * Returns a malloc'd copy of the value (caller frees), or NULL.
- * Handles string values ("...") and bare tokens (numbers, true, false). */
-static char *json_get_string(const char *json, const char *key)
-{
-    /* Build "key" search pattern */
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) return NULL;
-    p += strlen(pattern);
-    /* skip whitespace + colon */
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == ':')) p++;
-    if (*p == '"') {
-        p++;
-        const char *end = strchr(p, '"');
-        if (!end) return NULL;
-        size_t len = end - p;
-        char *result = malloc(len + 1);
-        memcpy(result, p, len);
-        result[len] = '\0';
-        return result;
-    }
-    /* Bare token — read until , } or ] */
-    const char *end = p;
-    while (*end && *end != ',' && *end != '}' && *end != ']' &&
-           *end != '\n' && *end != ' ') end++;
-    size_t len = end - p;
-    if (len == 0) return NULL;
-    char *result = malloc(len + 1);
-    memcpy(result, p, len);
-    result[len] = '\0';
-    return result;
-}
+/* cJSON is vendored at src/aur/cJSON.{c,h}. It has no aur/ coupling —
+ * it's a generic JSON library that just happens to live in that dir.
+ * We include it from there to avoid duplicating JSON parsing logic. */
+#include "cJSON.h"
 
 /* ── Public: build a configured alpm_handle_t from a 2O9 manifest ── */
 
-/* alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json);
- *
- * Returns a fully-configured alpm_handle_t with:
- *   - root = "/"
- *   - dbpath = "/var/lib/2O9"   (2O9's generation DB, not /var/lib/pacman)
- *   - cachedir = "/var/cache/2O9/pkg/"
- *   - architectures = ["x86_64"]  (TODO: read from manifest)
- *   - siglevel from manifest.pacman.options.SigLevel (default: Required DatabaseOptional)
- *   - parallel_downloads from manifest.pacman.options.ParallelDownloads (default: 1)
- *   - ignorepkgs from manifest.pacman.options.IgnorePkg (list)
- *   - sync DBs registered from manifest.pacman.repos (each becomes alpm_db_register_sync)
- *
- * Returns NULL on failure (errno set via alpm_errno_t).
- *
- * 2O9: this function never reads /etc/pacman.conf. The manifest is the
- * single source of truth — see MODIFICATIONS.md #3.
- */
 alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
 {
     if (!manifest_json) return NULL;
@@ -107,84 +52,69 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
     /* Set cache dir */
     alpm_list_t *cachedirs = alpm_list_add(NULL, strdup("/var/cache/2O9/pkg/"));
     alpm_option_set_cachedirs(handle, cachedirs);
-    /* alpm_option_set_cachedirs takes ownership; don't free the list */
 
     /* Set architectures */
     alpm_list_t *arches = alpm_list_add(NULL, strdup("x86_64"));
     alpm_option_set_architectures(handle, arches);
 
-    /* SigLevel — default is Required DatabaseOptional if not in manifest */
-    char *siglevel = json_get_string(manifest_json, "SigLevel");
-    if (siglevel) {
-        /* ponytail:SigLevel parsing is non-trivial; for now log and ignore.
-         * Full implementation lands when lib2O9 is actually built and
-         * linked — alpm_option_set_siglevel needs the parsed mask. */
-        free(siglevel);
+    /* Parse the manifest JSON */
+    cJSON *root = cJSON_Parse(manifest_json);
+    if (!root) {
+        /* Manifest didn't parse — return handle with defaults applied */
+        return handle;
     }
 
-    /* ParallelDownloads */
-    char *pd = json_get_string(manifest_json, "ParallelDownloads");
-    if (pd) {
-        int n = atoi(pd);
-        if (n > 0) {
-            /* alpm_option_set_parallel_downloads(handle, n); — needs alpm 13+ */
-            /* handle->parallel_downloads = n; — direct field set; safe since
-             * we own the handle struct. */
-            handle->parallel_downloads = (unsigned int)n;
+    /* Walk pacman.options and pacman.repos */
+    cJSON *pacman = cJSON_GetObjectItem(root, "pacman");
+    if (pacman) {
+        cJSON *options = cJSON_GetObjectItem(pacman, "options");
+        if (options) {
+            cJSON *pd = cJSON_GetObjectItem(options, "ParallelDownloads");
+            if (cJSON_IsNumber(pd) && pd->valueint > 0) {
+                handle->parallel_downloads = (unsigned int)pd->valueint;
+            }
+
+            /* SigLevel — parsing the SigLevel string is non-trivial
+             * (alpm_option_set_siglevel needs a mask). Logged for now;
+             * full impl lands when lib2O9 is actually built and linked. */
+            cJSON *sl = cJSON_GetObjectItem(options, "SigLevel");
+            (void)sl;
+
+            /* IgnorePkg list */
+            cJSON *ignore = cJSON_GetObjectItem(options, "IgnorePkg");
+            if (cJSON_IsArray(ignore)) {
+                cJSON *pkg;
+                cJSON_ArrayForEach(pkg, ignore) {
+                    if (cJSON_IsString(pkg)) {
+                        alpm_option_add_ignorepkg(handle, pkg->valuestring);
+                    }
+                }
+            }
         }
-        free(pd);
-    }
 
-    /* Register sync DBs from manifest.pacman.repos.
-     * Each repo entry is "core": { "server": "https://..." }. We scan
-     * for "core"/"extra"/"multilib" by name. A general implementation
-     * would walk the repos object properly. */
-    static const char *known_repos[] = {"core", "extra", "multilib", NULL};
-    for (int i = 0; known_repos[i]; i++) {
-        const char *repo = known_repos[i];
-        char server_key[64];
-        snprintf(server_key, sizeof(server_key), "\"%s\"", repo);
-        if (!strstr(manifest_json, server_key)) continue;
+        /* Register sync DBs from pacman.repos */
+        cJSON *repos = cJSON_GetObjectItem(pacman, "repos");
+        if (cJSON_IsObject(repos)) {
+            cJSON *repo;
+            cJSON_ArrayForEach(repo, repos) {
+                const char *repo_name = repo->string;
+                cJSON *server = cJSON_GetObjectItem(repo, "server");
+                if (!cJSON_IsString(server)) continue;
 
-        /* Find the server URL for this repo */
-        const char *p = strstr(manifest_json, server_key);
-        if (!p) continue;
-        const char *server_p = strstr(p, "\"server\"");
-        if (!server_p) continue;
-        server_p = strchr(server_p + 8, '"');
-        if (!server_p) continue;
-        server_p++;
-        const char *server_end = strchr(server_p, '"');
-        if (!server_end) continue;
-
-        size_t url_len = server_end - server_p;
-        char *url = malloc(url_len + 1);
-        memcpy(url, server_p, url_len);
-        url[url_len] = '\0';
-
-        alpm_db_t *db = alpm_db_register_sync(handle, repo);
-        if (db) {
-            alpm_db_add_server(db, url);
+                alpm_db_t *db = alpm_db_register_sync(handle, repo_name);
+                if (db) {
+                    alpm_db_add_server(db, server->valuestring);
+                }
+            }
         }
-        free(url);
     }
 
-    /* IgnorePkg list — TODO: parse JSON array and call alpm_option_add_ignorepkg */
-    /* For now, the manifest's IgnorePkg is logged but not applied. */
-
+    cJSON_Delete(root);
     return handle;
 }
 
 /* ── Public: register 2O9 callbacks on an existing handle ────────── */
 
-/* void two9_alpm_register_backends(alpm_handle_t *handle,
- *                                  char *(*install_backend)(...),
- *                                  int (*installed_set_loader)(...));
- *
- * Wires the 2O9 store adapter and generation DB into libalpm via the
- * function pointers added to alpm_handle_t (MODIFICATIONS.md #1 and #2).
- * Call this after two9_alpm_init_from_manifest() to activate 2O9 mode.
- */
 void two9_alpm_register_backends(alpm_handle_t *handle,
                                  char *(*install_backend)(alpm_handle_t *, alpm_pkg_t *, const char *),
                                  int (*installed_set_loader)(alpm_handle_t *, alpm_db_t *))

@@ -101,15 +101,11 @@ static int walk_tree(const char *path, int (*cb)(const char *, void *), void *ud
 
 /* ── Helper: collect all packages from the new generation ──────────
  *
- * Returns a linked list of store_path strings. Caller frees with
- * free_string_list(). Returns NULL if no DB or no packages. */
+ * Returns a linked list of store_path strings (as pkg_name_t — same shape
+ * as a string list, just reuses the existing type to avoid a duplicate).
+ * Caller frees with pkg_name_list_free(). Returns NULL if no DB or no packages. */
 
-typedef struct str_node {
-    char *s;
-    struct str_node *next;
-} str_node_t;
-
-static str_node_t *gen_store_paths(const char *db_root, int gen_id)
+static pkg_name_t *gen_store_paths(const char *db_root, int gen_id)
 {
     if (!db_root || gen_id <= 0) return NULL;
 
@@ -126,11 +122,10 @@ static str_node_t *gen_store_paths(const char *db_root, int gen_id)
     gen_t *g = gen_db_get(db, gen_id);
     if (!g) { gen_db_close(db); return NULL; }
 
-    str_node_t *head = NULL, *tail = NULL;
+    pkg_name_t *head = NULL, *tail = NULL;
     for (gen_pkg_t *p = g->packages; p; p = p->next) {
         if (!p->store_path) continue;
-        str_node_t *n = calloc(1, sizeof(*n));
-        n->s = strdup(p->store_path);
+        pkg_name_t *n = pkg_name_create(p->store_path);
         if (tail) tail->next = n; else head = n;
         tail = n;
     }
@@ -139,25 +134,15 @@ static str_node_t *gen_store_paths(const char *db_root, int gen_id)
     return head;
 }
 
-static void free_string_list(str_node_t *list)
-{
-    while (list) {
-        str_node_t *next = list->next;
-        free(list->s);
-        free(list);
-        list = next;
-    }
-}
-
 /* ── Helper: collect files matching a suffix pattern from store paths ──
  *
  * Walks each store path, collects files ending with `suffix` (e.g. ".service").
- * Returns a str_node_t list. Caller frees with free_string_list(). */
+ * Returns a pkg_name_t list. Caller frees with pkg_name_list_free(). */
 
 typedef struct {
     const char *suffix;
-    str_node_t *head;
-    str_node_t *tail;
+    pkg_name_t *head;
+    pkg_name_t *tail;
 } collect_ctx_t;
 
 static int collect_suffix_cb(const char *path, void *ud)
@@ -166,27 +151,26 @@ static int collect_suffix_cb(const char *path, void *ud)
     size_t plen = strlen(path);
     size_t slen = strlen(ctx->suffix);
     if (plen >= slen && strcmp(path + plen - slen, ctx->suffix) == 0) {
-        str_node_t *n = calloc(1, sizeof(*n));
-        n->s = strdup(path);
+        pkg_name_t *n = pkg_name_create(path);
         if (ctx->tail) ctx->tail->next = n; else ctx->head = n;
         ctx->tail = n;
     }
     return 0;
 }
 
-static str_node_t *collect_files_with_suffix(str_node_t *store_paths,
+static pkg_name_t *collect_files_with_suffix(pkg_name_t *store_paths,
                                               const char *suffix)
 {
     collect_ctx_t ctx = { .suffix = suffix, .head = NULL, .tail = NULL };
-    for (str_node_t *p = store_paths; p; p = p->next) {
-        walk_tree(p->s, collect_suffix_cb, &ctx);
+    for (pkg_name_t *p = store_paths; p; p = p->next) {
+        walk_tree(p->name, collect_suffix_cb, &ctx);
     }
     return ctx.head;
 }
 
 /* ── Step 1: Stop affected services ────────────────────────────────── */
 
-int activation_stop_affected_services(reconcile_txn_t *txn)
+static int activation_stop_affected_services(reconcile_txn_t *txn)
 {
     if (!txn) return 0;
     /* Stop services that are being disabled — they shouldn't be running. */
@@ -207,7 +191,7 @@ int activation_stop_affected_services(reconcile_txn_t *txn)
  * is_config flag. This step is a no-op as long as the store adapter
  * correctly tags config files. We log a confirmation. */
 
-int activation_populate_etc_symlinks(void)
+static int activation_populate_etc_symlinks(void)
 {
     fprintf(stderr, "activation: /etc symlinks populated by symlink farm\n");
     return 0;
@@ -216,7 +200,7 @@ int activation_populate_etc_symlinks(void)
 /* ── Step 3: Apply sysusers ────────────────────────────────────────── */
 /* Walk store paths, find usr/lib/sysusers.d/*.conf, run systemd-sysusers. */
 
-int activation_apply_sysusers(void)
+static int activation_apply_sysusers(void)
 {
     /* We need the db_root and gen_id — but activation_run doesn't pass them.
      * For now, scan /nix/store/* directly is too broad. The right fix is
@@ -232,7 +216,7 @@ int activation_apply_sysusers(void)
 /* Same approach as sysusers — invoke systemd-tmpfiles --create which
  * scans the default locations where the symlink farm has placed configs. */
 
-int activation_apply_tmpfiles(void)
+static int activation_apply_tmpfiles(void)
 {
     const char *argv[] = {"systemd-tmpfiles", "--create", "--remove", NULL};
     return run_cmd(argv, "apply tmpfiles.d configs");
@@ -243,7 +227,7 @@ int activation_apply_tmpfiles(void)
  * Packages that need custom user creation outside sysusers.d get a
  * warning logged. */
 
-int activation_update_users_groups(void)
+static int activation_update_users_groups(void)
 {
     /* No-op: systemd-sysusers handles the standard case.
      * Non-standard user creation in .install scripts is intentionally
@@ -253,7 +237,7 @@ int activation_update_users_groups(void)
 
 /* ── Step 6: daemon-reload ──────────────────────────────────────────── */
 
-int activation_daemon_reload(void)
+static int activation_daemon_reload(void)
 {
     const char *argv[] = {"systemctl", "daemon-reload", NULL};
     return run_cmd(argv, "reload systemd after unit files changed");
@@ -294,7 +278,7 @@ int activation_services_apply(reconcile_txn_t *txn)
 /* Each cache rebuild is silently skipped if the binary isn't installed.
  * Icon cache needs the hicolor theme directory to exist. */
 
-int activation_rebuild_caches(void)
+static int activation_rebuild_caches(void)
 {
     const char *icon_argv[] = {"gtk-update-icon-cache", "-f",
                                 "/usr/share/icons/hicolor", NULL};
@@ -314,7 +298,7 @@ int activation_rebuild_caches(void)
 
 /* ── Step 9: Start/restart changed services ─────────────────────────── */
 
-int activation_start_changed_services(reconcile_txn_t *txn)
+static int activation_start_changed_services(reconcile_txn_t *txn)
 {
     if (!txn) return 0;
     /* Start services that were just enabled. Restart is too aggressive
