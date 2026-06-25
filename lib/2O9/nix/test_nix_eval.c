@@ -223,6 +223,51 @@ int main(void)
          "if (false -> false) then \"yes\" else \"no\"",
          "yes");
 
+    /* Curried lambdas — used to segfault because call_env was freed before
+     * the returned lambda's closure_env was dereferenced. */
+    TEST("curried lambda",
+         "(x: y: x + y) 3 4",
+         "7");
+
+    TEST("curried lambda with strings",
+         "(a: b: a + b) \"hello \" \"world\"",
+         "hello world");
+
+    TEST("three-deep curry",
+         "(x: y: z: x + y + z) 1 2 3",
+         "6");
+
+    /* Binop precedence — * binds tighter than + */
+    TEST("mul before add",
+         "1 + 2 * 3",
+         "7");
+
+    TEST("add right-assoc via parens",
+         "(1 + 2) * 3",
+         "9");
+
+    /* Lambda with formal parameters (commas) — was a known gap, now works */
+    TEST("formal lambda",
+         "({ a, b }: a + b) { a = 3; b = 4; }",
+         "7");
+
+    TEST("formal lambda with default",
+         "({ a, b ? 10 }: a + b) { a = 5; }",
+         "15");
+
+    /* inherit (src) ident; — pulls attributes from a source expression */
+    TEST("inherit from source",
+         "let s = { x = 1; y = 2; }; in { inherit (s) x y; }",
+         "\"x\": 1");
+
+    TEST("inherit plain ident",
+         "let x = 42; in { inherit x; }",
+         "\"x\": 42");
+
+    TEST("inherit multiple from attrset",
+         "let pkg = { name = \"firefox\"; version = \"120\"; }; in { inherit (pkg) name version; }",
+         "firefox");
+
     printf("\n=== Results: %d/%d passed ===\n", pass_count, test_count);
     return pass_count == test_count ? 0 : 1;
 }

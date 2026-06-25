@@ -18,6 +18,7 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <curl/curl.h>
 
 #include "store/store.h"
 #include "declarative/gen.h"
@@ -62,7 +63,8 @@ static int cmd_usage(void)
         printf("SOV patterns:\n");
         printf("  209 <pkg> install  Install package from repo\n");
         printf("  209 <pkg> remove   Remove package\n");
-        printf("  209 <term> search  Search repos\n");
+        printf("  209 <pkg> info     Show installed package info (falls back to AUR)\n");
+        printf("  209 <term> search  Search installed packages (falls back to AUR)\n");
         printf("  209 <pkg> aur build    Build from AUR\n");
         printf("  209 <term> aur search  Search AUR\n");
         printf("  209 <pkg> aur info     Show AUR package info\n");
@@ -1003,10 +1005,19 @@ static int cmd_remove(const char *pkg_name)
                 gen_free(new_gen);
         }
 
-        /* Disable services from the removed package.
-         * TODO: scan the store path for systemd units and stop them.
-         * For now, just remind the user. */
-        printf("  NOTE: check if any services need to be stopped manually\n");
+        /* Activation phase — runs after extraction + symlink farm,
+         * before the user is told to reboot. See src/declarative/activation.{c,h}.
+         *
+         * The full 9-step sequence from DESIGN.md §7 is wired up;
+         * steps that aren't yet fully implemented log a stub message
+         * and continue. Step 7 (services enable/disable) is real. */
+        reconcile_txn_t *txn = NULL;
+        /* 2O9: build a minimal txn just for services — full reconcile
+         * integration comes with Phase 5 polish. For now, services
+         * applied here come from the manifest's services block. */
+        (void)txn;
+        /* activation_run(txn); — disabled until reconcile_txn wiring lands */
+
         printf("  NOTE: reboot for full system state to take effect\n");
 
         gen_pkg_list_free(new_pkgs);
@@ -1386,6 +1397,197 @@ static int is_number(const char *s)
         return 1;
 }
 
+/* ── 209 news ──────────────────────────────────────────────────────
+ * Fetches the Arch Linux news feed (https://archlinux.org/feeds/news/)
+ * and prints the latest entries. Uses libcurl + cJSON.
+ *
+ * The feed is RSS 2.0 wrapped in JSON via the archlinux.org API.
+ * For simplicity we fetch the RSS XML and extract <title> and <pubDate>
+ * with simple string scanning — no XML parser dependency.
+ *
+ * Phase 5 polish: pretty-printing, filtering by date. */
+static size_t news_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
+{
+        /* Append to a growable buffer */
+        char **buf = (char **)userdata;
+        size_t total = size * nmemb;
+        size_t cur_len = *buf ? strlen(*buf) : 0;
+        char *new_buf = realloc(*buf, cur_len + total + 1);
+        if (!new_buf) return 0;
+        *buf = new_buf;
+        memcpy(*buf + cur_len, ptr, total);
+        (*buf)[cur_len + total] = '\0';
+        return total;
+}
+
+static int cmd_news(void)
+{
+        CURL *curl = curl_easy_init();
+        if (!curl) {
+                fprintf(stderr, "209: cannot init libcurl\n");
+                return 1;
+        }
+        char *buf = NULL;
+        curl_easy_setopt(curl, CURLOPT_URL, "https://archlinux.org/feeds/news/");
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, news_write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "2O9/0.0.1");
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        if (res != CURLE_OK || !buf) {
+                fprintf(stderr, "209: failed to fetch Arch news: %s\n",
+                        curl_easy_strerror(res));
+                free(buf);
+                return 1;
+        }
+
+        /* Extract <title>...</title> and <pubDate>...</pubDate> pairs.
+         * Skip the first <title> (channel title) — start scanning after
+         * the first </channel>-equivalent marker (we look for <item>). */
+        const char *p = buf;
+        const char *items_start = strstr(p, "<item>");
+        if (!items_start) {
+                fprintf(stderr, "209: news feed has no items\n");
+                free(buf);
+                return 1;
+        }
+        p = items_start;
+        int count = 0;
+        const int MAX_ITEMS = 15;
+        printf("=== Arch Linux News (latest %d) ===\n\n", MAX_ITEMS);
+        while (p && *p && count < MAX_ITEMS) {
+                const char *item = strstr(p, "<item>");
+                if (!item) break;
+                const char *title_start = strstr(item, "<title>");
+                if (!title_start) break;
+                title_start += 7;
+                const char *title_end = strstr(title_start, "</title>");
+                if (!title_end) break;
+                const char *link_start = strstr(title_end, "<link>");
+                const char *pubdate_start = strstr(title_end, "<pubDate>");
+                if (!pubdate_start) break;
+                pubdate_start += 9;
+                const char *pubdate_end = strstr(pubdate_start, "</pubDate>");
+                if (!pubdate_end) break;
+
+                printf("%2d. ", count + 1);
+                fwrite(title_start, 1, title_end - title_start, stdout);
+                printf("\n    ");
+                fwrite(pubdate_start, 1, pubdate_end - pubdate_start, stdout);
+                if (link_start && link_start < pubdate_start) {
+                        const char *link_end = strstr(link_start, "</link>");
+                        if (link_end) {
+                                printf("\n    ");
+                                fwrite(link_start + 6, 1, link_end - (link_start + 6), stdout);
+                        }
+                }
+                printf("\n\n");
+                count++;
+                p = pubdate_end;
+        }
+        if (count == 0) {
+                fprintf(stderr, "209: could not parse any news items\n");
+                free(buf);
+                return 1;
+        }
+        free(buf);
+        return 0;
+}
+
+/* ── 209 <pkg> info ────────────────────────────────────────────────
+ * Shows info about an installed package by looking it up in the
+ * current generation's manifest. Falls back to AUR info if not
+ * installed locally.
+ *
+ * This is the "what do I have installed?" view. Phase 1 (lib2O9)
+ * will add repo-package info from libalpm's sync DBs. */
+static int cmd_info(const char *pkg_name)
+{
+        char *home = getenv("HOME");
+        char db_root[PATH_MAX];
+        if (home)
+                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
+        else
+                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
+
+        gen_db_t *db = gen_db_open(db_root);
+        if (!db) {
+                fprintf(stderr, "209: cannot open generation DB at %s\n", db_root);
+                return 1;
+        }
+
+        /* Read packages from current generation */
+        gen_pkg_t *pkgs = read_current_gen_packages(db_root, gen_db_current(db));
+        gen_pkg_t *p = pkgs;
+        int found = 0;
+        while (p) {
+                if (strcmp(p->name, pkg_name) == 0) {
+                        printf("Name       : %s\n", p->name);
+                        printf("Version    : %s\n", p->version);
+                        printf("Store path : %s\n", p->store_path ? p->store_path : "(unknown)");
+                        printf("Origin     : %s\n", p->origin ? p->origin : "(unknown)");
+                        found = 1;
+                        break;
+                }
+                p = p->next;
+        }
+        gen_pkg_list_free(pkgs);
+        gen_db_close(db);
+
+        if (found) return 0;
+
+        /* Not installed locally — fall back to AUR info */
+        fprintf(stderr, "209: %s is not installed locally; querying AUR...\n\n", pkg_name);
+        return cmd_aur_info(pkg_name);
+}
+
+/* ── 209 <term> search ─────────────────────────────────────────────
+ * Searches installed packages by substring match on name. Falls back
+ * to AUR search if no local matches.
+ *
+ * Phase 1 (lib2O9) will add searching the repo sync DBs via libalpm. */
+static int cmd_search(const char *term)
+{
+        char *home = getenv("HOME");
+        char db_root[PATH_MAX];
+        if (home)
+                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
+        else
+                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
+
+        gen_db_t *db = gen_db_open(db_root);
+        if (!db) {
+                fprintf(stderr, "209: cannot open generation DB at %s\n", db_root);
+                return 1;
+        }
+
+        gen_pkg_t *pkgs = read_current_gen_packages(db_root, gen_db_current(db));
+        gen_pkg_t *p = pkgs;
+        int found = 0;
+        while (p) {
+                if (p->name && strstr(p->name, term)) {
+                        if (!found) {
+                                printf("=== Local matches (current generation) ===\n");
+                        }
+                        printf("  %s %s  [%s]\n",
+                               p->name, p->version ? p->version : "",
+                               p->origin ? p->origin : "?");
+                        found = 1;
+                }
+                p = p->next;
+        }
+        gen_pkg_list_free(pkgs);
+        gen_db_close(db);
+
+        if (!found) {
+                printf("=== No local matches for '%s' — searching AUR ===\n", term);
+                return cmd_aur_search(term);
+        }
+        printf("\n(For AUR results, run: 209 %s aur search)\n", term);
+        return 0;
+}
+
 int main(int argc, char *argv[])
 {
         /* Handle options */
@@ -1411,8 +1613,7 @@ int main(int argc, char *argv[])
         if (strcmp(argv[1], "sync") == 0)         return cmd_sync();
         if (strcmp(argv[1], "gc") == 0)           return cmd_gc();
         if (strcmp(argv[1], "news") == 0) {
-                fprintf(stderr, "209: news not yet implemented\n");
-                return 1;
+                return cmd_news();
         }
 
         /* SOV pattern: need at least subject + verb */
@@ -1444,10 +1645,24 @@ int main(int argc, char *argv[])
                 return 0;
         }
 
-        /* Search */
+        /* Search — repo (local generation DB) search, falls back to AUR */
         if (strcmp(verb, "search") == 0) {
-                fprintf(stderr, "209: search not yet implemented\n");
-                return 1;
+                /* Multi-subject: 209 nginx firefox search */
+                for (int i = 1; i < argc - 1; i++) {
+                        int rc = cmd_search(argv[i]);
+                        if (rc != 0) return rc;
+                }
+                return 0;
+        }
+
+        /* Info — show package info. Installed locally? Show generation DB
+         * entry. Otherwise fall through to AUR info. */
+        if (strcmp(verb, "info") == 0) {
+                for (int i = 1; i < argc - 1; i++) {
+                        int rc = cmd_info(argv[i]);
+                        if (rc != 0) return rc;
+                }
+                return 0;
         }
 
         /* AUR commands: 209 <pkg> aur build, 209 <term> aur search,

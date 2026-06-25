@@ -118,13 +118,19 @@ These files compile as part of `lib2O9.a` — pure C, no C++ deps.
 Phase 3 — core evaluator implemented. The evaluator handles:
 - Attribute sets (plain & recursive), lists, strings with interpolation
 - Let-bindings, if/then/else, with, assert, select
-- Lambda functions (ident param), function application
+- Lambda functions (ident param and formal params `{ a, b ? default, ... }: body`)
+- Function application (including curried application: `(x: y: x + y) 3 4`)
 - Import resolution with base directory
 - Fixed-point recursion for `{ config, ... }: { ... }` pattern
 - 19 builtins (map, filter, length, head, tail, attrNames, attrValues, etc.)
+- `builtins.<name>` dot-notation select for all builtins
+- `inherit ident;` and `inherit (src) ident1 ident2;` forms
 - JSON serialization of values
 
-Parser still needs:
-- Binary operator precedence levels (+, -, *, /, ==, &&, ||, ->, etc.)
-- Lambda formals with commas ({ a, b }: body)
-- Dot-notation select for builtins (builtins.length)
+The parser is feature-complete for the 2O9.nix subset. All 9 binary
+operator precedence levels are implemented (implication → or → and →
+equality → comparison → concat → add → mul → unary), with correct
+left- and right-associativity.
+
+The test suite (`test_nix_eval.c`) has 49 passing tests covering all
+of the above.

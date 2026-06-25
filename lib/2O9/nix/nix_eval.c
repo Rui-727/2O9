@@ -257,6 +257,125 @@ static nix_env_t *nix_env_push(nix_env_t *parent)
 
 /* ── AST free (recursive) ─────────────────────────────────────────── */
 
+/* 2O9: AST clone — deep copy of an AST node.
+ * Used by `inherit (src) ident1 ident2;` where the same source expression
+ * must be referenced by multiple bindings without being double-freed. */
+nix_ast_t *nix_ast_clone(nix_ast_t *ast)
+{
+    if (!ast) return NULL;
+    nix_ast_t *c = ast_new(ast->type, ast->line, ast->col);
+    if (!c) return NULL;
+
+    switch (ast->type) {
+    case NIX_NODE_ATTR_SET:
+    case NIX_NODE_REC_ATTR_SET:
+        c->attr_set.count = ast->attr_set.count;
+        c->attr_set.bindings = calloc(ast->attr_set.count > 0 ? ast->attr_set.count : 1,
+                                      sizeof(*c->attr_set.bindings));
+        for (size_t i = 0; i < ast->attr_set.count; i++) {
+            c->attr_set.bindings[i].key = ast->attr_set.bindings[i].key ? strdup(ast->attr_set.bindings[i].key) : NULL;
+            c->attr_set.bindings[i].value = nix_ast_clone(ast->attr_set.bindings[i].value);
+        }
+        break;
+
+    case NIX_NODE_LIST:
+        c->list.count = ast->list.count;
+        c->list.items = calloc(ast->list.count > 0 ? ast->list.count : 1, sizeof(*c->list.items));
+        for (size_t i = 0; i < ast->list.count; i++)
+            c->list.items[i] = nix_ast_clone(ast->list.items[i]);
+        break;
+
+    case NIX_NODE_STRING:
+        c->string.count = ast->string.count;
+        c->string.parts = calloc(ast->string.count > 0 ? ast->string.count : 1, sizeof(*c->string.parts));
+        for (size_t i = 0; i < ast->string.count; i++) {
+            c->string.parts[i].is_expr = ast->string.parts[i].is_expr;
+            if (ast->string.parts[i].is_expr)
+                c->string.parts[i].expr = nix_ast_clone(ast->string.parts[i].expr);
+            else
+                c->string.parts[i].text = ast->string.parts[i].text ? strdup(ast->string.parts[i].text) : NULL;
+        }
+        break;
+
+    case NIX_NODE_IDENT:
+        c->ident = ast->ident ? strdup(ast->ident) : NULL;
+        break;
+
+    case NIX_NODE_SELECT:
+        c->select.expr = nix_ast_clone(ast->select.expr);
+        c->select.attr = ast->select.attr ? strdup(ast->select.attr) : NULL;
+        break;
+
+    case NIX_NODE_HAS_ATTR:
+        c->has_attr.expr = nix_ast_clone(ast->has_attr.expr);
+        c->has_attr.attr = ast->has_attr.attr ? strdup(ast->has_attr.attr) : NULL;
+        break;
+
+    case NIX_NODE_APPLY:
+        c->apply.func = nix_ast_clone(ast->apply.func);
+        c->apply.arg = nix_ast_clone(ast->apply.arg);
+        break;
+
+    case NIX_NODE_LAMBDA:
+        c->lambda.param = nix_ast_clone(ast->lambda.param);
+        c->lambda.body = nix_ast_clone(ast->lambda.body);
+        break;
+
+    case NIX_NODE_LET:
+        c->let.count = ast->let.count;
+        c->let.bindings = calloc(ast->let.count > 0 ? ast->let.count : 1, sizeof(*c->let.bindings));
+        for (size_t i = 0; i < ast->let.count; i++) {
+            c->let.bindings[i].name = ast->let.bindings[i].name ? strdup(ast->let.bindings[i].name) : NULL;
+            c->let.bindings[i].value = nix_ast_clone(ast->let.bindings[i].value);
+        }
+        break;
+
+    case NIX_NODE_IF:
+        c->if_expr.cond = nix_ast_clone(ast->if_expr.cond);
+        c->if_expr.then_expr = nix_ast_clone(ast->if_expr.then_expr);
+        c->if_expr.else_expr = nix_ast_clone(ast->if_expr.else_expr);
+        break;
+
+    case NIX_NODE_WITH:
+        c->with_expr.env_expr = nix_ast_clone(ast->with_expr.env_expr);
+        c->with_expr.body = nix_ast_clone(ast->with_expr.body);
+        break;
+
+    case NIX_NODE_ASSERT:
+        c->assert_expr.cond = nix_ast_clone(ast->assert_expr.cond);
+        c->assert_expr.body = nix_ast_clone(ast->assert_expr.body);
+        break;
+
+    case NIX_NODE_BINOP:
+        c->binop.op = ast->binop.op;
+        c->binop.left = nix_ast_clone(ast->binop.left);
+        c->binop.right = nix_ast_clone(ast->binop.right);
+        break;
+
+    case NIX_NODE_UNARY_NOT:
+        c->operand = nix_ast_clone(ast->operand);
+        break;
+
+    case NIX_NODE_INT:
+        c->integer = ast->integer;
+        break;
+
+    case NIX_NODE_PATH:
+        c->path = ast->path ? strdup(ast->path) : NULL;
+        break;
+
+    case NIX_NODE_NULL:
+    case NIX_NODE_BOOL:
+        c->boolean = ast->boolean;
+        break;
+
+    default:
+        /* Unknown node type — shallow copy is the best we can do. */
+        break;
+    }
+    return c;
+}
+
 void nix_ast_free(nix_ast_t *ast)
 {
     if (!ast) return;
@@ -979,7 +1098,18 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
             if (!result && error) *error = err2;
             else if (!result) free(err2);
 
-            nix_env_free(call_env);
+            /* 2O9: don't free call_env if the result is a lambda whose
+             * closure_env points to call_env — that would leave a dangling
+             * pointer and crash on a subsequent application (currying).
+             * The leaked env is small and lives for the duration of the
+             * top-level evaluation; it's freed when the root env is freed. */
+            if (result
+                && result->type == NIX_VAL_LAMBDA
+                && result->lambda.closure_env == call_env) {
+                /* call_env is now part of the result's lifetime — keep it. */
+            } else {
+                nix_env_free(call_env);
+            }
             /* leaked: shared value graph */
             return result;
         }

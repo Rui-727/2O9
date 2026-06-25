@@ -84,12 +84,12 @@ will be added.
 ├── lib/2O9/                    # lib2O9 — own C Nix evaluator + (future) modified libalpm
 │   ├── nix/                    #   Nix evaluator, written from scratch in C
 │   │   ├── nix_lexer.c         #   416 LOC — tokenizer
-│   │   ├── nix_parser.c        #   1,001 LOC — recursive-descent parser → AST
-│   │   ├── nix_eval.c          #   2,318 LOC — evaluator + 19 builtins + JSON emit
+│   │   ├── nix_parser.c        # ~1,060 LOC — recursive-descent parser → AST
+│   │   ├── nix_eval.c          # ~2,410 LOC — evaluator + 19 builtins + AST clone + JSON emit
 │   │   ├── nix_eval.h          #   public API
 │   │   ├── README.md           #   evaluator design notes
 │   │   ├── test_nix_lexer.c    #   lexer unit tests
-│   │   └── test_nix_eval.c     #   evaluator unit tests
+│   │   └── test_nix_eval.c     #   evaluator unit tests (49 tests)
 │   ├── alpm/                   #   modified libalpm (planned — currently stub)
 │   │   └── MODIFICATIONS.md    #   log of 3 planned modifications (all "Planned", none applied)
 │   └── common/                 #   shared utils (ini.c, util-common.c)
@@ -102,9 +102,10 @@ will be added.
 │   │   ├── cJSON.c/h           # vendored JSON library
 │   │   ├── build.h, resolver.h, aur_rpc.h
 │   │   └── test_aur_rpc.c      # RPC unit tests
-│   ├── declarative/            # generation DB + reconcile engine
+│   ├── declarative/            # generation DB + reconcile engine + activation
 │   │   ├── gen.c, gen.h        # generation DB (file-based, /var/lib/2O9/generations/N/manifest.json)
 │   │   ├── reconcile.c, reconcile.h  # diff manifest ↔ current gen → transaction
+│   │   └── activation.c, activation.h  # 9-step post-extract activation phase (Phase 5 skeleton)
 │   ├── store/                  # store adapter + symlink farm
 │   │   ├── store.c, store.h    # pkg.tar.zst → /nix/store/<name>-<version>/
 │   │   └── symlinks.c, symlinks.h  # ~/.local/bin / ~/.local/lib / /etc symlink farm
@@ -112,6 +113,8 @@ will be added.
 │       ├── trakker.c, trakker.h  # policy + event recording + JSON trace output
 ├── scripts/
 │   └── test_aur_mock.sh        # mock AUR RPC server for tests
+├── test/                       # integration test suite (skeleton — see test/README.md)
+├── docs/                       # extended documentation (skeleton — see docs/README.md)
 ├── test-nix-lexer              # built test binary (gitignored)
 └── test-nix-eval               # built test binary (gitignored)
 ```
@@ -266,19 +269,26 @@ Honest accounting of what works versus what is planned.
   libcurl), PKGBUILD clone + makepkg orchestration (`aur_build.c`), recursive
   AUR dependency resolver (`aur_resolve.c`). `test-aur-rpc` works against the
   mock server in `scripts/test_aur_mock.sh`.
-- **Phase 3 — Declarative engine: PARTIAL.** The Nix evaluator is implemented
+- **Phase 3 — Declarative engine: DONE.** The Nix evaluator is implemented
   (lexer + parser + evaluator, ~3.4k LOC across `lib/2O9/nix/`, 19 builtins,
-  fixed-point recursion for `{ config, ... }`, `import`/`include` support).
-  The generation DB and reconciler are implemented. `209 apply` evaluates
-  `2O9.nix` and commits generations. The parser still needs: binary operator
-  precedence levels, lambda formals with commas (`{ a, b }: body`), and
-  dot-notation select for builtins (`builtins.length`). See
-  [`lib/2O9/nix/README.md`](./lib/2O9/nix/README.md) for the full status.
+  fixed-point recursion for `{ config, ... }`, `import`/`include` support,
+  curried lambda application, formal parameters with defaults, all 9 binary
+  operator precedence levels, `inherit (src) ident;` form, dot-notation
+  select for `builtins.*`). 49/49 evaluator tests pass. The generation DB
+  and reconciler are implemented. `209 apply` evaluates `2O9.nix` and
+  commits generations. See
+  [`lib/2O9/nix/README.md`](./lib/2O9/nix/README.md) for details.
 - **Phase 4 — Trakker: DONE.** `src/trakker/trakker.c` implements the
   ptrace-based sandbox with the `trakker_policy_t` struct, event recording
   (file, network, process, memory), and all four restriction flags.
-- **Phase 5 — Polish: NOT STARTED.** Unified CLI refinement, install-script
-  hooks, user-scope wiring, docs, packaging.
+- **Phase 5 — Polish: IN PROGRESS.** The 9-step activation phase skeleton
+  is in place (`src/declarative/activation.{c,h}`) — step 7 (services
+  enable/disable) is real, the other 8 are stubs. `209 news` is implemented
+  (fetches the Arch Linux RSS feed). `209 <pkg> info` and `209 <term> search`
+  work against the local generation DB and fall back to AUR. `test/` and
+  `docs/` directories exist with planning docs. Remaining Phase 5 work:
+  full activation phase implementation, `209 sync` (needs lib2O9), user-scope
+  `home.nix` wiring, packaging.
 
 ## Roadmap
 

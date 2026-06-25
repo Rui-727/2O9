@@ -253,6 +253,13 @@ struct nix_ast {
 nix_ast_t  *nix_parse(const char *source, size_t len, char **error);
 void        nix_ast_free(nix_ast_t *ast);
 
+/* 2O9: Deep-copy an AST node. Used by `inherit (src) ident1 ident2;` so
+ * each binding owns its own copy of the source expression. */
+nix_ast_t  *nix_ast_clone(nix_ast_t *ast);
+
+/* 2O9: Allocate a new AST node. Used by both the parser and nix_ast_clone. */
+nix_ast_t  *ast_new(nix_node_type_t type, int line, int col);
+
 /* ── Evaluator ────────────────────────────────────────────────────── */
 
 /* Create a fresh evaluation environment with builtins registered. */

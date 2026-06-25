@@ -11,7 +11,7 @@ LIBS = -lcurl
 
 CLI_SRC   = src/cli/main.c
 STORE_SRC = src/store/store.c src/store/symlinks.c
-DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c
+DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/activation.c
 AUR_SRC   = src/aur/aur_rpc.c src/aur/cJSON.c src/aur/aur_build.c src/aur/aur_resolve.c
 TRAK_SRC  = src/trakker/trakker.c
 NIX_SRC   = lib/2O9/nix/nix_eval.c lib/2O9/nix/nix_lexer.c lib/2O9/nix/nix_parser.c

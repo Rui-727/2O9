@@ -82,7 +82,9 @@ static int expect(nix_parser_t *p, nix_tok_type_t type, const char *msg)
 
 /* ── AST allocation ───────────────────────────────────────────────── */
 
-static nix_ast_t *ast_new(nix_node_type_t type, int line, int col)
+/* 2O9: ast_new is also used by nix_ast_clone in nix_eval.c, so it's
+ * non-static and declared in nix_eval.h. */
+nix_ast_t *ast_new(nix_node_type_t type, int line, int col)
 {
     nix_ast_t *n = calloc(1, sizeof(*n));
     if (n) { n->type = type; n->line = line; n->col = col; }
@@ -151,18 +153,52 @@ static nix_bind_t *parse_bind(nix_parser_t *p, size_t *count, size_t *cap, nix_b
         strcmp(p->cur.text, "inherit") == 0) {
         advance(p); /* consume 'inherit' */
 
-        /* TODO: inherit (expr) idents ; — for now just idents */
+        /* 2O9: support `inherit (expr) idents;` form.
+         * The semantics: for each ident `i` in the list, bind `i = expr.i`
+         * in the current scope. If no `(expr)` is given, bind `i = i`
+         * (look up `i` in the surrounding scope).
+         *
+         * Each binding gets its own clone of the source AST so that
+         * nix_ast_free can be called on each binding independently
+         * without double-freeing the shared source. */
+        nix_ast_t *src_expr = NULL;
+        int src_used = 0;
+        if (peek_type(p) == NIX_TOK_LPAREN) {
+            advance(p); /* consume '(' */
+            src_expr = parse_expr(p);
+            if (p->has_error) { nix_ast_free(src_expr); return binds; }
+            expect(p, NIX_TOK_RPAREN, "expected ')' after inherit source expression");
+            if (p->has_error) { nix_ast_free(src_expr); return binds; }
+        }
+
         while (peek_type(p) == NIX_TOK_IDENT) {
             if (*count >= *cap) { *cap *= 2; binds = realloc(binds, *cap * sizeof(nix_bind_t)); }
             attr_path_t ap = { .parts = NULL, .count = 1 };
             ap.parts = calloc(1, sizeof(char *));
             ap.parts[0] = strdup(p->cur.text);
             binds[*count].path = ap;
-            binds[*count].value = ast_new(NIX_NODE_IDENT, p->cur.line, p->cur.col);
-            binds[*count].value->ident = strdup(p->cur.text);
+
+            const char *ident = p->cur.text;
+            if (src_expr) {
+                /* `inherit (src) ident;` → bind `ident = src.ident` */
+                nix_ast_t *sel = ast_new(NIX_NODE_SELECT, p->cur.line, p->cur.col);
+                sel->select.expr = nix_ast_clone(src_expr);
+                sel->select.attr = strdup(ident);
+                binds[*count].value = sel;
+                src_used = 1;
+            } else {
+                /* `inherit ident;` → bind `ident = ident` (lookup in outer scope) */
+                nix_ast_t *id = ast_new(NIX_NODE_IDENT, p->cur.line, p->cur.col);
+                id->ident = strdup(ident);
+                binds[*count].value = id;
+            }
             (*count)++;
             advance(p);
         }
+        /* 2O9: src_expr is no longer needed — either cloned into each
+         * binding, or unused if no idents followed. */
+        nix_ast_free(src_expr);
+        (void)src_used;
         expect(p, NIX_TOK_SEMICOLON, "expected ';' after inherit");
         return binds;
     }
@@ -338,6 +374,66 @@ static nix_ast_t *parse_base(nix_parser_t *p)
             /* Not ellipsis — error: unexpected dot */
             parser_error(p, "unexpected '.' in attrset");
             return NULL;
+        }
+
+        /* 2O9: If the first token is `inherit`, route through parse_bind
+         * which handles both `inherit ident;` and `inherit (src) ident;`.
+         * Without this, the inline first-binding parser below treats
+         * `inherit` as a regular identifier and expects `=` or `.` after it. */
+        if (peek_type(p) == NIX_TOK_IDENT && p->cur.text &&
+            strcmp(p->cur.text, "inherit") == 0) {
+            size_t cap = 8, count = 0;
+            nix_bind_t *binds = calloc(cap, sizeof(nix_bind_t));
+            binds = parse_bind(p, &count, &cap, binds);
+            if (p->has_error) {
+                for (size_t i = 0; i < count; i++) { attrpath_free(&binds[i].path); nix_ast_free(binds[i].value); }
+                free(binds);
+                return NULL;
+            }
+            /* Parse remaining bindings */
+            while (peek_type(p) != NIX_TOK_RBRACE && peek_type(p) != NIX_TOK_EOF) {
+                binds = parse_bind(p, &count, &cap, binds);
+                if (p->has_error) {
+                    for (size_t i = 0; i < count; i++) { attrpath_free(&binds[i].path); nix_ast_free(binds[i].value); }
+                    free(binds);
+                    return NULL;
+                }
+            }
+            expect(p, NIX_TOK_RBRACE, "expected '}'");
+            /* Check if this is followed by ':' — making it a lambda */
+            if (peek_type(p) == NIX_TOK_COLON) {
+                advance(p);
+                nix_ast_t *body = parse_expr(p);
+                nix_ast_t *lambda = ast_new(NIX_NODE_LAMBDA, line, col);
+                lambda->lambda.param = ast_new(NIX_NODE_ATTR_SET, line, col);
+                lambda->lambda.param->attr_set.count = count;
+                lambda->lambda.param->attr_set.bindings = calloc(count, sizeof(*lambda->lambda.param->attr_set.bindings));
+                for (size_t i = 0; i < count; i++) {
+                    lambda->lambda.param->attr_set.bindings[i].key = binds[i].path.parts[0];
+                    binds[i].path.parts[0] = NULL;
+                    lambda->lambda.param->attr_set.bindings[i].value = binds[i].value;
+                    binds[i].value = NULL;
+                    for (size_t j = 1; j < binds[i].path.count; j++) free(binds[i].path.parts[j]);
+                    free(binds[i].path.parts);
+                }
+                free(binds);
+                lambda->lambda.body = body;
+                return lambda;
+            }
+            /* Regular attrset — convert binds to attr_entries */
+            nix_ast_t *node = ast_new(NIX_NODE_ATTR_SET, line, col);
+            node->attr_set.count = count;
+            node->attr_set.bindings = calloc(count, sizeof(*node->attr_set.bindings));
+            for (size_t i = 0; i < count; i++) {
+                /* inherit only ever produces single-segment paths */
+                node->attr_set.bindings[i].key = binds[i].path.parts[0];
+                binds[i].path.parts[0] = NULL;
+                node->attr_set.bindings[i].value = binds[i].value;
+                binds[i].value = NULL;
+                free(binds[i].path.parts);
+            }
+            free(binds);
+            return node;
         }
 
         /* First item must be an identifier */
