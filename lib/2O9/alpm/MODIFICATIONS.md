@@ -1,13 +1,17 @@
-# 2O9 Modifications to vendored pacman
+# Modifications to vendored pacman
 
-This is pacman v6.0.0, copied into the 2O9 tree and modified directly.
-Every change is marked with `/* 2O9: <reason> */` in the source.
+This is pacman v6.0.0, copied into the 2O9 tree and edited in place.
+Every change is marked `/* 2O9: <reason> */` so you can grep for what
+we touched and why.
 
-## Modification targets
+## The three modifications
 
-1. **Install backend**: dispatch to store adapter instead of libalpm's extractor
-2. **Installed-set query**: solver reads from generation DB, not /var/lib/pacman/local/
-3. **Config entrypoint**: configured programmatically, never from pacman.conf
+1. **Install backend** — dispatch to the store adapter instead of
+   libalpm's builtin extractor
+2. **Installed-set query** — the solver reads from the generation DB,
+   not `/var/lib/pacman/local/`
+3. **Config entrypoint** — lib2O9 is configured programmatically from
+   a manifest, never from `pacman.conf`
 
 ## Change log
 

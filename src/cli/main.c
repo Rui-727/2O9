@@ -238,7 +238,7 @@ static int cmd_install(const char *pkg_name)
                 /* No pkg path and no test mode — try direct extraction
                  * by downloading the package with pacman first.
                  * For now, tell the user what to do. */
-                fprintf(stderr, "209: package resolution not yet implemented\n");
+                fprintf(stderr, "209: package resolution isn't wired up yet (needs lib2O9 integration)\n");
                 fprintf(stderr, "    set TWO09_PKG_PATH=/path/to/pkg.tar.zst to test store add\n");
                 fprintf(stderr, "    or set TWO09_TEST_MODE=1 for end-to-end pipeline test\n");
                 return 1;
@@ -534,19 +534,18 @@ static char *merge_manifests(const char *user_json, const char *global_json,
 
 static int cmd_apply(void)
 {
-        /* Evaluate 2O9.nix, produce a JSON manifest, reconcile with
-         * current generation, build transaction, commit, rebuild symlink farm.
+        /* The whole point of 2O9: evaluate the config, figure out what
+         * changed, make it so. Concretely:
          *
-         * This is the heart of Phase 3: the declarative engine.
-         *
-         * 1. Read /etc/2O9/2O9.nix (or $HOME/.config/2O9/2O9.nix)
-         * 2. Parse and evaluate with our own C Nix evaluator
-         * 3. The result is a JSON manifest describing desired state
-         * 4. Diff manifest against current generation
-         * 5. Build transaction (install/remove/aur-build)
-         * 6. Execute transaction via store adapter + AUR helper
-         * 7. Commit new generation on success
-         * 8. Rebuild symlink farm
+         *   1. Find the config (~/.config/2O9/home.nix + /etc/2O9/2O9.nix)
+         *   2. Evaluate both with our own C Nix evaluator -> JSON manifest
+         *   3. Merge them (global wins, packages concatenate)
+         *   4. Diff the manifest against the current generation
+         *   5. Build a transaction: what to install, remove, build from AUR
+         *   6. Execute it (store adapter + AUR helper)
+         *   7. Commit a new generation
+         *   8. Rebuild the symlink farm
+         *   9. Run the activation phase (systemctl, sysusers, tmpfiles, ...)
          */
 
         /* Step 1: Find config files — both user (home.nix) and global
@@ -593,11 +592,10 @@ static int cmd_apply(void)
         }
 
         if (!user_json && !global_json) {
-                fprintf(stderr, "209: no 2O9.nix found\n");
-                fprintf(stderr, "    searched: %s, %s\n",
-                        user_config[0] ? user_config : "~/.config/2O9/home.nix",
-                        CONFIG_PATH);
-                fprintf(stderr, "    create one with: 209 init\n");
+                fprintf(stderr, "209: no config file found. I looked in:\n");
+                fprintf(stderr, "    %s\n", user_config[0] ? user_config : "~/.config/2O9/home.nix");
+                fprintf(stderr, "    %s\n", CONFIG_PATH);
+                fprintf(stderr, "\nRun `209 init` to create a starter config.\n");
                 return 1;
         }
 

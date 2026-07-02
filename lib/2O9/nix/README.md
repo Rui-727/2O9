@@ -1,13 +1,13 @@
-# 2O9 Nix Evaluator — Own C Implementation
+# 2O9 Nix Evaluator
 
-This is **not** a vendored copy of the C++ Nix source. This is our own C
-implementation of the Nix expression language subset that 2O9 needs to evaluate
-`2O9.nix` configuration files.
+This is our own C implementation of the Nix expression language — not a
+vendored copy of the C++ nix source. It implements just enough of the
+language to evaluate `2O9.nix` config files: the function form with
+self-reference, imports, attrsets, lists, lambdas, the usual builtins.
 
 ## What we implement
 
-The 2O9 evaluator supports the Nix language features needed for real config
-evaluation — including the function form with self-reference and imports:
+The features `2O9.nix` actually needs:
 
 - **Attribute sets** — `{ key = value; ... }` and recursive attrsets `rec { ... }`
 - **Lists** — `[ elem1 elem2 ... ]`

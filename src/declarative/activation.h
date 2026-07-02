@@ -1,10 +1,12 @@
-/* activation.h — 2O9 post-extract activation phase
+/* activation.h — what runs after packages land in the store
  *
- * Replaces pacman's .install scripts with an idempotent activation
- * phase that runs after packages are extracted into the store but
- * before the new generation is reported as committed.
+ * pacman runs .install scripts after extraction. We don't — those
+ * scripts assume files are at FHS paths, they're not idempotent, and
+ * they can't be re-run on rollback. Instead, we extract the *intent*
+ * (systemd units, tmpfiles, sysusers, icon caches) and run it through
+ * a 9-step idempotent activation phase.
  *
- * From DESIGN.md §7 "Install scripts — the activation model":
+ * From DESIGN.md §7:
  *
  *   1. Stop affected services
  *   2. Populate /etc symlinks (unit files, configs from the store)
@@ -16,9 +18,9 @@
  *   8. Rebuild caches    (icon cache, desktop db, font cache, ldconfig)
  *   9. Start/restart services that changed in this generation
  *
- * All steps are idempotent — safe to run on every 209 apply.
- * Missing helper tools (exit 127) are treated as non-fatal: a host
- * without gtk-update-icon-cache just skips that step.
+ * Every step is idempotent — safe to run on every `209 apply`. If a
+ * tool isn't installed (gtk-update-icon-cache on a headless box, say),
+ * we skip it silently rather than failing the whole apply.
  *
  * Implementation notes:
  *   - Step 2 is a no-op: the symlink farm already handles /etc/ entries

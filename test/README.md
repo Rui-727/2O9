@@ -1,34 +1,43 @@
-# test/ — integration and end-to-end tests
+# test/
 
-This directory holds 2O9's integration and end-to-end test suite. Unit
-tests for individual modules live alongside the modules they test:
+Integration tests for 2O9. Unit tests for individual modules live
+next to the code they test:
 
-- `lib/2O9/nix/test_nix_lexer.c` — Nix lexer unit tests
-- `lib/2O9/nix/test_nix_eval.c` — Nix evaluator unit tests (49 tests)
-- `src/aur/test_aur_rpc.c` — AUR RPC client unit tests
+- `lib/2O9/nix/test_nix_eval.c` — Nix evaluator (49 tests)
+- `lib/2O9/nix/test_nix_lexer.c` — Nix lexer
+- `src/aur/test_aur_rpc.c` — AUR RPC client
 
-The integration tests in this directory exercise multiple components
-together — e.g. `209 apply` end-to-end, generation commit + rollback,
-AUR build + store adapter + symlink farm.
+The scripts in this directory exercise multiple components together —
+`209 apply` end-to-end, generation rollback, the Trakker sandbox, etc.
 
-## Planned tests
-
-| File | What it tests |
-|---|---|
-| `test_apply.sh` | `209 apply` from a 2O9.nix fixture, verify generation committed |
-| `test_rollback.sh` | Install → rollback → verify symlink farm reverted |
-| `test_aur_build.sh` | `209 <pkg> aur build` against mock AUR server |
-| `test_trakker.sh` | `209 <cmd> trakker --no-net` produces JSON trace |
-| `test_nix_eval_e2e.sh` | `209 apply` with a real 2O9.nix fixture (self-ref, imports) |
-
-## Running tests
+## Running
 
 ```sh
-make test           # run all unit + integration tests (planned)
-make test-nix-eval  # run just the Nix evaluator unit tests
-make test-nix-lexer # run just the Nix lexer unit tests
-make test-aur-rpc   # run just the AUR RPC unit tests
+make test              # everything: unit + integration
+make test-nix-eval     # just the evaluator unit tests
+make test-nix-lexer    # just the lexer
+make test-aur-rpc      # just the AUR RPC client
 ```
 
-Status: skeleton. The `make test` target is not yet wired up; integration
-tests land as part of Phase 5 polish.
+Or run a single integration test directly:
+
+```sh
+./test/test_apply.sh ./209
+./test/test_rollback.sh ./209
+./test/test_trakker.sh ./209
+./test/test_nix_eval_e2e.sh ./209
+```
+
+## What each test does
+
+| Test | What it checks |
+|---|---|
+| `test_apply.sh` | Creates a fake 2O9.nix + store path, runs `209 apply`, verifies a generation is committed with the right packages in the manifest |
+| `test_rollback.sh` | Creates two fake generations, rolls back between them, verifies the `current` symlink points to the right one |
+| `test_nix_eval_e2e.sh` | Runs `209 apply` with a 2O9.nix that uses self-reference + conditional + let bindings; verifies evaluation succeeds |
+| `test_trakker.sh` | Runs `/bin/echo` in the sandbox with `--no-net`, runs `/bin/touch` with `--no-write` and verifies the write is blocked |
+
+Tests are designed to run in a sandbox — they create their own temp
+directories and clean up after themselves. Some warnings are expected
+(no real package source, no root for systemctl, etc.); the tests use
+`OK`/`WARN` prefixes so you can tell what matters.

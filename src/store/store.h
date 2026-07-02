@@ -1,17 +1,18 @@
-/* store.h — 2O9 store adapter
+/* store.h — putting packages in /nix/store/
  *
- * The store adapter sits between lib209 (which resolves packages) and
- * the Nix store (where files actually land). Its job:
+ * The store adapter takes a .pkg.tar.zst and puts it in the store.
+ * That's it. Three things happen:
  *
- *   1. Take a .pkg.tar.zst and add it to /nix/store/
- *   2. Return the store path (e.g. /nix/store/neovim-0.9.5)
- *   3. Build a manifest of files in the store path (for symlink farm)
+ *   1. Extract the .pkg.tar.zst into /nix/store/<name>-<version>/
+ *   2. Return the store path so the caller can record it
+ *   3. Build a manifest of files (so the symlink farm knows what to link)
  *
- * Two backends:
- *   - NIX_STORE:  calls `nix-store --add` via subprocess (DESIGN.md §9)
- *   - DIRECT:     extracts with libarchive directly (for testing without nix)
+ * Two backends, picked at runtime:
+ *   - NIX_STORE: shells out to `nix-store --add` (the real Nix toolchain)
+ *   - DIRECT:    extracts with libarchive directly (no nix dependency,
+ *                useful for testing and for systems without nix installed)
  *
- * See DESIGN.md §4 (Store adapter) and §6 (lib209 modification target 1).
+ * See DESIGN.md §4 and §6 for the why.
  */
 
 #ifndef TWO9_STORE_H

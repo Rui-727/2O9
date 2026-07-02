@@ -2,9 +2,9 @@
 
 **Working title:** 2O9 (stylized; the binary is `209`)
 **License:** GPL-2.0-only (inherited from pacman, the engine we link against)
-**Scope of this document:** architecture for combining pacman's libalpm, a C rewrite
-of paru's AUR workflow, and a real `/nix/store` with declarative configuration —
-into a single tool.
+**Scope:** how to combine pacman's libalpm, a C rewrite of paru's AUR
+workflow, and a real `/nix/store` with declarative configuration into
+one tool.
 
 ---
 
