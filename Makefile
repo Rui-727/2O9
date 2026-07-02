@@ -70,7 +70,7 @@ ALPM_OBJ = $(patsubst lib/2O9/%.c,lib/2O9/%.o,$(ALPM_SRC))
 # ── 209 binary source ──
 CLI_SRC   = src/cli/main.c
 STORE_SRC = src/store/store.c src/store/symlinks.c
-DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/activation.c
+DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/activation.c src/declarative/gen_index.c
 AUR_SRC   = src/aur/aur_rpc.c src/aur/aur_build.c src/aur/aur_resolve.c
 TRAK_SRC  = src/trakker/trakker.c
 NIX_SRC   = lib/2O9/nix/nix_eval.c lib/2O9/nix/nix_lexer.c lib/2O9/nix/nix_parser.c

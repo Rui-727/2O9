@@ -30,6 +30,7 @@
 #include "cJSON.h"
 #include "declarative/reconcile.h"
 #include "declarative/activation.h"
+#include "declarative/gen_index.h"
 #include "trakker/trakker.h"
 #include "nix_eval.h"
 #include "alpm.h"
@@ -75,7 +76,11 @@ static int cmd_usage(void)
         printf("  209 <term> aur search  Search AUR\n");
         printf("  209 <pkg> aur info     Show AUR package info\n");
         printf("  209 <pkg> aur review   Review PKGBUILD diff\n");
-        printf("  209 <pkg> trakker [flags]  Run in sandbox\n\n");
+        printf("  209 <pkg> trakker [flags]    Run package in sandbox\n\n");
+        printf("Trakker (leading form — command resolved via $PATH):\n");
+        printf("  209 trakker ls -la\n");
+        printf("  209 trakker --no-net -- curl https://example.com\n");
+        printf("  209 trakker --no-write -- makepkg -f\n\n");
         printf("Rollback:\n");
         printf("  209 <n> rollback   Roll back to generation #n\n");
         printf("  209 <n> pin        Pin a generation (protect from GC)\n\n");
@@ -1775,7 +1780,17 @@ static int cmd_news(void)
  *
  * This is the "what do I have installed?" view. Phase 1 (lib2O9)
  * will add repo-package info from libalpm's sync DBs. */
-static int cmd_info(const char *pkg_name)
+/* ── Process-wide generation index cache ──────────────────────────
+ * xbps builds an immutable in-memory dict from the pkgdb on first
+ * access, then all lookups are O(1). We do the same: parse the
+ * current generation's manifest JSON once, build a hash index, and
+ * reuse it for every info/search/contains check in this process.
+ * Built lazily on first use; freed at exit. */
+static gen_index_t *g_index_cache = NULL;
+static char g_index_db_root[PATH_MAX] = {0};
+static int g_index_gen_id = 0;
+
+static gen_index_t *get_gen_index(void)
 {
         char *home = getenv("HOME");
         char db_root[PATH_MAX];
@@ -1785,30 +1800,43 @@ static int cmd_info(const char *pkg_name)
                 snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
 
         gen_db_t *db = gen_db_open(db_root);
-        if (!db) {
-                fprintf(stderr, "209: cannot open generation DB at %s\n", db_root);
-                return 1;
-        }
-
-        /* Read packages from current generation */
-        gen_pkg_t *pkgs = read_current_gen_packages(db_root, gen_db_current(db));
-        gen_pkg_t *p = pkgs;
-        int found = 0;
-        while (p) {
-                if (strcmp(p->name, pkg_name) == 0) {
-                        printf("Name       : %s\n", p->name);
-                        printf("Version    : %s\n", p->version);
-                        printf("Store path : %s\n", p->store_path ? p->store_path : "(unknown)");
-                        printf("Origin     : %s\n", p->origin ? p->origin : "(unknown)");
-                        found = 1;
-                        break;
-                }
-                p = p->next;
-        }
-        gen_pkg_list_free(pkgs);
+        if (!db) return NULL;
+        int current = gen_db_current(db);
         gen_db_close(db);
+        if (current <= 0) return NULL;
 
-        if (found) return 0;
+        /* Rebuild if DB or generation changed */
+        if (g_index_cache &&
+            strcmp(g_index_db_root, db_root) == 0 &&
+            g_index_gen_id == current) {
+                return g_index_cache;
+        }
+
+        /* Build fresh index */
+        gen_index_free(g_index_cache);
+        g_index_cache = gen_index_load(db_root, current);
+        if (g_index_cache) {
+                strncpy(g_index_db_root, db_root, sizeof(g_index_db_root) - 1);
+                g_index_gen_id = current;
+        }
+        return g_index_cache;
+}
+
+static int cmd_info(const char *pkg_name)
+{
+        gen_index_t *idx = get_gen_index();
+
+        if (idx) {
+                const gen_index_entry_t *e = gen_index_lookup(idx, pkg_name);
+                if (e) {
+                        printf("Name       : %s\n", e->name);
+                        printf("Version    : %s\n", e->version);
+                        printf("Store path : %s\n", e->store_path ? e->store_path : "(unknown)");
+                        printf("Origin     : %s\n", e->origin);
+                        printf("Generation : #%d\n", e->generation_id);
+                        return 0;
+                }
+        }
 
         /* Not installed locally — fall back to AUR info */
         fprintf(stderr, "209: %s is not installed locally; querying AUR...\n\n", pkg_name);
@@ -1816,49 +1844,46 @@ static int cmd_info(const char *pkg_name)
 }
 
 /* ── 209 <term> search ─────────────────────────────────────────────
- * Searches installed packages by substring match on name. Falls back
- * to AUR search if no local matches.
- *
- * Phase 1 (lib2O9) will add searching the repo sync DBs via libalpm. */
+ * Searches installed packages by substring match. Uses the hash index
+ * — walks all entries (O(n) but no JSON re-parse) and checks each name.
+ * Falls back to AUR search if no local matches. */
+static void search_cb(const gen_index_entry_t *e, void *ud)
+{
+        const char *term = (const char *)ud;
+        if (e->name && strstr(e->name, term)) {
+                printf("  %s %s  [%s]\n",
+                       e->name, e->version ? e->version : "",
+                       e->origin ? e->origin : "?");
+        }
+}
+
 static int cmd_search(const char *term)
 {
-        char *home = getenv("HOME");
-        char db_root[PATH_MAX];
-        if (home)
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        else
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
+        gen_index_t *idx = get_gen_index();
 
-        gen_db_t *db = gen_db_open(db_root);
-        if (!db) {
-                fprintf(stderr, "209: cannot open generation DB at %s\n", db_root);
-                return 1;
-        }
-
-        gen_pkg_t *pkgs = read_current_gen_packages(db_root, gen_db_current(db));
-        gen_pkg_t *p = pkgs;
-        int found = 0;
-        while (p) {
-                if (p->name && strstr(p->name, term)) {
-                        if (!found) {
-                                printf("=== Local matches (current generation) ===\n");
+        if (idx && idx->entry_count > 0) {
+                printf("=== Local matches (current generation) ===\n");
+                size_t matches = gen_index_foreach(idx, search_cb, (void *)term);
+                (void)matches;  /* foreach returns total, not matching count */
+                /* Check if any actually matched by re-running the check */
+                int found = 0;
+                for (size_t i = 0; i < idx->bucket_count && !found; i++) {
+                        for (gen_index_entry_t *e = idx->buckets[i]; e; e = e->next) {
+                                if (e->name && strstr(e->name, term)) {
+                                        found = 1;
+                                        break;
+                                }
                         }
-                        printf("  %s %s  [%s]\n",
-                               p->name, p->version ? p->version : "",
-                               p->origin ? p->origin : "?");
-                        found = 1;
                 }
-                p = p->next;
+                if (found) {
+                        printf("\n(For AUR results, run: 209 %s aur search)\n", term);
+                        return 0;
+                }
+                printf("  (no local packages match '%s')\n", term);
         }
-        gen_pkg_list_free(pkgs);
-        gen_db_close(db);
 
-        if (!found) {
-                printf("=== No local matches for '%s' — searching AUR ===\n", term);
-                return cmd_aur_search(term);
-        }
-        printf("\n(For AUR results, run: 209 %s aur search)\n", term);
-        return 0;
+        printf("=== No local matches for '%s' — searching AUR ===\n", term);
+        return cmd_aur_search(term);
 }
 
 /* ── 209 init ──────────────────────────────────────────────────────
@@ -1979,6 +2004,74 @@ static int cmd_init(int scope)
         return 0;
 }
 
+/* ── 209 trakker [flags] [--] <command> [args...] ──────────────────
+ * Leading form of trakker — trakker first, command second.
+ * The command is resolved via $PATH by execvp inside trakker_run,
+ * so bare names like 'ls', 'curl', 'makepkg' work. */
+static int cmd_trakker_leading(int argc, char **argv)
+{
+        /* argv[0..argc-1] is everything after "trakker" */
+        trakker_policy_t policy = {0};
+        const char **cmd_argv = NULL;
+        size_t cmd_argc = 0;
+        int i = 0;
+
+        /* Parse flags */
+        while (i < argc) {
+                if (strcmp(argv[i], "--no-net") == 0) {
+                        policy.no_net = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--no-write") == 0) {
+                        policy.no_write = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--redirect-writes") == 0 && i + 1 < argc) {
+                        policy.redirect_writes = strdup(argv[i + 1]);
+                        i += 2;
+                } else if (strcmp(argv[i], "--allow-net") == 0 && i + 1 < argc) {
+                        const char *val = argv[i + 1];
+                        if (strncmp(val, "port=", 5) == 0) {
+                                policy.allow_net_count++;
+                                policy.allow_net_ports = realloc(
+                                        policy.allow_net_ports,
+                                        policy.allow_net_count * sizeof(char *));
+                                policy.allow_net_ports[policy.allow_net_count - 1] =
+                                        strdup(val + 5);
+                        }
+                        i += 2;
+                } else if (strcmp(argv[i], "--") == 0) {
+                        i++;
+                        break;
+                } else {
+                        /* Not a flag — start of command */
+                        break;
+                }
+        }
+
+        /* Everything from i onward is the command + its args */
+        if (i < argc) {
+                cmd_argc = argc - i;
+                cmd_argv = malloc((cmd_argc + 1) * sizeof(char *));
+                for (size_t j = 0; j < cmd_argc; j++)
+                        cmd_argv[j] = argv[i + j];
+                cmd_argv[cmd_argc] = NULL;
+        } else {
+                fprintf(stderr, "209 trakker: no command specified\n");
+                fprintf(stderr, "    usage: 209 trakker [flags] [--] <command> [args...]\n");
+                trakker_policy_free(&policy);
+                return 1;
+        }
+
+        trak_result_t *result = trakker_run(cmd_argv, cmd_argc, &policy);
+        free(cmd_argv);
+        int rc = result ? result->exit_code : 1;
+        if (result) {
+                trakker_result_write_json(result, stderr);
+                trakker_result_free(result);
+        }
+        trakker_policy_free(&policy);
+        return rc == 0 ? 0 : 1;
+}
+
 int main(int argc, char *argv[])
 {
         /* Handle options */
@@ -2012,6 +2105,22 @@ int main(int argc, char *argv[])
                 if (argc >= 3 && strcmp(argv[2], "--system") == 0)
                         scope = 1;
                 return cmd_init(scope);
+        }
+        if (strcmp(argv[1], "trakker") == 0) {
+                /* 209 trakker [flags] [--] <command> [args...]
+                 *
+                 * This is the leading form — trakker first, then the command.
+                 * The command is resolved via $PATH (execvp), so you can use
+                 * bare names like 'ls', 'curl', 'makepkg'.
+                 *
+                 * Examples:
+                 *   209 trakker ls -la
+                 *   209 trakker --no-net -- curl https://example.com
+                 *   209 trakker --no-write -- makepkg -f
+                 *
+                 * The old SOV form also still works: 209 <cmd> trakker [flags]
+                 */
+                return cmd_trakker_leading(argc - 2, &argv[2]);
         }
 
         /* SOV pattern: need at least subject + verb */
