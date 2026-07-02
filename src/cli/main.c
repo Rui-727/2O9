@@ -64,7 +64,8 @@ static int cmd_usage(void)
         printf("  generations        List generations\n");
         printf("  sync               Sync repo databases\n");
         printf("  gc                 Garbage-collect unreferenced store paths\n");
-        printf("  news               Show Arch Linux news\n\n");
+        printf("  news               Show Arch Linux news\n");
+        printf("  init [--system]    Create a starter 2O9.nix config\n\n");
         printf("SOV patterns:\n");
         printf("  209 <pkg> install  Install package from repo\n");
         printf("  209 <pkg> remove   Remove package\n");
@@ -1862,6 +1863,124 @@ static int cmd_search(const char *term)
         return 0;
 }
 
+/* ── 209 init ──────────────────────────────────────────────────────
+ * Creates a starter 2O9.nix in the user's config dir (~/.config/2O9/)
+ * or system-wide (/etc/2O9/). Refuses to overwrite an existing file. */
+static int cmd_init(int scope)
+{
+        /* scope: 0 = user (~/.config/2O9/), 1 = system (/etc/2O9/) */
+        char path[PATH_MAX];
+        if (scope == 1) {
+                snprintf(path, sizeof(path), "/etc/2O9/2O9.nix");
+        } else {
+                char *home = getenv("HOME");
+                if (!home) {
+                        fprintf(stderr, "209: HOME not set, cannot determine user config dir\n");
+                        fprintf(stderr, "    try: 209 init --system\n");
+                        return 1;
+                }
+                snprintf(path, sizeof(path), "%s/.config/2O9/2O9.nix", home);
+        }
+
+        /* Check if file already exists */
+        struct stat st;
+        if (stat(path, &st) == 0) {
+                fprintf(stderr, "209: %s already exists — refusing to overwrite\n", path);
+                fprintf(stderr, "    edit it manually or remove it first\n");
+                return 1;
+        }
+
+        /* Create parent directory (mkdir -p) */
+        char dir[PATH_MAX];
+        snprintf(dir, sizeof(dir), "%s", path);
+        char *slash = strrchr(dir, '/');
+        if (slash) {
+                *slash = '\0';
+                /* Walk the path creating each component */
+                for (char *p = dir + 1; *p; p++) {
+                        if (*p == '/') {
+                                *p = '\0';
+                                (void)mkdir(dir, 0755);  /* ignore error if exists */
+                                *p = '/';
+                        }
+                }
+                if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
+                        fprintf(stderr, "209: cannot create %s: %s\n", dir, strerror(errno));
+                        return 1;
+                }
+        }
+
+        /* Write the starter config */
+        FILE *f = fopen(path, "w");
+        if (!f) {
+                fprintf(stderr, "209: cannot write %s: %s\n", path, strerror(errno));
+                return 1;
+        }
+
+        fprintf(f, "{ config, ... }:\n");
+        fprintf(f, "#\n");
+        fprintf(f, "# 2O9 configuration — see https://github.com/Rui-727/2O9 for docs\n");
+        fprintf(f, "# This file declares what your system should have installed.\n");
+        fprintf(f, "# Run `209 apply` to make the system match this file.\n");
+        fprintf(f, "#\n");
+        fprintf(f, "\n");
+        fprintf(f, "{\n");
+        fprintf(f, "  # Packages from the official Arch repos.\n");
+        fprintf(f, "  # Remove or add entries, then run `209 apply`.\n");
+        fprintf(f, "  packages = [\n");
+        fprintf(f, "    \"vim\"\n");
+        fprintf(f, "    \"curl\"\n");
+        fprintf(f, "    \"git\"\n");
+        fprintf(f, "    \"htop\"\n");
+        fprintf(f, "  ];\n");
+        fprintf(f, "\n");
+        fprintf(f, "  # Packages from the AUR (built from source via makepkg).\n");
+        fprintf(f, "  aur.packages = [\n");
+        fprintf(f, "    # \"google-chrome\"\n");
+        fprintf(f, "    # \"visual-studio-code-bin\"\n");
+        fprintf(f, "  ];\n");
+        fprintf(f, "\n");
+        fprintf(f, "  # Build optimization for AUR packages.\n");
+        fprintf(f, "  # \"native\" = -march=native -O3, \"safe\" = -O2, or omit for defaults.\n");
+        fprintf(f, "  aur.build.profile = \"safe\";\n");
+        fprintf(f, "  aur.build.jobs = \"auto\";  # auto = nproc\n");
+        fprintf(f, "\n");
+        fprintf(f, "  # pacman options.\n");
+        fprintf(f, "  pacman = {\n");
+        fprintf(f, "    options = {\n");
+        fprintf(f, "      SigLevel = \"Required DatabaseOptional\";\n");
+        fprintf(f, "      ParallelDownloads = 5;\n");
+        fprintf(f, "    };\n");
+        fprintf(f, "    repos = {\n");
+        fprintf(f, "      core     = { server = \"https://mirror.example.com/core/os/x86_64\"; };\n");
+        fprintf(f, "      extra    = { server = \"https://mirror.example.com/extra/os/x86_64\"; };\n");
+        fprintf(f, "      multilib = { server = \"https://mirror.example.com/multilib/os/x86_64\"; };\n");
+        fprintf(f, "    };\n");
+        fprintf(f, "  };\n");
+        fprintf(f, "\n");
+        fprintf(f, "  # Services to enable (translates to `systemctl enable`).\n");
+        fprintf(f, "  services = {\n");
+        fprintf(f, "    sshd.enable = true;\n");
+        fprintf(f, "    # NetworkManager.enable = true;\n");
+        fprintf(f, "  };\n");
+        fprintf(f, "\n");
+        fprintf(f, "  # Self-reference: install openssh only if sshd is enabled above.\n");
+        fprintf(f, "  packages = packages\n");
+        fprintf(f, "    ++ (if config.services.sshd.enable\n");
+        fprintf(f, "        then [ \"openssh\" ]\n");
+        fprintf(f, "        else []);\n");
+        fprintf(f, "}\n");
+        fclose(f);
+
+        printf("created: %s\n", path);
+        printf("\n");
+        printf("next steps:\n");
+        printf("  1. Edit the file to match your needs\n");
+        printf("  2. Run `209 sync` to download repo databases\n");
+        printf("  3. Run `209 apply` to install everything\n");
+        return 0;
+}
+
 int main(int argc, char *argv[])
 {
         /* Handle options */
@@ -1888,6 +2007,13 @@ int main(int argc, char *argv[])
         if (strcmp(argv[1], "gc") == 0)           return cmd_gc();
         if (strcmp(argv[1], "news") == 0) {
                 return cmd_news();
+        }
+        if (strcmp(argv[1], "init") == 0) {
+                /* 209 init [--system] */
+                int scope = 0;  /* user by default */
+                if (argc >= 3 && strcmp(argv[2], "--system") == 0)
+                        scope = 1;
+                return cmd_init(scope);
         }
 
         /* SOV pattern: need at least subject + verb */
