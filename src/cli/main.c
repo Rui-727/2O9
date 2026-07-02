@@ -27,11 +27,13 @@
 #include "aur/aur_rpc.h"
 #include "aur/build.h"
 #include "aur/resolver.h"
-#include "aur/cJSON.h"
+#include "cJSON.h"
 #include "declarative/reconcile.h"
 #include "declarative/activation.h"
 #include "trakker/trakker.h"
 #include "nix_eval.h"
+#include "alpm.h"
+#include "two9_init.h"
 
 #ifndef PACKAGE
 #define PACKAGE "2O9"
@@ -880,7 +882,68 @@ static int sync_one_repo(CURL *curl, const char *repo_name, const char *server_u
 
 static int cmd_sync(void)
 {
-        /* Read repos from 2O9.nix if available; otherwise use Arch defaults. */
+        /* 2O9 Phase 1 path: use lib2O9 (modified libalpm) to sync repo DBs
+         * via alpm_db_update(). This exercises the actual libalpm sync
+         * machinery — proper mirror handling, signature verification,
+         * parallel downloads.
+         *
+         * We evaluate 2O9.nix (or fall back to defaults) to get the
+         * manifest, then two9_alpm_init_from_manifest() configures an
+         * alpm_handle_t with the sync DBs registered. */
+        char *manifest_json = NULL;
+        char *home = getenv("HOME");
+        char user_config[PATH_MAX] = {0};
+        if (home)
+                snprintf(user_config, sizeof(user_config),
+                         "%s/.config/2O9/home.nix", home);
+
+        char *eval_err = NULL;
+        struct stat st;
+        if (user_config[0] && stat(user_config, &st) == 0) {
+                manifest_json = eval_nix_config(user_config, &eval_err);
+        }
+        if (!manifest_json && stat(CONFIG_PATH, &st) == 0) {
+                manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
+        }
+
+        /* If we have a manifest, use the lib2O9 path */
+        if (manifest_json) {
+                printf("209: syncing via lib2O9 (alpm_db_update)\n");
+                alpm_handle_t *handle = two9_alpm_init_from_manifest(manifest_json);
+                free(manifest_json);
+                if (!handle) {
+                        fprintf(stderr, "209: failed to init lib2O9\n");
+                        free(eval_err);
+                        return 1;
+                }
+
+                /* Update all sync DBs at once — alpm_db_update takes the
+                 * full list and handles per-DB fetching internally. */
+                alpm_list_t *dbs = alpm_get_syncdbs(handle);
+                int total = alpm_list_count(dbs);
+                printf("  %d sync DB(s) registered\n", total);
+                printf("  syncing...\n");
+                int rc = alpm_db_update(handle, dbs, 0 /*force=0*/);
+                if (rc < 0) {
+                        fprintf(stderr, "  sync failed: %s\n",
+                                alpm_strerror(alpm_errno(handle)));
+                        alpm_release(handle);
+                        free(manifest_json);
+                        free(eval_err);
+                        return 1;
+                }
+
+                alpm_release(handle);
+                printf("=== sync complete ===\n");
+                free(eval_err);
+                return 0;
+        }
+
+        /* Fallback path: no 2O9.nix found, use hardcoded Arch defaults
+         * via direct libcurl. This is the pre-Phase-1 behavior. */
+        free(eval_err);
+        fprintf(stderr, "209: no 2O9.nix found — using default Arch mirrors\n");
+
         const char *default_repos[][2] = {
                 {"core",     "https://mirror.archlinuxarm.org/x86_64/core"},
                 {"extra",    "https://mirror.archlinuxarm.org/x86_64/extra"},
@@ -893,11 +956,6 @@ static int cmd_sync(void)
                 fprintf(stderr, "209: cannot init libcurl\n");
                 return 1;
         }
-
-        /* TODO: parse 2O9.nix to get user-configured repos. For now,
-         * sync the default Arch repos. The proper implementation will
-         * use two9_alpm_init_from_manifest() once lib2O9 is linked
-         * (Phase 1) and call alpm_db_update() for each registered DB. */
 
         printf("=== syncing repo databases ===\n");
         int errors = 0;

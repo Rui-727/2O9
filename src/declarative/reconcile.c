@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 #include "reconcile.h"
-#include "../aur/cJSON.h"
+#include "cJSON.h"
 #include "../aur/build.h"
 
 /* ── Helpers ────────────────────────────────────────────────────────── */

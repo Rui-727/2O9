@@ -101,7 +101,7 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
                 cJSON *server = cJSON_GetObjectItem(repo, "server");
                 if (!cJSON_IsString(server)) continue;
 
-                alpm_db_t *db = alpm_db_register_sync(handle, repo_name);
+                alpm_db_t *db = alpm_register_syncdb(handle, repo_name, 0);
                 if (db) {
                     alpm_db_add_server(db, server->valuestring);
                 }

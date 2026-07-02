@@ -2,6 +2,9 @@
 *.o
 209
 test-aur-rpc
+test-nix-lexer
+test-nix-eval
+lib2O9.a
 
 # Editor / OS noise
 *.swp

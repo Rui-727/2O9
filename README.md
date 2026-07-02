@@ -61,17 +61,19 @@ make clean                      # remove build artifacts
 | `test-nix-lexer` | Nix lexer unit tests |
 | `test-nix-eval` | Nix evaluator unit tests |
 
-**Real dependencies today:** a C compiler, `make`, and `libcurl-dev`. Only the
-AUR helper links `libcurl` (`-lcurl` is the only link flag in the Makefile).
-cJSON is vendored in `src/aur/cJSON.{c,h}` — no external JSON dependency.
-lib2O9 (the alpm stub plus the Nix evaluator) is pure C with no extra deps.
+**Real dependencies today:** a C compiler, `make`, `libcurl-dev`,
+`libarchive-dev`, `openssl-dev`, `libgpgme-dev`, and `libxml2-dev`.
+lib2O9 (the modified libalpm + own C Nix evaluator + cJSON) is built
+into `lib2O9.a` and linked into the `209` binary. The Makefile's
+`LIB2O9_DEPS_PREFIX` variable lets you point at a user-local install
+of the dev headers (e.g. `~/local/`) when system-wide install isn't
+available.
 
-**Future dependencies (not currently linked):** `DESIGN.md` anticipates
-`libarchive-dev` and `openssl-dev` for the eventual real libalpm build
-(package extraction and signature verification). The Makefile does not link
-them today because the 209 binary operates independently of libalpm — see
-[Status](#status). When the libalpm modifications land in Phase 1, those deps
-will be added.
+**Running tests:**
+```sh
+make test           # unit tests (nix-eval, nix-lexer, aur-rpc) + integration tests
+make test-nix-eval  # just the Nix evaluator unit tests (49 tests)
+```
 
 ## Repo structure
 
@@ -90,16 +92,20 @@ will be added.
 │   │   ├── README.md           #   evaluator design notes
 │   │   ├── test_nix_lexer.c    #   lexer unit tests
 │   │   └── test_nix_eval.c     #   evaluator unit tests (49 tests)
-│   ├── alpm/                   #   modified libalpm (planned — currently stub)
-│   │   └── MODIFICATIONS.md    #   log of 3 planned modifications (all "Planned", none applied)
-│   └── common/                 #   shared utils (ini.c, util-common.c)
+│   ├── alpm/                   #   modified libalpm (Phase 1 — all 3 mods applied + built)
+│   │   ├── MODIFICATIONS.md    #   log of 3 applied modifications
+│   │   ├── two9_init.c         #   2O9 programmatic config entrypoint (MOD #3)
+│   │   └── two9_init.h
+│   └── common/                 #   shared utils + vendored cJSON
+│       ├── cJSON.c, cJSON.h   #   vendored JSON library (moved from src/aur/)
+│       ├── ini.c, ini.h
+│       └── util-common.c, util-common.h
 ├── src/
 │   ├── cli/main.c              # 209 binary — SOV command dispatch
 │   ├── aur/                    # AUR helper (paru ported to C)
 │   │   ├── aur_rpc.c           # AUR RPC client (libcurl)
 │   │   ├── aur_build.c         # PKGBUILD clone + makepkg orchestration
 │   │   ├── aur_resolve.c       # recursive AUR dependency resolver
-│   │   ├── cJSON.c/h           # vendored JSON library
 │   │   ├── build.h, resolver.h, aur_rpc.h
 │   │   └── test_aur_rpc.c      # RPC unit tests
 │   ├── declarative/            # generation DB + reconcile engine + activation
@@ -257,11 +263,10 @@ Honest accounting of what works versus what is planned.
 
 - **Phase 0 — Foundation: DONE.** Repo, Makefile, build works, four targets
   compile and link.
-- **Phase 1 — Store adapter MVP: PARTIAL → MODIFICATIONS APPLIED.** The
-  store adapter (`src/store/`) and symlink farm (`src/store/symlinks.c`)
-  are implemented, as is the file-based generation DB
-  (`src/declarative/gen.c`). **All three lib2O9 modifications to vendored
-  libalpm are now applied** to the source tree (see
+- **Phase 1 — Store adapter MVP: DONE.** The store adapter (`src/store/`)
+  and symlink farm (`src/store/symlinks.c`) are implemented, as is the
+  file-based generation DB (`src/declarative/gen.c`). **All three lib2O9
+  modifications to vendored libalpm are applied** to the source tree (see
   [`lib/2O9/alpm/MODIFICATIONS.md`](./lib/2O9/alpm/MODIFICATIONS.md)):
   1. **Install backend dispatch** — `alpm_handle_t.install_backend`
      function pointer checked in `add.c`'s `commit_single_pkg()`; when
@@ -270,18 +275,22 @@ Honest accounting of what works versus what is planned.
   2. **Installed-set query** — `alpm_handle_t.installed_set_loader`
      checked in `be_local.c`'s `local_db_populate()`; when set, libalpm
      calls it instead of reading `/var/lib/pacman/local/`.
-  3. **Config entrypoint** — new `lib/2O9/alpm/two9_init.c` provides
+  3. **Config entrypoint** — `lib/2O9/alpm/two9_init.c` provides
      `two9_alpm_init_from_manifest()` which configures an
      `alpm_handle_t` programmatically from a 2O9 manifest JSON, never
      reading `/etc/pacman.conf`.
 
-  The modifications are marked with `/* 2O9: ... */` comments per the
-  design spec. **lib2O9 is not yet built into the 209 binary** —
-  building it requires libarchive-dev, openssl-dev, and optionally
-  libgpgme-dev. The `209` binary continues to operate independently of
-  libalpm until those deps are added to the Makefile and `lib2O9.a` is
-  linked. The modifications are real, auditable C code changes ready to
-  be exercised once lib2O9 is built.
+  **lib2O9 is now built and linked into the 209 binary.** The Makefile
+  builds `lib2O9.a` (2.4 MB static library containing all 30 vendored
+  alpm objects + cJSON + two9_init) and links it into the `209` binary.
+  216 alpm/two9 symbols are present in the binary. `209 sync` now calls
+  `two9_alpm_init_from_manifest()` + `alpm_db_update()` when a 2O9.nix
+  config exists — exercising the actual libalpm sync machinery.
+
+  Build deps: libarchive-dev, openssl-dev, libgpgme-dev, libcurl-dev
+  (already linked). In sandbox environments without root, these can be
+  extracted from .deb files to `~/local/` — the Makefile's
+  `LIB2O9_DEPS_PREFIX` variable handles this automatically.
 - **Phase 2 — paru → C port: DONE.** AUR RPC client (`src/aur/aur_rpc.c`,
   libcurl), PKGBUILD clone + makepkg orchestration (`aur_build.c`), recursive
   AUR dependency resolver (`aur_resolve.c`). `test-aur-rpc` works against the
@@ -323,10 +332,9 @@ Honest accounting of what works versus what is planned.
 ## Roadmap
 
 Phased roadmap with risk-first ordering is in [`DESIGN.md`](./DESIGN.md) §10.
-The remaining major work is **Phase 1** (build lib2O9 — modifications are
-applied to source, but linking into the 209 binary needs libarchive-dev +
-openssl-dev) and **Phase 5 polish** (packaging, integration tests). Phases
-0, 2, 3, and 4 are done.
+**Phase 1 is now done** — lib2O9 is built, linked, and exercised. The
+remaining work is **Phase 5 polish** (packaging, more integration tests,
+full activation phase implementation). Phases 0, 1, 2, 3, and 4 are done.
 
 ## Honest risks
 
