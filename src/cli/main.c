@@ -384,6 +384,7 @@ static gen_pkg_t *read_current_gen_packages(const char *db_root, int current_id)
 static char *eval_nix_config(const char *config_path, char **err_out);
 static size_t sync_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata);
 static gen_index_t *get_gen_index(void);
+static store_backend_t pick_backend(void);
 
 /* cmd_install and cmd_remove are non-static so reconcile_execute.c can call them.
  * cmd_install_only: extracts to store but does NOT commit a generation.
@@ -397,7 +398,9 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
         /* Just find, download, and extract the package to /nix/store/.
          * No generation commit, no symlink farm. The caller handles that. */
 
-        printf("209: installing %s...\n", pkg_name);
+        printf("%s::%s%s %sinstalling %s%s...%s\n",
+               C_BOLD(), C_CYAN(), PACKAGE, C_RESET(),
+               C_BOLD(), pkg_name, C_RESET());
 
         char *resolved_version = NULL;
         store_add_result_t result;
@@ -411,9 +414,9 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
                 result.store_path = strdup(fake_store);
                 result.error_msg = NULL;
                 resolved_version = strdup("0.0.0");
-                printf("  [test mode] fake store path: %s\n", fake_store);
+                printf("  %s[test mode]%s fake store path: %s\n", C_DIM(), C_RESET(), fake_store);
         } else if (env_path && env_path[0]) {
-                result = store_add(env_path, STORE_BACKEND_NIX_STORE);
+                result = store_add(env_path, pick_backend());
                 if (result.success != 0) {
                         store_add_result_free(&result);
                         result = store_add(env_path, STORE_BACKEND_DIRECT);
@@ -487,7 +490,10 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
                 const char *version = alpm_pkg_get_version(pkg);
                 const char *filename = alpm_pkg_get_filename(pkg);
                 resolved_version = strdup(version);
-                printf("  found %s %s\n", pkg_name, version);
+                printf("  %sfound%s %s%s%s %s%s%s\n",
+                       C_DIM(), C_RESET(),
+                       C_BOLD(), pkg_name, C_RESET(),
+                       C_GREEN(), version, C_RESET());
 
                 const char *server_url = NULL;
                 alpm_list_t *servers = alpm_db_get_servers(found_db);
@@ -517,7 +523,7 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
 
                 snprintf(cache_path, sizeof(cache_path), "%s/%s", cache_dir, filename);
 
-                printf("  downloading %s...\n", filename);
+                printf("  %sdownloading%s %s...\n", C_DIM(), C_RESET(), filename);
                 CURL *curl = curl_easy_init();
                 if (!curl) { alpm_release(handle); free(resolved_version); return 1; }
                 FILE *fp = fopen(cache_path, "wb");
@@ -545,29 +551,23 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
                         return 1;
                 }
 
-                printf("  downloaded %s\n", filename);
+                printf("  %sdownloaded%s %s\n", C_GREEN(), C_RESET(), filename);
                 alpm_release(handle);
 
                 /* Extract to /nix/store/ */
                 mkdir("/nix", 0755);
                 mkdir("/nix/store", 0755);
 
-                result = store_add_named(cache_path, pkg_name, version, STORE_BACKEND_NIX_STORE);
-                if (result.success != 0) {
-                        fprintf(stderr, "  nix-store failed (%s), trying direct extraction...\n",
-                                result.error_msg);
-                        store_add_result_free(&result);
-                        result = store_add_named(cache_path, pkg_name, version, STORE_BACKEND_DIRECT);
-                        if (result.success != 0) {
-                                fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
-                                store_add_result_free(&result);
-                                free(resolved_version);
-                                return 1;
-                        }
-                }
+                result = store_add_named(cache_path, pkg_name, version, pick_backend());
+		if (result.success != 0) {
+			fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
+			store_add_result_free(&result);
+			free(resolved_version);
+			return 1;
+		}
         }
 
-        printf("  store path: %s\n", result.store_path);
+        printf("  %sstore path:%s %s\n", C_DIM(), C_RESET(), result.store_path);
 
         /* Return store path and version to caller */
         if (store_path_out) *store_path_out = strdup(result.store_path);
@@ -614,7 +614,7 @@ int cmd_install(const char *pkg_name)
                 printf("  [test mode] fake store path: %s\n", fake_store);
         } else if (pkg_path[0] != '\0') {
                 /* User provided a .pkg.tar.zst path directly */
-                result = store_add(pkg_path, STORE_BACKEND_NIX_STORE);
+                result = store_add(pkg_path, pick_backend());
                 if (result.success != 0) {
                         fprintf(stderr, "  nix-store failed (%s), trying direct extraction...\n",
                                 result.error_msg);
@@ -717,7 +717,10 @@ int cmd_install(const char *pkg_name)
                 const char *filename = alpm_pkg_get_filename(pkg);
                 resolved_version = strdup(version);
 
-                printf("  found %s %s\n", pkg_name, version);
+                printf("  %sfound%s %s%s%s %s%s%s\n",
+                       C_DIM(), C_RESET(),
+                       C_BOLD(), pkg_name, C_RESET(),
+                       C_GREEN(), version, C_RESET());
 
                 /* Build the download URL from the DB's server + filename */
                 const char *server_url = NULL;
@@ -742,7 +745,7 @@ int cmd_install(const char *pkg_name)
                 mkdir("/var/cache/2O9", 0755);
                 mkdir("/var/cache/2O9/pkg", 0755);
 
-                printf("  downloading %s...\n", filename);
+                printf("  %sdownloading%s %s...\n", C_DIM(), C_RESET(), filename);
 
                 CURL *curl = curl_easy_init();
                 if (!curl) {
@@ -788,26 +791,20 @@ int cmd_install(const char *pkg_name)
                         return 1;
                 }
 
-                printf("  downloaded %s\n", filename);
+                printf("  %sdownloaded%s %s\n", C_GREEN(), C_RESET(), filename);
                 alpm_release(handle);
 
                 /* Extract the .pkg.tar.zst to /nix/store/ via the store adapter */
-                result = store_add_named(cache_path, pkg_name, version, STORE_BACKEND_NIX_STORE);
-                if (result.success != 0) {
-                        fprintf(stderr, "  nix-store failed (%s), trying direct extraction...\n",
-                                result.error_msg);
-                        store_add_result_free(&result);
-                        result = store_add_named(cache_path, pkg_name, version, STORE_BACKEND_DIRECT);
-                        if (result.success != 0) {
-                                fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
-                                store_add_result_free(&result);
-                                free(resolved_version);
-                                return 1;
-                        }
-                }
+                result = store_add_named(cache_path, pkg_name, version, pick_backend());
+		if (result.success != 0) {
+			fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
+			store_add_result_free(&result);
+			free(resolved_version);
+			return 1;
+		}
         }
 
-        printf("  store path: %s\n", result.store_path);
+        printf("  %sstore path:%s %s\n", C_DIM(), C_RESET(), result.store_path);
 
         /* Step 2: open generation DB and lock */
         char db_root[PATH_MAX];
@@ -872,7 +869,7 @@ int cmd_install(const char *pkg_name)
                 return 1;
         }
 
-        printf("  generation #%d committed\n", new_id);
+        printf("  %sgeneration #%d%s committed\n", C_GREEN(), new_id, C_RESET());
 
         /* Step 5: build symlink farm */
         gen_t *prev_gen = current > 0 ? gen_db_get(db, current) : NULL;
@@ -883,7 +880,8 @@ int cmd_install(const char *pkg_name)
         }
         if (prev_gen) gen_free(prev_gen);
 
-        printf("  done. rollback with: 209 %d rollback\n", new_id - 1 > 0 ? new_id - 1 : 1);
+        printf("  %sdone.%s rollback with: %s209 %d rollback%s\n",
+               C_GREEN(), C_RESET(), C_CYAN(), new_id - 1 > 0 ? new_id - 1 : 1, C_RESET());
         printf("  NOTE: reboot for full system state to take effect\n");
 
         gen_pkg_list_free(pkgs);
@@ -1089,6 +1087,16 @@ static void find_store_path(const char *pkg_name, char *out, size_t out_sz)
                 }
         }
         closedir(d);
+}
+
+/* Pick the best store backend: nix-store if installed, direct otherwise.
+ * Avoids the "nix-store not found" error message entirely. */
+static store_backend_t pick_backend(void)
+{
+        if (access("/usr/bin/nix-store", X_OK) == 0 ||
+            access("/nix/var/nix/profiles/default/bin/nix-store", X_OK) == 0)
+                return pick_backend();
+        return STORE_BACKEND_DIRECT;
 }
 
 static int cmd_apply(void)
@@ -1386,7 +1394,7 @@ static int cmd_apply(void)
                 }
         }
 
-        printf("  generation #%d committed\n", new_id);
+        printf("  %sgeneration #%d%s committed\n", C_GREEN(), new_id, C_RESET());
 
         /* Step 7: Rebuild symlink farm */
         gen_t *gen = gen_db_get(db, new_id);
@@ -1955,7 +1963,7 @@ int cmd_remove(const char *pkg_name)
                 return 1;
         }
 
-        printf("  generation #%d committed\n", new_id);
+        printf("  %sgeneration #%d%s committed\n", C_GREEN(), new_id, C_RESET());
 
         /* Rebuild symlink farm */
         gen_t *new_gen = gen_db_get(db, new_id);
@@ -2274,7 +2282,7 @@ static int cmd_aur_build(const char *pkg_name)
                         pkg_tail = &p->next;
                 } else {
                         store_add_result_t sar = store_add(r->pkg_path,
-                                                           STORE_BACKEND_NIX_STORE);
+                                                           pick_backend());
                         if (sar.success != 0) {
                                 fprintf(stderr, "209: store add failed for %s: %s\n",
                                         r->pkg_name, sar.error_msg);
@@ -2304,7 +2312,7 @@ static int cmd_aur_build(const char *pkg_name)
                 fprintf(stderr, "209: failed to commit generation\n");
                 gen_pkg_list_free(all_pkgs);
         } else {
-                printf("  generation #%d committed\n", new_id);
+                printf("  %sgeneration #%d%s committed\n", C_GREEN(), new_id, C_RESET());
 
                 /* Rebuild symlink farm */
                 gen_t *gen = gen_db_get(db, new_id);
