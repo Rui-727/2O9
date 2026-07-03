@@ -360,6 +360,16 @@ streams it into the store path. Falls through to the Arch mirror only
 if no cache has it. Use `209 cache push <path>` to upload a path and
 its closure to all configured caches.
 
+## Documentation
+
+- [Tutorial](./docs/TUTORIAL.md): getting started, first hour of use
+- [Cookbook](./docs/COOKBOOK.md): common tasks as recipes
+- [Use cases](./docs/USE_CASES.md): real-world scenarios
+- [Migration guide](./docs/MIGRATION.md): from pacman, paru, Nix, NixOS
+- [Manpage](./docs/MANPAGE.md): command reference
+- [Config reference](./docs/CONFIG.md): `2O9.nix` and `2O9.conf` schema
+- [Design document](./DESIGN.md): full architecture
+
 ## Status
 
 What works and what's left.

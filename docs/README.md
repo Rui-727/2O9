@@ -6,6 +6,10 @@ Long-form documentation that doesn't fit in the README or DESIGN.md.
 
 | File | What it covers |
 |---|---|
+| [`TUTORIAL.md`](./TUTORIAL.md) | Linear walkthrough: install, first config, first apply, first rollback, first AUR build, first GC, first substituter |
+| [`COOKBOOK.md`](./COOKBOOK.md) | 20 self-contained recipes for common tasks (install, search, build, roll back, cache, sandbox) |
+| [`USE_CASES.md`](./USE_CASES.md) | Longer writeups of how 2O9 fits real workflows (developer workstation, fleet, AUR power user, air-gap, CI, untrusted review) |
+| [`MIGRATION.md`](./MIGRATION.md) | Coming from pacman, paru, Nix, or NixOS: command mappings and conceptual diffs |
 | [`MANPAGE.md`](./MANPAGE.md) | The `209` man page: every command, option, and file path |
 | [`CONFIG.md`](./CONFIG.md) | `2O9.nix` schema reference plus `2O9.conf` INI file, with examples |
 
