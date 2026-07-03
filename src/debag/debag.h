@@ -104,4 +104,18 @@ void debag_result_free(debag_result_t *r);
 /* Print a result to a file (JSON format) */
 void debag_result_print(const debag_result_t *r, FILE *out);
 
+/* ── .install script analysis ────────────────────────────────────── */
+
+typedef struct script_intent script_intent_t;
+typedef struct script_analysis script_analysis_t;
+
+/* Parse a .install script and extract intent (what each function does) */
+script_analysis_t *debag_analyze_script(const char *script_path);
+
+/* Free a script analysis */
+void debag_free_script_analysis(script_analysis_t *a);
+
+/* Print script analysis in human-readable format */
+void debag_print_script_analysis(const script_analysis_t *a, FILE *out);
+
 #endif /* TWO9_DEBAG_H */
