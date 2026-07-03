@@ -1,4 +1,4 @@
-/* store.c — 2O9 store adapter implementation
+/* store.c - 2O9 store adapter implementation
  *
  * Phase 1: implements both backends (nix-store subprocess and direct
  * tar extraction). The nix-store backend is what production uses when
@@ -13,7 +13,7 @@
  *
  * This matches DESIGN.md §5.1:
  *   "stage_and_register(pkg, files): Extract .pkg.tar.zst to a staging dir
- *    → Move staging dir to /nix/store/<name>-<version>/ — the store path
+ *    → Move staging dir to /nix/store/<name>-<version>/ - the store path
  *    has no hash, just name and version. Idempotent: if the path already
  *    exists, skip."
  */
@@ -270,7 +270,7 @@ static int direct_extract(const char *pkg_path, char **store_path_out)
 	 *
 	 * tar -xf <pkg> -C <store_path> --strip-components=1
 	 *   (strip-components=1 removes the top-level directory like "pkg-name/")
-	 * Actually, Arch .pkg.tar.zst don't have a top-level dir — files
+	 * Actually, Arch .pkg.tar.zst don't have a top-level dir - files
 	 * are at . (bin/, etc/, usr/, .PKGINFO, .INSTALL, etc.)
 	 * So we extract directly. */
 	pid_t pid;
@@ -290,7 +290,7 @@ static int direct_extract(const char *pkg_path, char **store_path_out)
 	waitpid(pid, &status, 0);
 
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		/* Extraction failed — clean up */
+		/* Extraction failed - clean up */
 		rmdir(store_path);
 		return -1;
 	}
@@ -314,7 +314,7 @@ store_add_result_t store_add(const char *pkg_path, store_backend_t backend)
 			result.success = -1;
 			if (access("/usr/bin/nix-store", X_OK) != 0 &&
 			    access("/nix/var/nix/profiles/default/bin/nix-store", X_OK) != 0) {
-				result.error_msg = strdup("nix-store not found — install nix first");
+				result.error_msg = strdup("nix-store not found - install nix first");
 			} else {
 				result.error_msg = strdup("nix-store --add failed");
 			}
@@ -422,7 +422,7 @@ static int walk_dir(const char *base, const char *prefix,
 				}
 			}
 		} else if (S_ISREG(st.st_mode)) {
-			/* Skip .PKGINFO, .INSTALL, .MTREE, .BUILDINFO — package metadata */
+			/* Skip .PKGINFO, .INSTALL, .MTREE, .BUILDINFO - package metadata */
 			if (strcmp(ent->d_name, ".PKGINFO") == 0 ||
 			    strcmp(ent->d_name, ".INSTALL") == 0 ||
 			    strcmp(ent->d_name, ".MTREE") == 0 ||

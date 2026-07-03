@@ -1,7 +1,7 @@
-/* 2O9 Nix Evaluator — own C implementation
+/* 2O9 Nix Evaluator - own C implementation
  *
  * Evaluates the subset of the Nix expression language needed to parse
- * 2O9.nix configuration files.  Not a full Nix interpreter — no
+ * 2O9.nix configuration files.  Not a full Nix interpreter - no
  * derivations, no fetchers, no flakes.
  *
  * Part of lib2O9.  Pure C, no C++ dependencies.
@@ -39,7 +39,7 @@ typedef struct nix_attr_entry {
     nix_value_t      *value;
 } nix_attr_entry_t;
 
-/* The value union — tagged by nix_val_type_t */
+/* The value union - tagged by nix_val_type_t */
 struct nix_value {
     nix_val_type_t type;
     union {
@@ -163,7 +163,7 @@ typedef enum nix_node_type {
     NIX_NODE_BOOL,         /* bool literal */
     NIX_NODE_NULL,         /* null */
     NIX_NODE_PATH,         /* path literal */
-    NIX_NODE_IMPORT,       /* import <path> — read and evaluate another .nix file */
+    NIX_NODE_IMPORT,       /* import <path> - read and evaluate another .nix file */
 } nix_node_type_t;
 
 struct nix_ast {
@@ -182,7 +182,7 @@ struct nix_ast {
             nix_ast_t **items;
             size_t      count;
         } list;
-        struct {                        /* STRING — parts are either
+        struct {                        /* STRING - parts are either
                                            literal text or ${expr} */
             struct {
                 int       is_expr;     /* 0 = literal, 1 = interpolated */

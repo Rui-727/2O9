@@ -1,23 +1,23 @@
-/* script_analysis.c — parse .install scripts and extract intent
+/* script_analysis.c - parse .install scripts and extract intent
  *
  * pacman's .install scripts are shell scripts with three functions:
  *   post_install(), post_upgrade(), pre_remove()
  *
  * 2O9 doesn't run them blindly. Instead, we parse the script text and
- * extract what each function does — files created, services enabled,
- * commands run — and present it to the user as a summary before they
+ * extract what each function does - files created, services enabled,
+ * commands run - and present it to the user as a summary before they
  * decide whether to run it.
  *
  * This is a heuristic parser, not a full shell interpreter. It looks
  * for known patterns:
- *   - systemctl enable/disable/start/stop
- *   - systemd-sysusers
- *   - systemd-tmpfiles
- *   - install -D, mkdir, touch, cp (file creation)
- *   - chown, chmod (permission changes)
- *   - gtk-update-icon-cache, update-desktop-database, fc-cache (cache rebuilds)
- *   - useradd, groupadd (user/group creation)
- *   - rm, rmdir (file removal)
+ *  - systemctl enable/disable/start/stop
+ *  - systemd-sysusers
+ *  - systemd-tmpfiles
+ *  - install -D, mkdir, touch, cp (file creation)
+ *  - chown, chmod (permission changes)
+ *  - gtk-update-icon-cache, update-desktop-database, fc-cache (cache rebuilds)
+ *  - useradd, groupadd (user/group creation)
+ *  - rm, rmdir (file removal)
  *
  * Unknown commands are listed as "Runs: <command>" so the user can
  * inspect them manually.
@@ -186,7 +186,7 @@ static script_intent_t *parse_line(const char *line)
     if (starts_with(trimmed, "systemd-tmpfiles") || starts_with(trimmed, "tmpfiles"))
         return new_intent(INTENT_TMPFILES, trimmed, NULL);
 
-    /* install -D / mkdir / touch / cp — file creation */
+    /* install -D / mkdir / touch / cp - file creation */
     if (starts_with(trimmed, "install ") || starts_with(trimmed, "install\t")) {
         char *target = extract_quoted_arg(trimmed, "install");
         if (target) return new_intent(INTENT_FILE_CREATE, target, "install");
@@ -203,14 +203,14 @@ static script_intent_t *parse_line(const char *line)
         free(target);
     }
 
-    /* rm / rmdir — file removal */
+    /* rm / rmdir - file removal */
     if (starts_with(trimmed, "rm ") || starts_with(trimmed, "rmdir ")) {
         char *target = extract_arg(trimmed, starts_with(trimmed, "rm ") ? "rm " : "rmdir ");
         if (target) return new_intent(INTENT_FILE_REMOVE, target, NULL);
         free(target);
     }
 
-    /* chown — permission change */
+    /* chown - permission change */
     if (starts_with(trimmed, "chown ")) {
         char *arg = extract_arg(trimmed, "chown");
         if (arg) return new_intent(INTENT_PERMISSION_CHANGE, arg, "chown");
@@ -360,7 +360,7 @@ void debag_print_script_analysis(const script_analysis_t *a, FILE *out)
         if (func->intent_count == 0) continue;
         fprintf(out, "  %s():\n", func->function_name);
         for (script_intent_t *i = func->intents; i; i = i->next) {
-            fprintf(out, "    - %s: %s", intent_label(i->type),
+            fprintf(out, "   - %s: %s", intent_label(i->type),
                     i->target ? i->target : "?");
             if (i->detail)
                 fprintf(out, " (%s)", i->detail);

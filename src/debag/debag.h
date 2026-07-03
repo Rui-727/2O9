@@ -1,11 +1,11 @@
-/* debag.h — 2O9 hybrid sandbox (seccomp fast path + ptrace slow path)
+/* debag.h - 2O9 hybrid sandbox (seccomp fast path + ptrace slow path)
  *
  * Phase 6: Debag ("debug + bag"). A hybrid sandbox that combines
  * seccomp-bpf (kernel-level, nanosecond overhead) with ptrace
  * (userspace, microsecond overhead) for the best of both worlds.
  *
  * How it works:
- *   1. Static analysis scans the ELF binary — extracts syscalls from
+ *   1. Static analysis scans the ELF binary - extracts syscalls from
  *      dynamic symbols, detects linked libraries, identifies network ops
  *   2. A seccomp-bpf filter is compiled: safe syscalls ALLOW directly
  *      in kernel; dangerous syscalls (execve, connect, open) return

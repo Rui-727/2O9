@@ -1,4 +1,4 @@
-/* test_aur_rpc.c — quick smoke test for AUR RPC client */
+/* test_aur_rpc.c - quick smoke test for AUR RPC client */
 
 #include <stdio.h>
 #include <stdlib.h>

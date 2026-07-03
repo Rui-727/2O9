@@ -1,4 +1,4 @@
-/* symlinks.c — 2O9 symlink farm builder implementation
+/* symlinks.c - 2O9 symlink farm builder implementation
  *
  * Walks a generation's package manifest, creates symlinks from
  * store paths to user-visible locations.
@@ -107,7 +107,7 @@ int symlink_create(const char *target, const char *link_path)
 
 int symlink_remove(const char *link_path)
 {
-	/* Only remove if it's a symlink — don't nuke real files */
+	/* Only remove if it's a symlink - don't nuke real files */
 	struct stat st;
 	if (lstat(link_path, &st) < 0)
 		return 0;  /* already gone */
@@ -164,7 +164,7 @@ int symlink_file(const char *store_path, const char *rel,
 		snprintf(link_path, sizeof(link_path), "%s/.local/lib/%s",
 		         home, my_basename(rel));
 	} else if (strncmp(rel, "etc/", 4) == 0) {
-		/* /etc/<rest> — needs root, skip if not root */
+		/* /etc/<rest> - needs root, skip if not root */
 		if (geteuid() == 0) {
 			snprintf(link_path, sizeof(link_path), "/etc/%s", rel + 4);
 		}
@@ -188,7 +188,7 @@ int symlink_file(const char *store_path, const char *rel,
 
 	/* Create the symlink */
 	if (symlink_create(abs_path, link_path) < 0) {
-		/* Not fatal — might be a permissions issue or conflict */
+		/* Not fatal - might be a permissions issue or conflict */
 		fprintf(stderr, "  warning: could not create symlink %s → %s: %s\n",
 		        link_path, abs_path, strerror(errno));
 	}
@@ -245,7 +245,7 @@ static int symlink_package(const char *store_path, const char *pkg_name)
 	/* Walk the store directory */
 	DIR *d = opendir(store_path);
 	if (!d) {
-		/* Store path doesn't exist — maybe not extracted yet.
+		/* Store path doesn't exist - maybe not extracted yet.
 		 * Not an error for test mode. */
 		free(home);
 		return 0;
@@ -419,7 +419,7 @@ int symlink_farm_build(gen_db_t *db, gen_t *gen, gen_t *prev_gen)
 	if (!gen) return -1;
 
 	/* If we have a previous generation, tear down its symlinks first.
-	 * This is the simple approach — remove all, then rebuild.
+	 * This is the simple approach - remove all, then rebuild.
 	 * A smarter diff-based approach would only touch changed files,
 	 * but that's an optimization for later. */
 	if (prev_gen) {

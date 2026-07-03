@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# test_trakker.sh — test the Trakker execution sandbox
+# test_trakker.sh - test the Trakker execution sandbox
 #
 # Runs a harmless command inside the sandbox and verifies:
-#   - The trace JSON is produced
-#   - The --no-net flag actually blocks network access
-#   - The --no-write flag actually blocks file writes
+#  - The trace JSON is produced
+#  - The --no-net flag actually blocks network access
+#  - The --no-write flag actually blocks file writes
 #
 # Usage: ./test/test_trakker.sh [path/to/209]
 
@@ -29,12 +29,12 @@ echo "$TRACE_OUTPUT" | head -10
 if echo "$TRACE_OUTPUT" | grep -qiE 'trakker|trace|sandbox'; then
     echo "OK: trakker was invoked (output mentions trakker/trace/sandbox)"
 elif echo "$TRACE_OUTPUT" | grep -qi 'ptrace\|operation not permitted'; then
-    echo "OK: trakker attempted ptrace (sandbox limitation — expected)"
+    echo "OK: trakker attempted ptrace (sandbox limitation - expected)"
 else
     echo "WARN: unexpected output from trakker invocation"
 fi
 
-# Try the --no-write flag — run a command that would write a file
+# Try the --no-write flag - run a command that would write a file
 # and verify the write is blocked.
 echo "--- running: 209 trakker --no-write -- touch <file> ---"
 "$BINARY" trakker --no-write -- touch "$TEST_ROOT/blocked_write" 2>&1 || true

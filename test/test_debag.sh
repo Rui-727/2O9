@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_debag.sh — test Debag hybrid sandbox
+# test_debag.sh - test Debag hybrid sandbox
 #
 # Tests:
 #   1. Static analysis on a real binary (/bin/ls)

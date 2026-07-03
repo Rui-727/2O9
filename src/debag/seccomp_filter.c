@@ -1,12 +1,12 @@
-/* seccomp_filter.c — seccomp-bpf filter generation for Debag
+/* seccomp_filter.c - seccomp-bpf filter generation for Debag
  *
  * Builds a libseccomp filter that:
  *   1. ALLOWs syscalls the binary is expected to use (from static analysis)
- *   2. TRACEs dangerous syscalls (execve, connect, open) — these trigger ptrace
+ *   2. TRACEs dangerous syscalls (execve, connect, open) - these trigger ptrace
  *   3. KILLs everything else (unexpected syscalls)
  *
  * The filter is installed before exec(). Combined with PTRACE_SECCOMP,
- * only TRACE'd syscalls fall through to the ptrace handler — everything
+ * only TRACE'd syscalls fall through to the ptrace handler - everything
  * else is handled in-kernel with nanosecond overhead.
  */
 
@@ -20,7 +20,7 @@
 
 #include "debag.h"
 
-/* Default safe syscalls — always allowed, even if not in the binary's
+/* Default safe syscalls - always allowed, even if not in the binary's
  * symbol table. These are needed for basic process startup (glibc init,
  * loader, etc.). Without them, even /bin/true would be killed. */
 static const int default_safe[] = {
@@ -44,7 +44,7 @@ static const int default_safe[] = {
     __NR_sendmsg, __NR_getsockopt, __NR_setsockopt, __NR_shutdown,
 };
 
-/* Dangerous syscalls — always traced via ptrace, regardless of static analysis */
+/* Dangerous syscalls - always traced via ptrace, regardless of static analysis */
 static const int always_traced[] = {
     __NR_execve, __NR_execveat,     /* what is it executing? */
     __NR_mount, __NR_umount2,       /* filesystem changes */
@@ -59,11 +59,11 @@ static const int always_traced[] = {
     __NR_personality,               /* can change execution domain */
     __NR_create_module, __NR_init_module, __NR_delete_module,  /* kernel modules */
     __NR_kexec_load, __NR_kexec_file_load,  /* kernel replacement */
-    __NR_bpf,                       /* eBPF — can subvert the sandbox */
+    __NR_bpf,                       /* eBPF - can subvert the sandbox */
     __NR_unshare, __NR_setns,       /* namespace manipulation */
 };
 
-/* Network syscalls — traced if --no-net, allowed otherwise (unless static analysis says no) */
+/* Network syscalls - traced if --no-net, allowed otherwise (unless static analysis says no) */
 static const int network_syscalls[] = {
     __NR_socket, __NR_connect, __NR_bind, __NR_listen, __NR_accept,
     __NR_accept4, __NR_sendto, __NR_recvfrom, __NR_sendmsg, __NR_recvmsg,
@@ -75,7 +75,7 @@ int debag_install_seccomp(const debag_analysis_t *analysis,
                            const debag_policy_t *policy)
 {
     /* Default action: TRACE (fall through to ptrace) instead of KILL.
-     * This is more forgiving — unexpected syscalls get inspected by
+     * This is more forgiving - unexpected syscalls get inspected by
      * ptrace rather than killing the process. Use --fast-mode for
      * KILL_PROCESS as the default (no ptrace fallback). */
     uint32_t default_action = policy->fast_mode ? SCMP_ACT_KILL_PROCESS : SCMP_ACT_TRACE(0);
@@ -92,7 +92,7 @@ int debag_install_seccomp(const debag_analysis_t *analysis,
     for (i = 0; i < sizeof(default_safe) / sizeof(default_safe[0]); i++) {
         rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, default_safe[i], 0);
         if (rc < 0 && rc != -EEXIST) {
-            /* Some syscalls may not exist on this arch — ignore */
+            /* Some syscalls may not exist on this arch - ignore */
         }
     }
 

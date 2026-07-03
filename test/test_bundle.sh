@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_bundle.sh — test bundle/export and import round-trip
+# test_bundle.sh - test bundle/export and import round-trip
 #
 # Creates a fake generation, bundles it, then imports it back.
 

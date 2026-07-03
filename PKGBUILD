@@ -1,4 +1,4 @@
-# PKGBUILD for 2O9 — self-hosting packaging
+# PKGBUILD for 2O9 - self-hosting packaging
 #
 # Build 2O9 with makepkg. This PKGBUILD assumes the source is on GitHub
 # at Rui-727/2O9. Adjust the source URL if you fork it.

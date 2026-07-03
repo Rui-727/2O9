@@ -1,4 +1,4 @@
-/* aur_resolve.c — AUR dependency resolution with topological sort
+/* aur_resolve.c - AUR dependency resolution with topological sort
  *
  * Rewrites paru's resolver.rs + aur_depends crate in C.
  * Resolves transitive AUR dependencies using AUR RPC.
@@ -239,7 +239,7 @@ static str_set_t *dep_graph_topo_sort(dep_graph_t *g)
 
 /* ── Action list helpers ──────────────────────────────────────────── */
 
-/* Forward declaration — needed by dep_graph_topo_sort */
+/* Forward declaration - needed by dep_graph_topo_sort */
 static void action_list_free(resolve_action_t *a);
 
 static resolve_action_t *action_new(const char *name, const char *version,
@@ -325,7 +325,7 @@ static void process_deps(aur_cache_t *cache,
                                 if (parent_pkg)
                                         dep_graph_add_edge(graph, parent_pkg, dep_name);
                         } else {
-                                /* Not in AUR — assume repo package */
+                                /* Not in AUR - assume repo package */
                                 if (!action_list_contains(result->install, dep_name)) {
                                         resolve_action_t *a = action_new(dep_name, NULL, 0, NULL);
                                         action_append(&result->install, a);
@@ -455,7 +455,7 @@ resolve_result_t *resolve_targets(aur_cache_t *cache,
                 /* Free the old unsorted list */
                 action_list_free(old_build);
         } else if (!sorted && graph->count > 0) {
-                /* Cycle detected — keep the unsorted list but warn */
+                /* Cycle detected - keep the unsorted list but warn */
                 fprintf(stderr, "  warning: dependency cycle detected, "
                                 "build order may be incorrect\n");
         }

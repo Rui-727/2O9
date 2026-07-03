@@ -1,13 +1,13 @@
-/* reconcile.h — 2O9 declarative reconciler / diff engine
+/* reconcile.h - 2O9 declarative reconciler / diff engine
  *
  * Computes the diff between the desired state (from 2O9.nix evaluation)
  * and the current generation, producing a transaction plan:
  *
- *   - Packages to install from official repos (pacman)
- *   - Packages to build from AUR
- *   - Packages to remove (present in current but not in desired)
- *   - Services to enable (systemctl enable)
- *   - Services to disable (systemctl disable)
+ *  - Packages to install from official repos (pacman)
+ *  - Packages to build from AUR
+ *  - Packages to remove (present in current but not in desired)
+ *  - Services to enable (systemctl enable)
+ *  - Services to disable (systemctl disable)
  *
  * The transaction is then executed by cmd_apply.
  *
@@ -19,7 +19,7 @@
 
 #include <stddef.h>
 
-/* A single package name — used in diff sets */
+/* A single package name - used in diff sets */
 typedef struct pkg_name {
     char *name;
     struct pkg_name *next;
@@ -32,7 +32,7 @@ typedef struct svc_entry {
     struct svc_entry *next;
 } svc_entry_t;
 
-/* A reconciliation transaction — the diff between desired and current state */
+/* A reconciliation transaction - the diff between desired and current state */
 typedef struct reconcile_txn {
     /* Packages to install from official repos */
     pkg_name_t *repo_install;

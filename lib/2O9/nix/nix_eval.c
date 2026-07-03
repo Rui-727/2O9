@@ -1,22 +1,22 @@
-/* nix_eval.c — 2O9 Nix Evaluator (full implementation)
+/* nix_eval.c - 2O9 Nix Evaluator (full implementation)
  *
  * Evaluates the subset of the Nix expression language needed to parse
- * 2O9.nix configuration files.  Not a full Nix interpreter — no
+ * 2O9.nix configuration files.  Not a full Nix interpreter - no
  * derivations, no fetchers, no flakes.
  *
  * Supports:
- *   - Attribute sets (plain & recursive)
- *   - Lists, strings (with interpolation), integers, bools, null, paths
- *   - Lambda functions (ident and formal-param forms)
- *   - Function application (curried, left-associative)
- *   - Let-bindings, if/then/else, with, assert
- *   - Binary ops: +, ++ (list concat), *, /, -, &&, ||, ==, !=,
+ *  - Attribute sets (plain & recursive)
+ *  - Lists, strings (with interpolation), integers, bools, null, paths
+ *  - Lambda functions (ident and formal-param forms)
+ *  - Function application (curried, left-associative)
+ *  - Let-bindings, if/then/else, with, assert
+ *  - Binary ops: +, ++ (list concat), *, /, -, &&, ||, ==, !=,
  *     <, <=, >, >=, -> (implication)
- *   - Unary: !, - (negate)
- *   - Select (a.b.c), has-attr (e ? attr), or-default (e.a or default)
- *   - Import (read & evaluate another .nix file, relative paths)
- *   - Fixed-point recursion for { config, ... }: { ... } pattern
- *   - Builtins: map, filter, length, head, tail, attrNames, attrValues,
+ *  - Unary: !, - (negate)
+ *  - Select (a.b.c), has-attr (e ? attr), or-default (e.a or default)
+ *  - Import (read & evaluate another .nix file, relative paths)
+ *  - Fixed-point recursion for { config, ... }: { ... } pattern
+ *  - Builtins: map, filter, length, head, tail, attrNames, attrValues,
  *     hasAttr, getAttr, fromJSON, toJSON, trace, pathExists, readFile
  *
  * Part of lib2O9.  Pure C, no C++ dependencies.
@@ -197,11 +197,11 @@ void nix_env_free(nix_env_t *env)
     if (!env) return;
     for (size_t i = 0; i < env->count; i++) {
         free(env->entries[i].name);
-        /* don't free value — it may be shared */
+        /* don't free value - it may be shared */
     }
     free(env->entries);
     free(env->base_dir);
-    /* Don't free parent — it's shared and may be referenced by other children.
+    /* Don't free parent - it's shared and may be referenced by other children.
      * The top-level env is freed by nix_eval_file_with_base. */
     free(env);
 }
@@ -210,7 +210,7 @@ int nix_env_bind(nix_env_t *env, const char *name, nix_value_t *val)
 {
     if (!env || !name) return -1;
 
-    /* Check for existing binding — update in place */
+    /* Check for existing binding - update in place */
     for (size_t i = 0; i < env->count; i++) {
         if (strcmp(env->entries[i].name, name) == 0) {
             env->entries[i].value = val;
@@ -257,7 +257,7 @@ static nix_env_t *nix_env_push(nix_env_t *parent)
 
 /* ── AST free (recursive) ─────────────────────────────────────────── */
 
-/* 2O9: AST clone — deep copy of an AST node.
+/* 2O9: AST clone - deep copy of an AST node.
  * Used by `inherit (src) ident1 ident2;` where the same source expression
  * must be referenced by multiple bindings without being double-freed. */
 nix_ast_t *nix_ast_clone(nix_ast_t *ast)
@@ -370,7 +370,7 @@ nix_ast_t *nix_ast_clone(nix_ast_t *ast)
         break;
 
     default:
-        /* Unknown node type — shallow copy is the best we can do. */
+        /* Unknown node type - shallow copy is the best we can do. */
         break;
     }
     return c;
@@ -667,10 +667,10 @@ static char *resolve_path(const char *base_dir, const char *path)
 {
     if (!path) return NULL;
 
-    /* Absolute path — use as-is */
+    /* Absolute path - use as-is */
     if (path[0] == '/') return strdup(path);
 
-    /* Relative path — resolve against base_dir */
+    /* Relative path - resolve against base_dir */
     if (base_dir) {
         size_t blen = strlen(base_dir);
         size_t plen = strlen(path);
@@ -734,7 +734,7 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
 
         for (size_t i = 0; i < ast->string.count; i++) {
             if (ast->string.parts[i].is_expr) {
-                /* Interpolated expression — evaluate and coerce to string */
+                /* Interpolated expression - evaluate and coerce to string */
                 nix_value_t *v = nix_eval_inner(env, ast->string.parts[i].expr, error);
                 if (!v) { free(buf); return NULL; }
 
@@ -852,7 +852,7 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
             nix_env_bind(rec_env, ast->attr_set.bindings[i].key, thunk);
         }
 
-        /* Second pass: force all thunks — resolves cross-references
+        /* Second pass: force all thunks - resolves cross-references
          * because all keys are now bound in rec_env. */
         for (size_t i = 0; i < set->attr_set.count; i++) {
             nix_value_t *thunk = set->attr_set.entries[i].value;
@@ -916,13 +916,13 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
                 return eval_error(error, "attribute '%s' not found at line %d",
                                   ast->select.attr, ast->line);
             }
-            /* Don't free obj — val is owned by it */
+            /* Don't free obj - val is owned by it */
             return val;
         }
 
         /* Try builtins select: builtins.attrNames etc */
         if (obj->type == NIX_VAL_BUILTIN) {
-            /* builtins.attrNames — but builtins is an attrset, not a builtin.
+            /* builtins.attrNames - but builtins is an attrset, not a builtin.
              * This case shouldn't normally be hit. */
         }
 
@@ -957,12 +957,12 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
         if (obj->type == NIX_VAL_ATTR_SET) {
             nix_value_t *val = attrset_lookup(obj, ast->or_default.attr);
             if (val) {
-                /* Don't free obj — val is owned by it */
+                /* Don't free obj - val is owned by it */
                 return val;
             }
         }
 
-        /* Attribute not found — evaluate the default */
+        /* Attribute not found - evaluate the default */
         nix_value_free(obj);
         return nix_eval_inner(env, ast->or_default.default_expr, error);
     }
@@ -992,7 +992,7 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
         if (func->type == NIX_VAL_BUILTIN) {
             nix_value_t *result = func->builtin.func(env, arg, func->builtin.ctx);
             /* leaked: shared value graph */
-            /* Don't free arg — the builtin may retain it */
+            /* Don't free arg - the builtin may retain it */
             return result;
         }
 
@@ -1099,14 +1099,14 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
             else if (!result) free(err2);
 
             /* 2O9: don't free call_env if the result is a lambda whose
-             * closure_env points to call_env — that would leave a dangling
+             * closure_env points to call_env - that would leave a dangling
              * pointer and crash on a subsequent application (currying).
              * The leaked env is small and lives for the duration of the
              * top-level evaluation; it's freed when the root env is freed. */
             if (result
                 && result->type == NIX_VAL_LAMBDA
                 && result->lambda.closure_env == call_env) {
-                /* call_env is now part of the result's lifetime — keep it. */
+                /* call_env is now part of the result's lifetime - keep it. */
             } else {
                 nix_env_free(call_env);
             }
@@ -1171,7 +1171,7 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
 
         nix_value_t *result = nix_eval_inner(with_env, ast->with_expr.body, error);
         nix_env_free(with_env);
-        /* Don't free with_val — its values are referenced by result */
+        /* Don't free with_val - its values are referenced by result */
         return result;
     }
 
@@ -1232,7 +1232,7 @@ static nix_value_t *nix_eval_inner(nix_env_t *env, nix_ast_t *ast, char **error)
         if (ast->binop.op == NIX_TOK_ARROW) {
             if (!nix_is_truthy(left)) {
                 /* leaked: shared value graph */
-                /* Skip evaluating right — result is true */
+                /* Skip evaluating right - result is true */
                 nix_value_t *v = nix_value_new(NIX_VAL_BOOL);
                 if (v) v->boolean = 1;
                 return v;
@@ -1775,7 +1775,7 @@ char *nix_eval_file_with_base(const char *source, size_t len,
             }
             final_result = result_set;
         } else {
-            /* Body is not an attrset — just evaluate normally */
+            /* Body is not an attrset - just evaluate normally */
             char *eval_err = NULL;
             final_result = nix_eval(call_env, body, &eval_err);
             if (eval_err) {
@@ -1790,7 +1790,7 @@ char *nix_eval_file_with_base(const char *source, size_t len,
 
     json = nix_to_json(val);
     /* NOTE: We intentionally do NOT free val here. Values form a shared
-     * graph — the result may contain the same nix_value_t pointers that
+     * graph - the result may contain the same nix_value_t pointers that
      * are also referenced from the evaluation environment. Shallow-free
      * of the top-level value would leave dangling pointers in the env;
      * a deep free would double-free shared children. The entire value
@@ -1820,7 +1820,7 @@ nix_value_t *builtin_map(nix_env_t *env, nix_value_t *arg, void *ctx)
 
     /* First call: arg is the function */
     if (arg->type == NIX_VAL_LAMBDA || arg->type == NIX_VAL_BUILTIN) {
-        /* Return a "partial application" — we use a BUILTIN with ctx holding the func */
+        /* Return a "partial application" - we use a BUILTIN with ctx holding the func */
         nix_value_t *partial = nix_value_new(NIX_VAL_BUILTIN);
         if (partial) {
             partial->builtin.name = "map(partial)";

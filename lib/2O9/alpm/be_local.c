@@ -540,7 +540,7 @@ static int local_db_populate(alpm_db_t *db)
                 RET_ERR(db->handle, ALPM_ERR_DB_NOT_FOUND, -1);
         }
 
-        /* 2O9: installed-set dispatch — when the handle has an
+        /* 2O9: installed-set dispatch - when the handle has an
          * installed_set_loader registered, call it instead of reading
          * /var/lib/pacman/local/. The callback is responsible for
          * populating db->pkgcache with alpm_pkg_t entries built from

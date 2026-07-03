@@ -1,4 +1,4 @@
-/* test_nix_eval.c — Test the Nix evaluator end-to-end */
+/* test_nix_eval.c - Test the Nix evaluator end-to-end */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,15 +13,15 @@ static int pass_count = 0;
     char *err = NULL; \
     char *json = nix_eval_file(source, strlen(source), &err); \
     if (!json) { \
-        printf("FAIL: %s — error: %s\n", name, err ? err : "null"); \
+        printf("FAIL: %s - error: %s\n", name, err ? err : "null"); \
     } else if (strstr(json, expected_substr)) { \
         printf("PASS: %s\n", name); \
         pass_count++; \
     } else { \
-        printf("FAIL: %s — expected '%s' in:\n  %s\n", name, expected_substr, json); \
+        printf("FAIL: %s - expected '%s' in:\n  %s\n", name, expected_substr, json); \
     } \
     free(json); \
-    /* Don't free err — values are shared and may have been freed already */ \
+    /* Don't free err - values are shared and may have been freed already */ \
 } while(0)
 
 int main(void)
@@ -58,12 +58,12 @@ int main(void)
          "let name = \"world\"; in \"hello ${name}\"",
          "hello world");
 
-    /* If/then/else — true branch */
+    /* If/then/else - true branch */
     TEST("if true",
          "if true then \"yes\" else \"no\"",
          "yes");
 
-    /* If/then/else — false branch */
+    /* If/then/else - false branch */
     TEST("if false",
          "if false then \"yes\" else \"no\"",
          "no");
@@ -223,7 +223,7 @@ int main(void)
          "if (false -> false) then \"yes\" else \"no\"",
          "yes");
 
-    /* Curried lambdas — used to segfault because call_env was freed before
+    /* Curried lambdas - used to segfault because call_env was freed before
      * the returned lambda's closure_env was dereferenced. */
     TEST("curried lambda",
          "(x: y: x + y) 3 4",
@@ -237,7 +237,7 @@ int main(void)
          "(x: y: z: x + y + z) 1 2 3",
          "6");
 
-    /* Binop precedence — * binds tighter than + */
+    /* Binop precedence - * binds tighter than + */
     TEST("mul before add",
          "1 + 2 * 3",
          "7");
@@ -246,7 +246,7 @@ int main(void)
          "(1 + 2) * 3",
          "9");
 
-    /* Lambda with formal parameters (commas) — was a known gap, now works */
+    /* Lambda with formal parameters (commas) - was a known gap, now works */
     TEST("formal lambda",
          "({ a, b }: a + b) { a = 3; b = 4; }",
          "7");
@@ -255,7 +255,7 @@ int main(void)
          "({ a, b ? 10 }: a + b) { a = 5; }",
          "15");
 
-    /* inherit (src) ident; — pulls attributes from a source expression */
+    /* inherit (src) ident; - pulls attributes from a source expression */
     TEST("inherit from source",
          "let s = { x = 1; y = 2; }; in { inherit (s) x y; }",
          "\"x\": 1");

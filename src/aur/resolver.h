@@ -1,4 +1,4 @@
-/* resolver.h — AUR dependency resolution
+/* resolver.h - AUR dependency resolution
  *
  * Rewrites paru's resolver.rs + aur_depends crate in C.
  * Resolves transitive AUR dependencies using libalpm + AUR RPC.

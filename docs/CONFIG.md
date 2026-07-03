@@ -1,4 +1,4 @@
-# 2O9.nix — Configuration Reference
+# 2O9.nix - Configuration Reference
 
 `2O9.nix` is the declarative config file. It's a Nix expression that
 evaluates to an attrset describing what your system should look like.
@@ -31,7 +31,7 @@ Every `2O9.nix` must be a function taking at least `{ config, ... }:`:
 ```
 
 The `config` argument enables self-reference. The evaluator resolves
-this via fixed-point recursion — `config` is the result of evaluating
+this via fixed-point recursion - `config` is the result of evaluating
 the function itself, resolved lazily.
 
 ## Schema
@@ -79,7 +79,7 @@ aur.build = {
 ### `pacman.options` (attrset)
 
 Maps directly to pacman.conf options. Passed to lib2O9's
-`alpm_option_set_*` API programmatically — there is no `pacman.conf`.
+`alpm_option_set_*` API programmatically - there is no `pacman.conf`.
 
 ```nix
 pacman.options = {
@@ -118,7 +118,7 @@ services = {
 };
 ```
 
-2O9 does not manage services itself — it just tells systemd what to
+2O9 does not manage services itself - it just tells systemd what to
 enable. After `209 apply`, a reboot is recommended for the full system
 state to take effect.
 
@@ -171,7 +171,7 @@ until `config` stabilizes (up to 100 iterations).
 ## Evaluation
 
 The evaluator is written from scratch in C as part of lib2O9. It is
-not the C++ Nix evaluator — it's a small subset sufficient for `2O9.nix`.
+not the C++ Nix evaluator - it's a small subset sufficient for `2O9.nix`.
 
 Supported:
 - Attribute sets (plain and `rec`)
@@ -203,7 +203,7 @@ built-in defaults
       → CLI flags                  ← wins on everything
 ```
 
-For list values (e.g. `packages`), the lists concatenate — both user
+For list values (e.g. `packages`), the lists concatenate - both user
 and system packages get installed. For everything else, the system
 config wins on conflict.
 

@@ -1,4 +1,4 @@
-/* test_nix_lexer.c — standalone test for the Nix lexer */
+/* test_nix_lexer.c - standalone test for the Nix lexer */
 
 #include <stdio.h>
 #include <stdlib.h>

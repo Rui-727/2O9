@@ -1,4 +1,4 @@
-/* static_analysis.c — ELF parsing for Debag
+/* static_analysis.c - ELF parsing for Debag
  *
  * Scans a binary to determine which syscalls it's likely to use, which
  * libraries it links, and whether it does networking, file writes,
@@ -12,7 +12,7 @@
  * case: a binary that calls connect() will need the connect syscall.
  *
  * For statically-linked binaries, we fall back to scanning the .text
- * section for syscall instruction patterns — crude but better than nothing.
+ * section for syscall instruction patterns - crude but better than nothing.
  */
 
 #include <stdio.h>
@@ -35,12 +35,12 @@ struct sym_to_syscall {
     int category;           /* what kind of syscall */
 };
 
-#define CAT_SAFE     0   /* read, write, close — always allow */
-#define CAT_NET      1   /* socket, connect, bind — network */
-#define CAT_WRITE    2   /* open(O_WRONLY), unlink, rename — file write */
-#define CAT_EXEC     3   /* execve — dangerous */
-#define CAT_THREAD   4   /* clone, futex — threading */
-#define CAT_MOUNT    5   /* mount, umount — filesystem */
+#define CAT_SAFE     0   /* read, write, close - always allow */
+#define CAT_NET      1   /* socket, connect, bind - network */
+#define CAT_WRITE    2   /* open(O_WRONLY), unlink, rename - file write */
+#define CAT_EXEC     3   /* execve - dangerous */
+#define CAT_THREAD   4   /* clone, futex - threading */
+#define CAT_MOUNT    5   /* mount, umount - filesystem */
 #define CAT_TRACE    6   /* other syscalls that need ptrace inspection */
 
 #include <sys/syscall.h>  /* __NR_* definitions */
@@ -283,7 +283,7 @@ debag_analysis_t *debag_analyze(const char *binary_path)
         const char *dynstr = NULL;
         for (size_t i = 0; i < dyn_count; i++) {
             if (dyn[i].d_tag == DT_STRTAB) {
-                /* DT_STRTAB is a virtual address — find it via program headers */
+                /* DT_STRTAB is a virtual address - find it via program headers */
                 Elf64_Phdr *phdrs = (Elf64_Phdr *)((char *)map + ehdr->e_phoff);
                 for (int j = 0; j < ehdr->e_phnum; j++) {
                     if (phdrs[j].p_type == PT_LOAD &&
@@ -349,7 +349,7 @@ void debag_analysis_print(const debag_analysis_t *a, FILE *out)
     fprintf(out, "Network:    %s\n", a->has_network ? "yes" : "no");
     fprintf(out, "File write: %s\n", a->has_file_write ? "yes" : "no");
     fprintf(out, "Exec:       %s\n", a->has_exec ? "yes" : "no");
-    fprintf(out, "dlopen:     %s\n", a->has_dlopen ? "yes (dynamic loading — may bypass filter)" : "no");
+    fprintf(out, "dlopen:     %s\n", a->has_dlopen ? "yes (dynamic loading - may bypass filter)" : "no");
     fprintf(out, "Threads:    %s\n", a->has_threads ? "yes" : "no");
     fprintf(out, "Mount:      %s\n", a->has_mount ? "yes" : "no");
 

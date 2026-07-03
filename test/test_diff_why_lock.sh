@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_diff_why_lock.sh — test diff, why, and lock commands
+# test_diff_why_lock.sh - test diff, why, and lock commands
 
 set -euo pipefail
 

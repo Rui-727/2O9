@@ -1,4 +1,4 @@
-/* two9_init.c — 2O9 programmatic config entrypoint for libalpm
+/* two9_init.c - 2O9 programmatic config entrypoint for libalpm
  *
  * Implements MODIFICATIONS.md #3: lib2O9 is configured programmatically
  * from a 2O9 manifest, never from /etc/pacman.conf. The manifest is the
@@ -30,7 +30,7 @@
 #include "alpm.h"
 #include "handle.h"
 
-/* cJSON is vendored at src/aur/cJSON.{c,h}. It has no aur/ coupling —
+/* cJSON is vendored at src/aur/cJSON.{c,h}. It has no aur/ coupling - 
  * it's a generic JSON library that just happens to live in that dir.
  * We include it from there to avoid duplicating JSON parsing logic. */
 #include "cJSON.h"
@@ -60,7 +60,7 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
     /* Parse the manifest JSON */
     cJSON *root = cJSON_Parse(manifest_json);
     if (!root) {
-        /* Manifest didn't parse — return handle with defaults applied */
+        /* Manifest didn't parse - return handle with defaults applied */
         return handle;
     }
 
@@ -74,7 +74,7 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
                 handle->parallel_downloads = (unsigned int)pd->valueint;
             }
 
-            /* SigLevel — parsing the SigLevel string is non-trivial
+            /* SigLevel - parsing the SigLevel string is non-trivial
              * (alpm_option_set_siglevel needs a mask). Logged for now;
              * full impl lands when lib2O9 is actually built and linked. */
             cJSON *sl = cJSON_GetObjectItem(options, "SigLevel");

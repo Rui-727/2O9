@@ -1,4 +1,4 @@
-# 209(1) — 2O9 package manager
+# 209(1) - 2O9 package manager
 
 ## SYNOPSIS
 
@@ -10,12 +10,12 @@
 **2O9** is a unified package manager for Arch Linux that puts files in
 `/nix/store/`. It combines three things into one tool:
 
-1. **pacman's engine** — libalpm, modified in-tree as part of lib2O9
-2. **paru's AUR workflow** — rewritten in C
-3. **A real `/nix/store`** — with atomic generations, driven by a
+1. **pacman's engine** - libalpm, modified in-tree as part of lib2O9
+2. **paru's AUR workflow** - rewritten in C
+3. **A real `/nix/store`** - with atomic generations, driven by a
    declarative Nix-syntax configuration (`2O9.nix`)
 
-Plus **Trakker** — a ptrace-based execution sandbox.
+Plus **Trakker** - a ptrace-based execution sandbox.
 
 The binary is `209` (numeric). The project name is `2O9` (letter O).
 
@@ -33,7 +33,7 @@ Each maps to the equivalent 2O9 command.
 : Refresh repo databases. Same as `209 sync`.
 
 `209 -Su`
-: Upgrade all packages. Not yet implemented — use `209 apply`.
+: Upgrade all packages. Not yet implemented - use `209 apply`.
 
 `209 -Ss` `<term>`
 : Search repos. Same as `209 <term> search`.
@@ -57,7 +57,7 @@ Each maps to the equivalent 2O9 command.
 : List files in an installed package (from its store path).
 
 `209 -Qm`
-: List foreign (AUR) packages — installed packages with `origin: "aur"`.
+: List foreign (AUR) packages - installed packages with `origin: "aur"`.
 
 ### 2O9 commands
 
@@ -88,7 +88,7 @@ Each maps to the equivalent 2O9 command.
 
 `209 <pkg> install`
 : Install a package temporarily. It lands in the current generation
-  but is not declared in `2O9.nix` — the next `209 apply` will flag
+  but is not declared in `2O9.nix` - the next `209 apply` will flag
   it for removal unless you add it to the config first.
 
 `209 <pkg> remove`
@@ -123,9 +123,9 @@ Each maps to the equivalent 2O9 command.
   separate trakker flags from the command's own flags.
 
   Examples:
-  - `209 trakker ls -la`
-  - `209 trakker --no-net -- curl https://example.com`
-  - `209 trakker --no-write --redirect-writes /tmp/trakker -- makepkg -f`
+ - `209 trakker ls -la`
+ - `209 trakker --no-net -- curl https://example.com`
+ - `209 trakker --no-write --redirect-writes /tmp/trakker -- makepkg -f`
 
 `209 <n> rollback`
 : Roll back to generation #n. Repoints the current-generation symlink
@@ -151,7 +151,7 @@ Each maps to the equivalent 2O9 command.
 
 ## CONFIGURATION
 
-Configuration lives in `2O9.nix` — a Nix-syntax file. Two scopes:
+Configuration lives in `2O9.nix` - a Nix-syntax file. Two scopes:
 
 - **User:** `~/.config/2O9/home.nix`
 - **System:** `/etc/2O9/2O9.nix`
@@ -169,7 +169,7 @@ for the full schema reference.
 : Per-user declarative config (overlaid on the system config).
 
 `/var/lib/2O9/`
-: System generation DB — one subdirectory per generation, each
+: System generation DB - one subdirectory per generation, each
   containing a `manifest.json`.
 
 `~/.local/state/2O9/`
@@ -194,11 +194,11 @@ for the full schema reference.
 
 ## SEE ALSO
 
-- [`README.md`](../README.md) — overview and quick start
-- [`DESIGN.md`](../DESIGN.md) — full architecture (950 lines)
-- [`docs/CONFIG.md`](./CONFIG.md) — `2O9.nix` schema reference
-- [`lib/2O9/nix/README.md`](../lib/2O9/nix/README.md) — Nix evaluator
-- [`lib/2O9/alpm/MODIFICATIONS.md`](../lib/2O9/alpm/MODIFICATIONS.md) — libalpm mods
+- [`README.md`](../README.md) - overview and quick start
+- [`DESIGN.md`](../DESIGN.md) - full architecture (950 lines)
+- [`docs/CONFIG.md`](./CONFIG.md) - `2O9.nix` schema reference
+- [`lib/2O9/nix/README.md`](../lib/2O9/nix/README.md) - Nix evaluator
+- [`lib/2O9/alpm/MODIFICATIONS.md`](../lib/2O9/alpm/MODIFICATIONS.md) - libalpm mods
 
 ## AUTHOR
 

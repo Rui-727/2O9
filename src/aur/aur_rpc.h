@@ -1,9 +1,9 @@
-/* aur_rpc.h — AUR RPC client
+/* aur_rpc.h - AUR RPC client
  *
  * Rewrites paru's raur crate in C. Provides:
- *   - AUR search (/rpc/v5/?type=search)
- *   - AUR info   (/rpc/v5/?type=info)
- *   - Batch info queries with caching
+ *  - AUR search (/rpc/v5/?type=search)
+ *  - AUR info   (/rpc/v5/?type=info)
+ *  - Batch info queries with caching
  *
  * Uses libcurl for HTTP, cJSON for JSON parsing.
  * See: https://aur.archlinux.org/rpc
@@ -15,7 +15,7 @@
 #include <stddef.h>
 #include <time.h>
 
-/* AUR package info — mirrors raur::Package */
+/* AUR package info - mirrors raur::Package */
 typedef struct aur_pkg {
 	char *name;
 	char *pkgbase;
@@ -62,7 +62,7 @@ typedef struct aur_rpc_result {
 	size_t count;
 } aur_rpc_result_t;
 
-/* AUR RPC cache — avoids repeated queries */
+/* AUR RPC cache - avoids repeated queries */
 typedef struct aur_cache {
 	char *base_url;        /* e.g. "https://aur.archlinux.org" */
 	void *curl_handle;     /* reused curl handle */
@@ -80,8 +80,8 @@ aur_rpc_result_t aur_search(aur_cache_t *cache, const char *query,
 /* Get info for a single package */
 aur_rpc_result_t aur_info(aur_cache_t *cache, const char *pkg_name);
 
-/* Batch info query — takes array of names, returns all matches.
- * This is the workhorse — used by install, upgrade, query. */
+/* Batch info query - takes array of names, returns all matches.
+ * This is the workhorse - used by install, upgrade, query. */
 aur_rpc_result_t aur_info_batch(aur_cache_t *cache,
                                 const char **names, size_t count);
 

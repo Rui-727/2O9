@@ -8,10 +8,10 @@
  * Usage:  ./spike-nix-add <file-to-add>
  *
  * Exit codes:
- *   0  — nix-store succeeded, store path printed to stdout
- *   1  — usage error
- *   2  — nix-store not found
- *   3  — nix-store failed
+ *   0  - nix-store succeeded, store path printed to stdout
+ *   1  - usage error
+ *   2  - nix-store not found
+ *   3  - nix-store failed
  */
 
 #include <stdio.h>
@@ -27,9 +27,9 @@
  * DESIGN.md §2 decision 2 and §9 dependency table.
  *
  * Why posix_spawn over fork/exec:
- *   - Same performance on Linux (vfork under the hood)
- *   - Cleaner error handling
- *   - We don't need to manipulate FDs between fork and exec
+ *  - Same performance on Linux (vfork under the hood)
+ *  - Cleaner error handling
+ *  - We don't need to manipulate FDs between fork and exec
  */
 
 extern char **environ;
@@ -112,7 +112,7 @@ int main(int argc, char *argv[])
 	if (spawn_nix_store_add(path, &store_path) < 0) {
 		/* If nix-store is not found, report clearly */
 		if (errno == ENOENT || access("/usr/bin/nix-store", X_OK) != 0) {
-			fprintf(stderr, "spike: nix-store not found — install nix first\n");
+			fprintf(stderr, "spike: nix-store not found - install nix first\n");
 			return 2;
 		}
 		fprintf(stderr, "spike: nix-store --add failed\n");

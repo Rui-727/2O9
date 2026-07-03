@@ -1,4 +1,4 @@
-/* symlinks.h — 2O9 symlink farm builder
+/* symlinks.h - 2O9 symlink farm builder
  *
  * The symlink farm is how packages become visible to users. After a
  * package is added to the store, its binaries are symlinked into

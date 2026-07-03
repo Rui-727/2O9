@@ -1,4 +1,4 @@
-/* gen_index.c — hash index for the generation DB
+/* gen_index.c - hash index for the generation DB
  *
  * See gen_index.h for design rationale. This is the xbps-inspired
  * immutable in-memory dict pattern: parse JSON once, build a hash

@@ -4,7 +4,7 @@ CFLAGS ?= -std=gnu11 -Wall -Wextra -O2 -g
 PREFIX ?= /usr
 VERSION := $(shell git describe --abbrev=4 --dirty 2>/dev/null || echo 0.0.1)
 
-# 2O9-specific defines — paths the CLI binary uses
+# 2O9-specific defines - paths the CLI binary uses
 DEFS = -D_GNU_SOURCE \
        -DPACKAGE='"2O9"' \
        -DPACKAGE_VERSION='"$(VERSION)"' \
@@ -29,10 +29,10 @@ LIBS = -lcurl -lseccomp
 # the 209 binary.
 #
 # Build deps:
-#   - libarchive-dev (for .pkg.tar.zst extraction in add.c, be_package.c)
-#   - openssl-dev    (for signature verification in signing.c)
-#   - libgpgme-dev   (optional, for GPG signature verification)
-#   - libcurl-dev    (already linked for AUR; libalpm uses it for downloads)
+#  - libarchive-dev (for .pkg.tar.zst extraction in add.c, be_package.c)
+#  - openssl-dev    (for signature verification in signing.c)
+#  - libgpgme-dev   (optional, for GPG signature verification)
+#  - libcurl-dev    (already linked for AUR; libalpm uses it for downloads)
 #
 # The HAVE_* defines match what pacman's configure script would set.
 # FSSTATSTYPE is normally detected by autoconf; on Linux it's struct statvfs.
@@ -88,11 +88,11 @@ LIB2O9_LIBS = -lcurl -larchive -lgpgme -lassuan -lgpg-error -lcrypto \
 
 all: 209 test-aur-rpc test-nix-lexer test-nix-eval
 
-# lib2O9.a — the merged static library (modified libalpm + Nix evaluator + 2O9 init)
+# lib2O9.a - the merged static library (modified libalpm + Nix evaluator + 2O9 init)
 lib2O9.a: $(ALPM_OBJ)
 	$(AR) rcs $@ $^
 
-# 209 binary — links lib2O9.a + the 209-specific source
+# 209 binary - links lib2O9.a + the 209-specific source
 209: $(OBJ) lib2O9.a
 	$(CC) $(CFLAGS) -o $@ $(OBJ) lib2O9.a $(LIB2O9_LIBS)
 

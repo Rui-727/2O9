@@ -1,7 +1,7 @@
-/* gen_index.h — hash index for the generation DB
+/* gen_index.h - hash index for the generation DB
  *
  * xbps uses an immutable in-memory dictionary (mmap'd plist) for
- * package lookups — O(1) by name, no re-parsing. 2O9's generation DB
+ * package lookups - O(1) by name, no re-parsing. 2O9's generation DB
  * is JSON (human-readable, debuggable) but slow to parse repeatedly.
  *
  * This index is a cache: we parse the JSON manifest once, build a
@@ -12,7 +12,7 @@
  * hash lookups.
  *
  * The JSON manifest.json remains the source of truth. This index is
- * a derived structure — rebuilt on every process start, never written
+ * a derived structure - rebuilt on every process start, never written
  * to disk. If we later want to persist it (like xbps's binary plist),
  * we can add a .idx sidecar file invalidated by mtime check.
  */
@@ -32,7 +32,7 @@ typedef struct gen_index_entry {
         struct gen_index_entry *next;  /* hash chain (separate chaining) */
 } gen_index_entry_t;
 
-/* The index itself — a hash table with separate chaining */
+/* The index itself - a hash table with separate chaining */
 typedef struct gen_index {
         gen_index_entry_t **buckets;
         size_t bucket_count;
@@ -49,7 +49,7 @@ gen_index_t *gen_index_load(const char *db_root, int generation_id);
 void gen_index_free(gen_index_t *idx);
 
 /* Look up a package by name. Returns NULL if not found.
- * The returned pointer is owned by the index — don't free it. */
+ * The returned pointer is owned by the index - don't free it. */
 const gen_index_entry_t *gen_index_lookup(const gen_index_t *idx, const char *name);
 
 /* Check if a package is installed (exists in the index).

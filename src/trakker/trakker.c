@@ -1,4 +1,4 @@
-/* trakker.c — 2O9 execution sandbox and trace recorder implementation
+/* trakker.c - 2O9 execution sandbox and trace recorder implementation
  *
  * Uses Linux's ptrace API to intercept syscalls made by a child process.
  * All event recording happens at syscall ENTRY time (before the kernel
@@ -12,11 +12,11 @@
  *   2. Child calls PTRACE_TRACEME, sends SIGSTOP, then execs
  *   3. Parent catches SIGSTOP, sets PTRACE_O_TRACESYSGOOD + follow-fork
  *   4. Parent enters ptrace loop:
- *      - On syscall-entry (SIGTRAP|0x80): read regs, record event,
+ *     - On syscall-entry (SIGTRAP|0x80): read regs, record event,
  *        optionally block/redirect, then continue
- *      - On plain SIGTRAP (from exec): suppress, continue
- *      - On other signals: deliver to child
- *      - On exit: record and remove from child list
+ *     - On plain SIGTRAP (from exec): suppress, continue
+ *     - On other signals: deliver to child
+ *     - On exit: record and remove from child list
  *   5. On completion: write JSON trace
  *
  * x86_64 only (matching the Arch Linux target).
@@ -285,19 +285,19 @@ trak_result_t *trakker_run(const char **argv, size_t argc,
                         continue;
                 }
 
-                /* Plain SIGTRAP from exec — suppress */
+                /* Plain SIGTRAP from exec - suppress */
                 if (sig == SIGTRAP) {
                         ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
                         continue;
                 }
 
-                /* Not a syscall stop — deliver signal */
+                /* Not a syscall stop - deliver signal */
                 if (sig != (SIGTRAP | 0x80)) {
                         ptrace(PTRACE_SYSCALL, pid, NULL, (void *)(long)sig);
                         continue;
                 }
 
-                /* Syscall stop — read registers */
+                /* Syscall stop - read registers */
                 struct user_regs_struct regs;
                 if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
                         ptrace(PTRACE_SYSCALL, pid, NULL, NULL);

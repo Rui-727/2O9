@@ -1,4 +1,4 @@
-/* gen.c — 2O9 generation database implementation
+/* gen.c - 2O9 generation database implementation
  *
  * File-based generation tracking. Each generation is a directory
  * containing a manifest.json. The current generation is a symlink.
@@ -211,7 +211,7 @@ void gen_db_unlock(gen_db_t *db)
 
 /* ── Commit generation ───────────────────────────────────────────── */
 
-/* Write a diff.json alongside manifest.json — records only what changed
+/* Write a diff.json alongside manifest.json - records only what changed
  * from the parent generation. This makes `209 generations` instant
  * (reads tiny diff files, not full manifests) and enables `209 apply
  * --dry-run` to show the delta without recomputing.
@@ -346,11 +346,11 @@ int gen_db_commit(gen_db_t *db, gen_pkg_t *packages)
         int parent_id = gen_db_current(db);
         int next_id = parent_id + 1;
 
-        /* Write the manifest (full snapshot — source of truth) */
+        /* Write the manifest (full snapshot - source of truth) */
         if (write_manifest(db, next_id, packages) < 0)
                 return -1;
 
-        /* Write the diff (delta from parent — for fast `209 generations`) */
+        /* Write the diff (delta from parent - for fast `209 generations`) */
         write_diff(db, next_id, parent_id, packages);
 
         /* Repoint current symlink */

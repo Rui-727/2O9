@@ -1,4 +1,4 @@
-/* aur_build.c — AUR build pipeline implementation
+/* aur_build.c - AUR build pipeline implementation
  *
  * Implements: clone PKGBUILD → review → makepkg → install to store.
  * Uses git subprocess for clone/fetch (same approach as paru).
@@ -86,7 +86,7 @@ static int run_cmd(char **argv, const char *stdout_path)
 }
 
 /* Run a command and pipe its stdout to the caller (for review).
- * Currently unused — will be needed for interactive review. */
+ * Currently unused - will be needed for interactive review. */
 static int run_cmd_pipe(char **argv, FILE **out_fp)
 {
         int pipefd[2];
@@ -200,7 +200,7 @@ int aur_review(const char *pkg_name, const char *build_dir)
 static int parse_pkginfo(const char *pkg_path,
                          char **name_out, char **version_out)
 {
-        /* .pkg.tar.zst is an archive — we need to extract .PKGINFO.
+        /* .pkg.tar.zst is an archive - we need to extract .PKGINFO.
          * Use bsdtar (from libarchive) to extract just that file. */
         char tmpdir[PATH_MAX];
         snprintf(tmpdir, sizeof(tmpdir), "/tmp/2O9-pkginfo-%d", getpid());
@@ -300,7 +300,7 @@ build_result_t *aur_build(const char *pkg_name, const char *build_dir,
                 build_result_t *r = calloc(1, sizeof(*r));
                 r->pkg_name = strdup(pkg_name);
                 r->success = 0;
-                r->error_msg = strdup("PKGBUILD not cloned — call aur_clone first");
+                r->error_msg = strdup("PKGBUILD not cloned - call aur_clone first");
                 return r;
         }
 
@@ -312,11 +312,11 @@ build_result_t *aur_build(const char *pkg_name, const char *build_dir,
         argv[i++] = "makepkg";
 
         /* Flags:
-         *   -f  — force rebuild (overwrite existing package)
-         *   -e  — extract source files (don't use cached)
-         *   -A  — ignore arch check
-         *   -s  — install missing deps with pacman (for repo deps)
-         *   --noconfirm — skip prompts
+         *   -f  - force rebuild (overwrite existing package)
+         *   -e  - extract source files (don't use cached)
+         *   -A  - ignore arch check
+         *   -s  - install missing deps with pacman (for repo deps)
+         *   --noconfirm - skip prompts
          */
         argv[i++] = "-feA";
 
@@ -434,7 +434,7 @@ int aur_install(const char *pkg_path)
          * The store adapter adds it to /nix/store and returns the store path.
          * Then the CLI commits a new generation and rebuilds the symlink farm.
          *
-         * For now, this is a thin wrapper — the CLI does the generation
+         * For now, this is a thin wrapper - the CLI does the generation
          * commit.  This function just validates and returns 0. */
         if (!pkg_path) return -1;
 

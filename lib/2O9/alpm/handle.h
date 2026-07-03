@@ -118,7 +118,7 @@ struct __alpm_handle_t {
         /* lock file descriptor */
         int lockfd;
 
-        /* 2O9: install backend dispatch — when non-NULL, libalpm's
+        /* 2O9: install backend dispatch - when non-NULL, libalpm's
          * extract_single_file() calls this instead of extracting to
          * handle->root. The backend puts files in /nix/store and
          * returns the store path. When NULL, pacman's default
@@ -126,7 +126,7 @@ struct __alpm_handle_t {
         char *(*install_backend)(alpm_handle_t *handle, alpm_pkg_t *pkg,
                                  const char *pkgfile_path);
 
-        /* 2O9: installed-set source — when non-NULL, the local DB's
+        /* 2O9: installed-set source - when non-NULL, the local DB's
          * populate step calls this instead of reading
          * /var/lib/pacman/local/. The callback populates the pkgcache
          * from the 2O9 generation DB. See MODIFICATIONS.md #2. */

@@ -1,4 +1,4 @@
-/* nix_parser.c — Nix expression language parser
+/* nix_parser.c - Nix expression language parser
  *
  * Recursive-descent parser producing an AST from token stream.
  * Grammar (loosest to tightest binding):
@@ -195,7 +195,7 @@ static nix_bind_t *parse_bind(nix_parser_t *p, size_t *count, size_t *cap, nix_b
             (*count)++;
             advance(p);
         }
-        /* 2O9: src_expr is no longer needed — either cloned into each
+        /* 2O9: src_expr is no longer needed - either cloned into each
          * binding, or unused if no idents followed. */
         nix_ast_free(src_expr);
         (void)src_used;
@@ -239,7 +239,7 @@ static nix_ast_t *parse_string(nix_parser_t *p, const char *text)
 
     while (i < len) {
         if (text[i] == '$' && i + 1 < len && text[i + 1] == '{') {
-            /* Interpolation start — find matching } */
+            /* Interpolation start - find matching } */
             size_t start = i + 2;
             int depth = 1;
             size_t j = start;
@@ -305,8 +305,8 @@ static nix_ast_t *parse_base(nix_parser_t *p)
          *
          * Strategy: consume first identifier normally (via advance),
          * then check what follows:
-         *   - ',' or '?' or '}'  →  formals (lambda param)
-         *   - '=' or '.'         →  binding (attrset)
+         *  - ',' or '?' or '}'  →  formals (lambda param)
+         *  - '=' or '.'         →  binding (attrset)
          */
         int line = tok.line, col = tok.col;
         advance(p); /* consume '{' */
@@ -332,12 +332,12 @@ static nix_ast_t *parse_base(nix_parser_t *p)
 
         /* Check for ellipsis at start: { ... } */
         if (peek_type(p) == NIX_TOK_DOT) {
-            /* Could be ... — consume the first dot and check */
+            /* Could be ... - consume the first dot and check */
             advance(p); /* consume first dot */
             if (peek_type(p) == NIX_TOK_DOT) {
                 advance(p); /* second dot */
                 if (peek_type(p) == NIX_TOK_DOT) {
-                    advance(p); /* third dot — it's ... */
+                    advance(p); /* third dot - it's ... */
                     /* Parse rest as formals starting with ellipsis */
                     nix_ast_t *formals = ast_new(NIX_NODE_ATTR_SET, line, col);
                     size_t fcap = 8, fcount = 0;
@@ -371,7 +371,7 @@ static nix_ast_t *parse_base(nix_parser_t *p)
                     return lambda;
                 }
             }
-            /* Not ellipsis — error: unexpected dot */
+            /* Not ellipsis - error: unexpected dot */
             parser_error(p, "unexpected '.' in attrset");
             return NULL;
         }
@@ -400,7 +400,7 @@ static nix_ast_t *parse_base(nix_parser_t *p)
                 }
             }
             expect(p, NIX_TOK_RBRACE, "expected '}'");
-            /* Check if this is followed by ':' — making it a lambda */
+            /* Check if this is followed by ':' - making it a lambda */
             if (peek_type(p) == NIX_TOK_COLON) {
                 advance(p);
                 nix_ast_t *body = parse_expr(p);
@@ -420,7 +420,7 @@ static nix_ast_t *parse_base(nix_parser_t *p)
                 lambda->lambda.body = body;
                 return lambda;
             }
-            /* Regular attrset — convert binds to attr_entries */
+            /* Regular attrset - convert binds to attr_entries */
             nix_ast_t *node = ast_new(NIX_NODE_ATTR_SET, line, col);
             node->attr_set.count = count;
             node->attr_set.bindings = calloc(count, sizeof(*node->attr_set.bindings));
@@ -444,7 +444,7 @@ static nix_ast_t *parse_base(nix_parser_t *p)
 
         /* Consume the first identifier */
         char *first_name = strdup(p->cur.text);
-        advance(p); /* consume ident — now p->cur is the token after it */
+        advance(p); /* consume ident - now p->cur is the token after it */
 
         /* Decide: formals or bindings? */
         nix_tok_type_t after_first = peek_type(p);
@@ -570,7 +570,7 @@ static nix_ast_t *parse_base(nix_parser_t *p)
 
             expect(p, NIX_TOK_RBRACE, "expected '}'");
 
-            /* Check if this is followed by ':' — making it a lambda */
+            /* Check if this is followed by ':' - making it a lambda */
             if (peek_type(p) == NIX_TOK_COLON) {
                 advance(p); /* consume : */
                 nix_ast_t *body = parse_expr(p);
@@ -648,7 +648,7 @@ static nix_ast_t *parse_base(nix_parser_t *p)
     }
 
     case NIX_TOK_STRING: {
-        /* Save text before advancing — advance frees p->cur.text */
+        /* Save text before advancing - advance frees p->cur.text */
         char *str_text = tok.text ? strdup(tok.text) : NULL;
         advance(p);
         nix_ast_t *result = parse_string(p, str_text);
@@ -724,7 +724,7 @@ static nix_ast_t *parse_base(nix_parser_t *p)
     case NIX_TOK_KW_REC: {
         int line = tok.line, col = tok.col;
         advance(p);
-        /* rec { ... } — recursive attrset */
+        /* rec { ... } - recursive attrset */
         expect(p, NIX_TOK_LBRACE, "expected '{' after 'rec'");
         if (p->has_error) return NULL;
 

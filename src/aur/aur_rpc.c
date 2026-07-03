@@ -1,4 +1,4 @@
-/* aur_rpc.c — AUR RPC client implementation
+/* aur_rpc.c - AUR RPC client implementation
  *
  * Rewrites paru's raur crate in C. Uses libcurl for HTTP,
  * cJSON for JSON parsing.

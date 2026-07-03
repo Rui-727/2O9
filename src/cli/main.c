@@ -1,4 +1,4 @@
-/* 2O9 CLI — main entry point
+/* 2O9 CLI - main entry point
  *
  * The `209` binary. SOV (Subject Object Verb) command dispatch.
  *
@@ -6,9 +6,9 @@
  * Phase 1: <pkg> install, <n> rollback, generations, apply, sync, gc
  *
  * From DESIGN.md §5:
- *   209 <subject> <verb>          — SOV pattern
- *   209 <command>                 — zero-argument command
- *   209 <pkg1> <pkg2> <verb>     — multi-subject
+ *   209 <subject> <verb>          - SOV pattern
+ *   209 <command>                 - zero-argument command
+ *   209 <pkg1> <pkg2> <verb>     - multi-subject
  */
 
 #include <stdio.h>
@@ -125,11 +125,11 @@ static int cmd_usage(void)
         printf("  209 <pkg> aur review   Review PKGBUILD diff\n");
         printf("  209 aur outdated       List outdated AUR packages\n");
         printf("  209 <pkg> trakker [flags]    Run package in sandbox\n\n");
-        printf("Trakker (leading form — command resolved via $PATH):\n");
+        printf("Trakker (leading form - command resolved via $PATH):\n");
         printf("  209 trakker ls -la\n");
         printf("  209 trakker --no-net -- curl https://example.com\n");
         printf("  209 trakker --no-write -- makepkg -f\n\n");
-        printf("Debag (hybrid sandbox — seccomp fast path + ptrace slow path):\n");
+        printf("Debag (hybrid sandbox - seccomp fast path + ptrace slow path):\n");
         printf("  209 debag --static-scan -- /bin/ls\n");
         printf("  209 debag --no-net -- curl https://example.com\n");
         printf("  209 debag --fast-mode -- ls -la  (seccomp only, ~native speed)\n\n");
@@ -142,7 +142,7 @@ static int cmd_usage(void)
         return 0;
 }
 
-/* Forward declaration — defined after cmd_install */
+/* Forward declaration - defined after cmd_install */
 static gen_pkg_t *read_current_gen_packages(const char *db_root, int current_id);
 
 /* ── Generations ─────────────────────────────────────────────────── */
@@ -216,7 +216,7 @@ static int cmd_generations(void)
                                 }
                                 fclose(df);
                         } else {
-                                /* No diff.json — fall back to reading full manifest */
+                                /* No diff.json - fall back to reading full manifest */
                                 gen_pkg_t *gp = read_current_gen_packages(db_root, gens[i]->id);
                                 gen_pkg_t *gq = gp;
                                 while (gq) { pc++; gq = gq->next; }
@@ -258,7 +258,7 @@ static gen_pkg_t *read_current_gen_packages(const char *db_root, int current_id)
         snprintf(manifest_path, sizeof(manifest_path),
                  "%s/generations/%d/manifest.json", db_root, current_id);
 
-        /* Read the file into a buffer — cJSON_Parse needs the full string */
+        /* Read the file into a buffer - cJSON_Parse needs the full string */
         FILE *f = fopen(manifest_path, "r");
         if (!f) return NULL;
         fseek(f, 0, SEEK_END);
@@ -337,7 +337,7 @@ static int cmd_install(const char *pkg_name)
                 result.error_msg = NULL;
                 printf("  [test mode] fake store path: %s\n", fake_store);
         } else if (pkg_path[0] == '\0') {
-                /* No pkg path and no test mode — try direct extraction
+                /* No pkg path and no test mode - try direct extraction
                  * by downloading the package with pacman first.
                  * For now, tell the user what to do. */
                 fprintf(stderr, "209: package resolution isn't wired up yet (needs lib2O9 integration)\n");
@@ -486,7 +486,7 @@ static int cmd_rollback(int target_id)
         printf("209: rolling back from #%d to #%d...\n", current, target_id);
 
         if (gen_db_rollback(db, target_id) < 0) {
-                fprintf(stderr, "209: rollback failed — generation #%d not found\n", target_id);
+                fprintf(stderr, "209: rollback failed - generation #%d not found\n", target_id);
                 gen_db_unlock(db);
                 gen_db_close(db);
                 return 1;
@@ -561,7 +561,7 @@ static char *eval_nix_config(const char *config_path, char **err_out)
  *   3. /etc/2O9/2O9.nix (global)  ← wins on conflict
  *   4. CLI flags (not handled here)
  *
- * For list values (e.g. "packages"), we concatenate — both user and
+ * For list values (e.g. "packages"), we concatenate - both user and
  * global packages should be installed. For everything else, global
  * wins on conflict (shallow merge).
  *
@@ -576,11 +576,11 @@ static char *merge_manifests(const char *user_json, const char *global_json,
         if (!user_json) return strdup(global_json);
         if (!global_json) return strdup(user_json);
 
-        /* Both present — concatenate user's packages into global's
+        /* Both present - concatenate user's packages into global's
          * packages list, then return global (global wins on all other
          * keys per DESIGN.md §7).
          *
-         * ponytail: This is a known shortcut — a proper deep merge
+         * ponytail: This is a known shortcut - a proper deep merge
          * would handle nested objects and per-key conflict resolution.
          * For the 2O9 manifest schema (flat top-level with list-typed
          * "packages"), concatenating the package lists and letting
@@ -650,7 +650,7 @@ static int cmd_apply(void)
          *   9. Run the activation phase (systemctl, sysusers, tmpfiles, ...)
          */
 
-        /* Step 1: Find config files — both user (home.nix) and global
+        /* Step 1: Find config files - both user (home.nix) and global
          * (2O9.nix). Per DESIGN.md §7, merge order is:
          *   defaults → home.nix → 2O9.nix → CLI flags
          * Global wins on conflict. We evaluate both and merge. */
@@ -732,7 +732,7 @@ static int cmd_apply(void)
                 return 1;
         }
 
-        /* Step 5: Reconcile — diff desired manifest against current generation */
+        /* Step 5: Reconcile - diff desired manifest against current generation */
         reconcile_txn_t *txn = reconcile(json, db_root);
         if (!txn) {
                 fprintf(stderr, "209: failed to reconcile manifest\n");
@@ -857,7 +857,7 @@ static int cmd_apply(void)
                 if (prev) gen_free(prev);
         }
 
-        /* Step 7.5: Activation phase — 9-step idempotent post-extract
+        /* Step 7.5: Activation phase - 9-step idempotent post-extract
          * sequence from DESIGN.md §7. Runs after the symlink farm so
          * unit files are visible in /etc/, before the final report.
          * Steps that aren't fully implemented log a stub message and
@@ -912,7 +912,7 @@ static int sync_one_repo(CURL *curl, const char *repo_name, const char *server_u
         char dest[PATH_MAX];
 
         /* Construct URL: server + /os/x86_64/<repo>.db */
-        /* Strip any trailing $arch or $repo variables — server templates
+        /* Strip any trailing $arch or $repo variables - server templates
          * use $arch and $repo. For simplicity assume the server URL
          * already includes the arch path, or append it. */
         if (strstr(server_url, "$arch")) {
@@ -985,7 +985,7 @@ static int cmd_sync(void)
 {
         /* 2O9 Phase 1 path: use lib2O9 (modified libalpm) to sync repo DBs
          * via alpm_db_update(). This exercises the actual libalpm sync
-         * machinery — proper mirror handling, signature verification,
+         * machinery - proper mirror handling, signature verification,
          * parallel downloads.
          *
          * We evaluate 2O9.nix (or fall back to defaults) to get the
@@ -1018,7 +1018,7 @@ static int cmd_sync(void)
                         return 1;
                 }
 
-                /* Update all sync DBs at once — alpm_db_update takes the
+                /* Update all sync DBs at once - alpm_db_update takes the
                  * full list and handles per-DB fetching internally. */
                 alpm_list_t *dbs = alpm_get_syncdbs(handle);
                 int total = alpm_list_count(dbs);
@@ -1042,7 +1042,7 @@ static int cmd_sync(void)
         /* Fallback path: no 2O9.nix found, use hardcoded Arch defaults
          * via direct libcurl. This is the pre-Phase-1 behavior. */
         free(eval_err);
-        fprintf(stderr, "209: no 2O9.nix found — using default Arch mirrors\n");
+        fprintf(stderr, "209: no 2O9.nix found - using default Arch mirrors\n");
 
         const char *default_repos[][2] = {
                 {"core",     "https://mirror.archlinuxarm.org/x86_64/core"},
@@ -1105,7 +1105,7 @@ static int cmd_gc(void)
         /* Step 1: Collect all referenced store paths from all generations */
         size_t gen_count = 0;
         gen_t **gens = gen_db_list(db, &gen_count);
-        /* current gen ID — not used directly in GC logic,
+        /* current gen ID - not used directly in GC logic,
          * all generations are scanned */
         (void)gen_db_current(db);
 
@@ -1124,7 +1124,7 @@ static int cmd_gc(void)
         /* Step 2: Walk /nix/store/ and find unreferenced paths */
         DIR *store_dir = opendir("/nix/store");
         if (!store_dir) {
-                fprintf(stderr, "209: cannot open /nix/store/ — does it exist?\n");
+                fprintf(stderr, "209: cannot open /nix/store/ - does it exist?\n");
                 gen_list_free(gens, gen_count);
                 gen_db_close(db);
                 return 1;
@@ -1159,7 +1159,7 @@ static int cmd_gc(void)
 
         /* Walk /nix/store/ and collect unreferenced entries */
         size_t removed = 0;
-        /* freed_bytes would track space freed — TODO: add du -sk before rm */
+        /* freed_bytes would track space freed - TODO: add du -sk before rm */
         struct dirent *ent;
         while ((ent = readdir(store_dir)) != NULL) {
                 if (ent->d_name[0] == '.') continue;
@@ -1239,7 +1239,7 @@ static int cmd_remove(const char *pkg_name)
 
         int current = gen_db_current(db);
         if (current == 0) {
-                fprintf(stderr, "209: no generations — nothing to remove from\n");
+                fprintf(stderr, "209: no generations - nothing to remove from\n");
                 gen_db_close(db);
                 return 1;
         }
@@ -1266,7 +1266,7 @@ static int cmd_remove(const char *pkg_name)
         }
 
         /* Simple JSON parse: look for package entries and rebuild without the target.
-         * This is a basic parser — full JSON parsing uses cJSON later. */
+         * This is a basic parser - full JSON parsing uses cJSON later. */
         char line[8192];
         int found = 0;
         gen_pkg_t *new_pkgs = NULL;
@@ -1337,7 +1337,7 @@ static int cmd_remove(const char *pkg_name)
                         found = 1;
                         printf("  removing %s (%s) [%s]\n", pkg_name_buf,
                                pkg_ver_buf, pkg_origin_buf);
-                        continue;  /* skip — don't add to new list */
+                        continue;  /* skip - don't add to new list */
                 }
 
                 /* Keep this package in the new generation */
@@ -1386,7 +1386,7 @@ static int cmd_remove(const char *pkg_name)
                 gen_free(new_gen);
         }
 
-        /* Activation phase — for imperative installs, no reconcile txn
+        /* Activation phase - for imperative installs, no reconcile txn
          * exists (no manifest to diff against). Pass NULL: services
          * enable/disable is skipped, but daemon-reload, cache rebuild,
          * and other idempotent steps still run. */
@@ -1534,7 +1534,7 @@ static int cmd_aur_build(const char *pkg_name)
                 fprintf(stderr, "209: missing dependencies:\n");
                 resolve_action_t *m = plan->missing;
                 while (m) {
-                        fprintf(stderr, "  - %s\n", m->name);
+                        fprintf(stderr, " - %s\n", m->name);
                         m = m->next;
                 }
                 resolve_result_free(plan);
@@ -1777,7 +1777,7 @@ static int is_number(const char *s)
  *
  * The feed is RSS 2.0 wrapped in JSON via the archlinux.org API.
  * For simplicity we fetch the RSS XML and extract <title> and <pubDate>
- * with simple string scanning — no XML parser dependency.
+ * with simple string scanning - no XML parser dependency.
  *
  * Phase 5 polish: pretty-printing, filtering by date. */
 static size_t news_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
@@ -1817,7 +1817,7 @@ static int cmd_news(void)
         }
 
         /* Extract <title>...</title> and <pubDate>...</pubDate> pairs.
-         * Skip the first <title> (channel title) — start scanning after
+         * Skip the first <title> (channel title) - start scanning after
          * the first </channel>-equivalent marker (we look for <item>). */
         const char *p = buf;
         const char *items_start = strstr(p, "<item>");
@@ -1934,14 +1934,14 @@ static int cmd_info(const char *pkg_name)
                 }
         }
 
-        /* Not installed locally — fall back to AUR info */
+        /* Not installed locally - fall back to AUR info */
         fprintf(stderr, "209: %s is not installed locally; querying AUR...\n\n", pkg_name);
         return cmd_aur_info(pkg_name);
 }
 
 /* ── 209 <term> search ─────────────────────────────────────────────
  * Searches installed packages by substring match. Uses the hash index
- * — walks all entries (O(n) but no JSON re-parse) and checks each name.
+ * - walks all entries (O(n) but no JSON re-parse) and checks each name.
  * Falls back to AUR search if no local matches. */
 static void search_cb(const gen_index_entry_t *e, void *ud)
 {
@@ -1978,7 +1978,7 @@ static int cmd_search(const char *term)
                 printf("  (no local packages match '%s')\n", term);
         }
 
-        printf("=== No local matches for '%s' — searching AUR ===\n", term);
+        printf("=== No local matches for '%s' - searching AUR ===\n", term);
         return cmd_aur_search(term);
 }
 
@@ -2004,7 +2004,7 @@ static int cmd_init(int scope)
         /* Check if file already exists */
         struct stat st;
         if (stat(path, &st) == 0) {
-                fprintf(stderr, "209: %s already exists — refusing to overwrite\n", path);
+                fprintf(stderr, "209: %s already exists - refusing to overwrite\n", path);
                 fprintf(stderr, "    edit it manually or remove it first\n");
                 return 1;
         }
@@ -2038,7 +2038,7 @@ static int cmd_init(int scope)
 
         fprintf(f, "{ config, ... }:\n");
         fprintf(f, "#\n");
-        fprintf(f, "# 2O9 configuration — see https://github.com/Rui-727/2O9 for docs\n");
+        fprintf(f, "# 2O9 configuration - see https://github.com/Rui-727/2O9 for docs\n");
         fprintf(f, "# This file declares what your system should have installed.\n");
         fprintf(f, "# Run `209 apply` to make the system match this file.\n");
         fprintf(f, "#\n");
@@ -2101,7 +2101,7 @@ static int cmd_init(int scope)
 }
 
 /* ── 209 trakker [flags] [--] <command> [args...] ──────────────────
- * Leading form of trakker — trakker first, command second.
+ * Leading form of trakker - trakker first, command second.
  * The command is resolved via $PATH by execvp inside trakker_run,
  * so bare names like 'ls', 'curl', 'makepkg' work. */
 static int cmd_trakker_leading(int argc, char **argv)
@@ -2138,7 +2138,7 @@ static int cmd_trakker_leading(int argc, char **argv)
                         i++;
                         break;
                 } else {
-                        /* Not a flag — start of command */
+                        /* Not a flag - start of command */
                         break;
                 }
         }
@@ -2240,7 +2240,7 @@ static int cmd_debag(int argc, char **argv)
         debag_analysis_t *analysis = debag_analyze(analyze_path);
         if (!analysis) {
                 fprintf(stderr, "209 debag: cannot analyze '%s' (not an ELF binary?)\n", binary);
-                /* Continue without analysis — seccomp will use defaults only */
+                /* Continue without analysis - seccomp will use defaults only */
         }
 
         /* If --static-scan, print results and exit */
@@ -2284,7 +2284,7 @@ static int cmd_debag(int argc, char **argv)
  *
  * Extended trakker with output format control and selective logging. */
 
-/* 209 doctor — look up common errors in Arch Wiki + 2O9 troubleshooting */
+/* 209 doctor - look up common errors in Arch Wiki + 2O9 troubleshooting */
 static int cmd_doctor(int argc, char **argv)
 {
         if (argc < 1) {
@@ -2379,7 +2379,7 @@ static int cmd_doctor(int argc, char **argv)
         return 0;
 }
 
-/* 209 wiki <package> — fetch Arch Wiki page for a package */
+/* 209 wiki <package> - fetch Arch Wiki page for a package */
 static int cmd_wiki(const char *pkg_name)
 {
         CURL *curl = curl_easy_init();
@@ -2434,7 +2434,7 @@ static int cmd_wiki(const char *pkg_name)
         return 1;
 }
 
-/* 209 aur outdated — list AUR packages with newer versions available */
+/* 209 aur outdated - list AUR packages with newer versions available */
 static int cmd_aur_outdated(void)
 {
         gen_index_t *idx = get_gen_index();
@@ -2477,7 +2477,7 @@ static int cmd_aur_outdated(void)
         return 0;
 }
 
-/* 209 cache — paccache-like cache pruning */
+/* 209 cache - paccache-like cache pruning */
 static int cmd_cache(int argc, char **argv)
 {
         int keep = 3;  /* keep last 3 versions by default */
@@ -2521,7 +2521,7 @@ static int cmd_cache(int argc, char **argv)
         while ((de = readdir(d)) != NULL) {
                 if (de->d_name[0] == '.') continue;
                 /* Package cache files: <pkgname>-<version>-<arch>.pkg.tar.zst */
-                /* Also .db files from sync — skip those */
+                /* Also .db files from sync - skip those */
                 if (strstr(de->d_name, ".db") || strstr(de->d_name, ".files")) continue;
 
                 if (count >= cap) {
@@ -2539,7 +2539,7 @@ static int cmd_cache(int argc, char **argv)
                 else
                         entries[count].size = 0;
 
-                /* Try to extract pkgname — split on '-' and find the version part */
+                /* Try to extract pkgname - split on '-' and find the version part */
                 char *dash = entries[count].filename;
                 char *last_dash = NULL;
                 char *second_last_dash = NULL;
@@ -2603,7 +2603,7 @@ static int cmd_cache(int argc, char **argv)
         return 0;
 }
 
-/* 209 <pkg> tree — dependency tree visualizer */
+/* 209 <pkg> tree - dependency tree visualizer */
 static void print_dep_tree(const char *pkg_name, int depth, int *visited, int visited_count)
 {
         /* Print with indentation */
@@ -2647,7 +2647,7 @@ static int cmd_tree(const char *pkg_name)
         return 0;
 }
 
-/* 209 fuzz — basic fuzzing: run a binary with edge-case inputs in trakker/debag */
+/* 209 fuzz - basic fuzzing: run a binary with edge-case inputs in trakker/debag */
 static int cmd_fuzz(int argc, char **argv)
 {
         if (argc < 1 || strcmp(argv[0], "--help") == 0) {
@@ -2730,7 +2730,7 @@ static int cmd_fuzz(int argc, char **argv)
 
 /* .install script interactive prompt */
 
-/* 209 bundle generation <N> --output <file> — export a generation as tarball */
+/* 209 bundle generation <N> --output <file> - export a generation as tarball */
 static int cmd_bundle(int argc, char **argv)
 {
         if (argc < 2 || strcmp(argv[0], "generation") != 0) {
@@ -2814,7 +2814,7 @@ static int cmd_bundle(int argc, char **argv)
         return 1;
 }
 
-/* 209 import <file> — import a generation tarball */
+/* 209 import <file> - import a generation tarball */
 static int cmd_import(const char *tarball_path)
 {
         if (!tarball_path) {
@@ -3007,7 +3007,7 @@ static int cmd_install_script_prompt(const char *pkg_name, const char *scriptlet
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * 209 diff <gen1> <gen2> — show what changed between two generations
+ * 209 diff <gen1> <gen2> - show what changed between two generations
  * ════════════════════════════════════════════════════════════════════ */
 
 static int cmd_diff(const char *gen1_str, const char *gen2_str)
@@ -3101,7 +3101,7 @@ static int cmd_diff(const char *gen1_str, const char *gen2_str)
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * 209 why <pkg> — reverse dependency lookup
+ * 209 why <pkg> - reverse dependency lookup
  * ════════════════════════════════════════════════════════════════════ */
 
 static int cmd_why(const char *pkg_name)
@@ -3161,13 +3161,13 @@ static int cmd_why(const char *pkg_name)
         printf("to see which installed packages depend on it.\n");
 
         if (!found) {
-                /* Not an error — just no reverse deps found yet */
+                /* Not an error - just no reverse deps found yet */
         }
         return 0;
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * 209 -Su — upgrade all packages
+ * 209 -Su - upgrade all packages
  * ════════════════════════════════════════════════════════════════════ */
 
 static int cmd_upgrade(int use_sandbox)
@@ -3181,7 +3181,7 @@ static int cmd_upgrade(int use_sandbox)
 
         gen_index_t *idx = get_gen_index();
         if (!idx) {
-                fprintf(stderr, "209 -Su: no generation DB — run 209 init && 209 apply first\n");
+                fprintf(stderr, "209 -Su: no generation DB - run 209 init && 209 apply first\n");
                 return 1;
         }
 
@@ -3202,7 +3202,7 @@ static int cmd_upgrade(int use_sandbox)
                 manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
 
         if (!manifest_json) {
-                fprintf(stderr, "209 -Su: no 2O9.nix config found — cannot init lib2O9\n");
+                fprintf(stderr, "209 -Su: no 2O9.nix config found - cannot init lib2O9\n");
                 fprintf(stderr, "    run 209 init to create one\n");
                 free(eval_err);
                 return 1;
@@ -3225,7 +3225,7 @@ static int cmd_upgrade(int use_sandbox)
 
         alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);
         if (!sync_dbs) {
-                fprintf(stderr, "209 -Su: no sync DBs — run 209 -Sy first\n");
+                fprintf(stderr, "209 -Su: no sync DBs - run 209 -Sy first\n");
                 alpm_release(handle);
                 return 1;
         }
@@ -3280,7 +3280,7 @@ static int cmd_upgrade(int use_sandbox)
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * 209.lock — lockfile export/import
+ * 209.lock - lockfile export/import
  * ════════════════════════════════════════════════════════════════════ */
 
 static int cmd_lockfile_export(const char *output_path)
@@ -3465,7 +3465,7 @@ int main(int argc, char *argv[])
                 /* -S family (sync) */
                 if (op[1] == 'S') {
                         if (sub == 's') {
-                                /* -Ss <term> — search */
+                                /* -Ss <term> - search */
                                 if (argc < 3) {
                                         fprintf(stderr, "209 -Ss: no search term\n");
                                         return 1;
@@ -3473,7 +3473,7 @@ int main(int argc, char *argv[])
                                 return cmd_search(argv[2]);
                         }
                         if (sub == 'i') {
-                                /* -Si <pkg> — info */
+                                /* -Si <pkg> - info */
                                 if (argc < 3) {
                                         fprintf(stderr, "209 -Si: no package name\n");
                                         return 1;
@@ -3481,14 +3481,14 @@ int main(int argc, char *argv[])
                                 return cmd_info(argv[2]);
                         }
                         if (sub == 'y') {
-                                /* -Sy — refresh repo DBs */
+                                /* -Sy - refresh repo DBs */
                                 return cmd_sync();
                         }
                         if (sub == 'u') {
-                                /* -Su — upgrade all packages */
+                                /* -Su - upgrade all packages */
                                 return cmd_upgrade(0);
                         }
-                        /* -S <pkg>... — install */
+                        /* -S <pkg>... - install */
                         if (sub == '\0') {
                                 if (argc < 3) {
                                         fprintf(stderr, "209 -S: no package specified\n");
@@ -3518,7 +3518,7 @@ int main(int argc, char *argv[])
                 /* -Q family (query) */
                 if (op[1] == 'Q') {
                         if (sub == 's') {
-                                /* -Qs <term> — search installed */
+                                /* -Qs <term> - search installed */
                                 if (argc < 3) {
                                         fprintf(stderr, "209 -Qs: no search term\n");
                                         return 1;
@@ -3526,7 +3526,7 @@ int main(int argc, char *argv[])
                                 return cmd_search(argv[2]);
                         }
                         if (sub == 'i') {
-                                /* -Qi <pkg> — installed info */
+                                /* -Qi <pkg> - installed info */
                                 if (argc < 3) {
                                         fprintf(stderr, "209 -Qi: no package name\n");
                                         return 1;
@@ -3534,7 +3534,7 @@ int main(int argc, char *argv[])
                                 return cmd_info(argv[2]);
                         }
                         if (sub == 'l') {
-                                /* -Ql <pkg> — list files in package */
+                                /* -Ql <pkg> - list files in package */
                                 if (argc < 3) {
                                         fprintf(stderr, "209 -Ql: no package name\n");
                                         return 1;
@@ -3555,7 +3555,7 @@ int main(int argc, char *argv[])
                                 return 1;
                         }
                         if (sub == 'm') {
-                                /* -Qm — list foreign (AUR) packages */
+                                /* -Qm - list foreign (AUR) packages */
                                 gen_index_t *idx = get_gen_index();
                                 if (!idx) {
                                         fprintf(stderr, "209: no generation DB\n");
@@ -3569,7 +3569,7 @@ int main(int argc, char *argv[])
                                 }
                                 return 0;
                         }
-                        /* -Q — list all installed */
+                        /* -Q - list all installed */
                         if (sub == '\0') {
                                 gen_index_t *idx = get_gen_index();
                                 if (!idx) {
@@ -3614,11 +3614,11 @@ int main(int argc, char *argv[])
                 return cmd_debag(argc - 2, &argv[2]);
         }
         if (strcmp(argv[1], "doctor") == 0) {
-                /* 209 doctor "error message" — search Arch Wiki for solutions */
+                /* 209 doctor "error message" - search Arch Wiki for solutions */
                 return cmd_doctor(argc - 2, &argv[2]);
         }
         if (strcmp(argv[1], "wiki") == 0) {
-                /* 209 wiki <package> — fetch Arch Wiki page */
+                /* 209 wiki <package> - fetch Arch Wiki page */
                 if (argc < 3) {
                         fprintf(stderr, "209 wiki: no package name\n");
                         return 1;
@@ -3626,11 +3626,11 @@ int main(int argc, char *argv[])
                 return cmd_wiki(argv[2]);
         }
         if (strcmp(argv[1], "cache") == 0) {
-                /* 209 cache [--keep=N] [--dry-run] — paccache-like pruning */
+                /* 209 cache [--keep=N] [--dry-run] - paccache-like pruning */
                 return cmd_cache(argc - 2, &argv[2]);
         }
         if (strcmp(argv[1], "fuzz") == 0) {
-                /* 209 fuzz <binary> — basic fuzzing */
+                /* 209 fuzz <binary> - basic fuzzing */
                 return cmd_fuzz(argc - 2, &argv[2]);
         }
         if (strcmp(argv[1], "bundle") == 0) {
@@ -3654,7 +3654,7 @@ int main(int argc, char *argv[])
                 return cmd_diff(argv[2], argv[3]);
         }
         if (strcmp(argv[1], "why") == 0) {
-                /* 209 why <pkg> — reverse dependency lookup */
+                /* 209 why <pkg> - reverse dependency lookup */
                 if (argc < 3) {
                         fprintf(stderr, "usage: 209 why <pkg>\n");
                         return 1;
@@ -3712,7 +3712,7 @@ int main(int argc, char *argv[])
                 return 0;
         }
 
-        /* Search — repo (local generation DB) search, falls back to AUR */
+        /* Search - repo (local generation DB) search, falls back to AUR */
         if (strcmp(verb, "search") == 0) {
                 /* Multi-subject: 209 nginx firefox search */
                 for (int i = 1; i < argc - 1; i++) {
@@ -3722,7 +3722,7 @@ int main(int argc, char *argv[])
                 return 0;
         }
 
-        /* Info — show package info. Installed locally? Show generation DB
+        /* Info - show package info. Installed locally? Show generation DB
          * entry. Otherwise fall through to AUR info. */
         if (strcmp(verb, "info") == 0) {
                 for (int i = 1; i < argc - 1; i++) {
@@ -3768,12 +3768,12 @@ int main(int argc, char *argv[])
                 aur_clone(argv[1], build_dir);
                 return aur_review(argv[1], build_dir);
         }
-        /* 209 aur outdated — list AUR packages with newer versions */
+        /* 209 aur outdated - list AUR packages with newer versions */
         if (strcmp(subject, "aur") == 0 && strcmp(verb, "outdated") == 0) {
                 return cmd_aur_outdated();
         }
 
-        /* 209 <pkg> tree — dependency tree visualizer */
+        /* 209 <pkg> tree - dependency tree visualizer */
         /* Also handle reversed: 209 tree <pkg> */
         if (strcmp(verb, "tree") == 0) {
                 return cmd_tree(subject);
@@ -3839,7 +3839,7 @@ int main(int argc, char *argv[])
                                 cmd_argv[j] = argv[i + j];
                         cmd_argv[cmd_argc] = NULL;
                 } else {
-                        /* No command specified — use the subject as the command */
+                        /* No command specified - use the subject as the command */
                         cmd_argc = 1;
                         cmd_argv = malloc((cmd_argc + 1) * sizeof(char *));
                         cmd_argv[0] = subject;
@@ -3917,7 +3917,7 @@ int main(int argc, char *argv[])
                 return rc == 0 ? 0 : 1;
         }
 
-        /* Rollback / pin — subject is a generation number */
+        /* Rollback / pin - subject is a generation number */
         if (is_number(subject)) {
                 int id = atoi(subject);
                 if (strcmp(verb, "rollback") == 0)  return cmd_rollback(id);

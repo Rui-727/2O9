@@ -1,4 +1,4 @@
-/* nix_lexer.c — Nix expression language lexer
+/* nix_lexer.c - Nix expression language lexer
  *
  * Tokenizes Nix source into tokens for the parser. Supports:
  * - Identifiers and keywords (let, in, if, then, else, with, rec, assert, import, or)
@@ -118,7 +118,7 @@ static nix_token_t lex_string(struct nix_lexer *lex)
     /* We'll build the string text. For interpolation, we emit the
      * string up to the ${, then the parser handles the interpolation
      * as a separate step. For the lexer, we just return the full
-     * string text with ${} markers intact — the parser splits them. */
+     * string text with ${} markers intact - the parser splits them. */
 
     size_t cap = 256;
     char *buf = calloc(cap, 1);
@@ -306,7 +306,7 @@ nix_token_t nix_lexer_next(struct nix_lexer *lex)
             next == '-' || next == '~' || next == '+') {
             return lex_path(lex);
         }
-        /* Otherwise it's the / operator — fall through to single-char ops */
+        /* Otherwise it's the / operator - fall through to single-char ops */
     }
     if ((c == '.' && peek_at(lex, 1) == '/') ||
         (c == '~' && peek_at(lex, 1) == '/'))
@@ -387,7 +387,7 @@ nix_token_t nix_lexer_next(struct nix_lexer *lex)
     case '>': tok.type = NIX_TOK_GT;        return tok;
     case '!': tok.type = NIX_TOK_NOT;       return tok;
     default:
-        /* Unknown character — skip and return EOF */
+        /* Unknown character - skip and return EOF */
         fprintf(stderr, "nix_lexer: unexpected character '%c' at line %d col %d\n",
                 c, lex->line, lex->col);
         tok.type = NIX_TOK_EOF;

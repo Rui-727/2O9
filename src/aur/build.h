@@ -1,4 +1,4 @@
-/* build.h — AUR build pipeline
+/* build.h - AUR build pipeline
  *
  * Rewrites paru's install.rs + exec.rs in C.
  * Orchestrates: clone PKGBUILD → review → makepkg → install.

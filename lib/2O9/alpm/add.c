@@ -493,7 +493,7 @@ static int commit_single_pkg(alpm_handle_t *handle, alpm_pkg_t *newpkg,
                 return -1;
         }
 
-        /* 2O9: install backend dispatch — if a backend is registered on
+        /* 2O9: install backend dispatch - if a backend is registered on
          * the handle, hand the .pkg.tar.* off to it instead of running
          * libalpm's per-file extractor. The backend returns a store
          * path (e.g. /nix/store/<name>-<version>); we attach it to the
@@ -519,7 +519,7 @@ static int commit_single_pkg(alpm_handle_t *handle, alpm_pkg_t *newpkg,
                  * MODIFICATIONS.md #1). */
                 newpkg->two9_store_path = store_path;
 
-                /* Skip the per-file extraction loop below — the backend
+                /* Skip the per-file extraction loop below - the backend
                  * already did the extraction into /nix/store. The
                  * symlink farm runs later, in the 2O9 commit phase. */
                 _alpm_archive_read_free(archive);
@@ -681,7 +681,7 @@ static int commit_single_pkg(alpm_handle_t *handle, alpm_pkg_t *newpkg,
         /* 2O9: backend dispatch target. Code paths that took the
          * install_backend shortcut above jump here, skipping libalpm's
          * local-DB write + scriptlet run (those are 2O9's
-         * responsibility — see activation.c). The PROGRESS/EVENT
+         * responsibility - see activation.c). The PROGRESS/EVENT
          * calls above already fired, so we just return. */
 backend_done:
         event.type = ALPM_EVENT_PACKAGE_OPERATION_DONE;

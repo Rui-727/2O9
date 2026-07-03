@@ -1,4 +1,4 @@
-/* reconcile.c — 2O9 declarative reconciler / diff engine
+/* reconcile.c - 2O9 declarative reconciler / diff engine
  *
  * Computes the diff between desired state (2O9.nix evaluation result)
  * and the current generation. Uses cJSON for proper JSON parsing.
@@ -404,7 +404,7 @@ int reconcile_execute(reconcile_txn_t *txn)
         free(cmd);
         if (ret != 0) {
             fprintf(stderr, "  warning: pacman -Rns returned %d\n", ret);
-            /* Don't set rc — removal failures are non-fatal */
+            /* Don't set rc - removal failures are non-fatal */
         }
     }
 

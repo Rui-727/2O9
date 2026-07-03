@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_cache.sh — test cache pruning
+# test_cache.sh - test cache pruning
 #
 # Creates fake package cache files and verifies that 209 cache
 # correctly prunes old versions.

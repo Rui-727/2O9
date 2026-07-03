@@ -112,8 +112,8 @@ static alpm_pkghash_t *rehash(alpm_pkghash_t *oldhash)
 	unsigned int newsize, i;
 
 	/* Hash tables will need resized in two cases:
-	 *  - adding packages to the local database
-	 *  - poor estimation of the number of packages in sync database
+	 * - adding packages to the local database
+	 * - poor estimation of the number of packages in sync database
 	 *
 	 * For small hash tables sizes (<500) the increase in size is by a
 	 * minimum of a factor of 2 for optimal rehash efficiency.  For

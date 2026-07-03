@@ -1,4 +1,4 @@
-/* gen.h — 2O9 generation database
+/* gen.h - 2O9 generation database
  *
  * A generation is a snapshot of the system's package set. Each time
  * you install, remove, or apply, a new generation is committed.

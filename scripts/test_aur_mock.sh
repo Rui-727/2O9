@@ -1,5 +1,5 @@
 #!/bin/bash
-# test_aur_mock.sh — mock test for AUR build pipeline
+# test_aur_mock.sh - mock test for AUR build pipeline
 #
 # Since the AUR is behind Anubis anti-bot protection, we test
 # the pipeline with mock data instead of live API calls.

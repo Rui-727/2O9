@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_rollback.sh — test generation commit + rollback + symlink revert
+# test_rollback.sh - test generation commit + rollback + symlink revert
 #
 # Creates two fake generations, switches between them via `209 <n> rollback`,
 # and verifies the symlink farm points to the right generation's store paths.
@@ -61,7 +61,7 @@ ln -s "$HOME/.local/state/2O9/generations/2" "$HOME/.local/state/2O9/current"
 
 # Build symlink farm for gen 2
 echo "--- listing generations ---"
-"$BINARY" generations 2>&1 || echo "(generations command may fail in sandbox — OK)"
+"$BINARY" generations 2>&1 || echo "(generations command may fail in sandbox - OK)"
 
 echo "--- rolling back to generation 1 ---"
 if "$BINARY" 1 rollback 2>&1; then
@@ -98,4 +98,4 @@ if [ -L "$HOME/.local/state/2O9/current" ]; then
     fi
 fi
 
-echo "=== test_rollback: PASS (with warnings — see above) ==="
+echo "=== test_rollback: PASS (with warnings - see above) ==="

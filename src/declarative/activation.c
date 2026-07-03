@@ -1,4 +1,4 @@
-/* activation.c — 2O9 post-extract activation phase
+/* activation.c - 2O9 post-extract activation phase
  *
  * Implements the 9-step activation phase from DESIGN.md §7.
  * Replaces pacman's .install scripts with an idempotent sequence
@@ -6,13 +6,13 @@
  * is built, but before the new generation is reported as committed.
  *
  * How it works:
- *   - For each step that needs to scan package contents, we walk the
+ *  - For each step that needs to scan package contents, we walk the
  *     new generation's packages via the generation DB.
- *   - For each package, we walk its store_path directory looking for
+ *  - For each package, we walk its store_path directory looking for
  *     files matching known patterns (systemd units, sysusers.d, etc.).
- *   - We invoke the appropriate system tool with the discovered files.
+ *  - We invoke the appropriate system tool with the discovered files.
  *
- * All steps are idempotent — safe to run on every 209 apply. Missing
+ * All steps are idempotent - safe to run on every 209 apply. Missing
  * tools (exit 127) are treated as non-fatal: a host without
  * gtk-update-icon-cache just skips that step.
  */
@@ -41,7 +41,7 @@ static int run_cmd(const char *argv[], const char *why)
         return -1;
     }
     if (pid == 0) {
-        /* child — silence stdout/stderr unless debugging */
+        /* child - silence stdout/stderr unless debugging */
         execvp(argv[0], (char *const *)argv);
         _exit(127);  /* not 1, so the parent can detect "binary not found" */
     }
@@ -54,7 +54,7 @@ static int run_cmd(const char *argv[], const char *why)
         return 0;
     }
     if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
-        /* Binary not installed — log and continue (idempotent: missing
+        /* Binary not installed - log and continue (idempotent: missing
          * helper tools are not fatal, same as pacman's approach). */
         fprintf(stderr, "activation: %s not installed (skipped: %s)\n",
                 argv[0], why);
@@ -70,7 +70,7 @@ static int run_cmd(const char *argv[], const char *why)
 static int activation_stop_affected_services(reconcile_txn_t *txn)
 {
     if (!txn) return 0;
-    /* Stop services that are being disabled — they shouldn't be running. */
+    /* Stop services that are being disabled - they shouldn't be running. */
     svc_entry_t *s = txn->svc_disable;
     while (s) {
         if (s->name) {
@@ -99,18 +99,18 @@ static int activation_populate_etc_symlinks(void)
 
 static int activation_apply_sysusers(void)
 {
-    /* We need the db_root and gen_id — but activation_run doesn't pass them.
+    /* We need the db_root and gen_id - but activation_run doesn't pass them.
      * For now, scan /nix/store/* directly is too broad. The right fix is
      * to pass a context struct through activation_run. As an interim
      * approach, we invoke systemd-sysusers with no args, which scans
-     * the default system directories — the symlink farm has already
+     * the default system directories - the symlink farm has already
      * put the sysusers.d configs at /usr/lib/sysusers.d/*. */
     const char *argv[] = {"systemd-sysusers", NULL};
     return run_cmd(argv, "apply sysusers.d configs");
 }
 
 /* ── Step 4: Apply tmpfiles ────────────────────────────────────────── */
-/* Same approach as sysusers — invoke systemd-tmpfiles --create which
+/* Same approach as sysusers - invoke systemd-tmpfiles --create which
  * scans the default locations where the symlink farm has placed configs. */
 
 static int activation_apply_tmpfiles(void)
@@ -210,7 +210,7 @@ static int activation_start_changed_services(reconcile_txn_t *txn)
         s = s->next;
     }
     /* Note: per DESIGN.md §7, the user should still reboot for full
-     * state to take effect — running processes keep their old binaries
+     * state to take effect - running processes keep their old binaries
      * via open FDs until restart. */
     return 0;
 }
@@ -224,7 +224,7 @@ int activation_run(reconcile_txn_t *txn)
     /* 1. Stop affected services */
     activation_stop_affected_services(txn);
 
-    /* 2. Populate /etc symlinks (no-op — symlink farm handles it) */
+    /* 2. Populate /etc symlinks (no-op - symlink farm handles it) */
     activation_populate_etc_symlinks();
 
     /* 3. Apply sysusers */
@@ -233,7 +233,7 @@ int activation_run(reconcile_txn_t *txn)
     /* 4. Apply tmpfiles */
     activation_apply_tmpfiles();
 
-    /* 5. Update users/groups (no-op — covered by sysusers) */
+    /* 5. Update users/groups (no-op - covered by sysusers) */
     activation_update_users_groups();
 
     /* 6. daemon-reload */

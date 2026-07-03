@@ -1,4 +1,4 @@
-/* debag.c — hybrid sandbox (seccomp + ptrace)
+/* debag.c - hybrid sandbox (seccomp + ptrace)
  *
  * The orchestrator. Runs static analysis, installs the seccomp filter,
  * sets up ptrace for SECCOMP_RET_TRACE events, forks + execs the target,
@@ -99,7 +99,7 @@ debag_result_t *debag_run(int argc, const char **argv,
     if (child == 0) {
         /* Child: install seccomp filter, then exec */
         if (!policy->fast_mode) {
-            /* Request ptrace tracing — needed for SECCOMP_RET_TRACE */
+            /* Request ptrace tracing - needed for SECCOMP_RET_TRACE */
             ptrace(PTRACE_TRACEME, 0, NULL, NULL);
             raise(SIGSTOP);
         }
@@ -128,7 +128,7 @@ debag_result_t *debag_run(int argc, const char **argv,
                PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE |
                PTRACE_O_EXITKILL);
 
-        /* Resume the child — it will run at near-native speed until
+        /* Resume the child - it will run at near-native speed until
          * a seccomp TRACE event fires */
         ptrace(PTRACE_CONT, child, NULL, NULL);
     }
@@ -194,12 +194,12 @@ debag_result_t *debag_run(int argc, const char **argv,
                     result->syscalls_allowed++;
                 }
 
-                /* Resume — syscall will execute (or be skipped if we changed rax) */
+                /* Resume - syscall will execute (or be skipped if we changed rax) */
                 ptrace(PTRACE_CONT, waited, NULL, NULL);
             } else if (event == PTRACE_EVENT_FORK ||
                        event == PTRACE_EVENT_VFORK ||
                        event == PTRACE_EVENT_CLONE) {
-                /* New process — continue tracing it */
+                /* New process - continue tracing it */
                 ptrace(PTRACE_CONT, waited, NULL, NULL);
             } else if (sig == SIGTRAP) {
                 ptrace(PTRACE_CONT, waited, NULL, NULL);

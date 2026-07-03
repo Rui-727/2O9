@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_script_analysis.sh — test .install script intent analysis
+# test_script_analysis.sh - test .install script intent analysis
 #
 # Creates a sample .install script and verifies that Debag's script
 # analysis correctly identifies the intents.

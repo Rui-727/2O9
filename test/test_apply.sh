@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# test_apply.sh — end-to-end test for `209 apply`
+# test_apply.sh - end-to-end test for `209 apply`
 #
 # Sets up a sandbox with:
-#   - A fake 2O9.nix config
-#   - A fake generation DB
-#   - A fake store path
+#  - A fake 2O9.nix config
+#  - A fake generation DB
+#  - A fake store path
 # Then runs `209 apply` and verifies:
-#   - A new generation is committed
-#   - The manifest.json contains the expected packages
-#   - The symlink farm is built
+#  - A new generation is committed
+#  - The manifest.json contains the expected packages
+#  - The symlink farm is built
 #
 # Usage: ./test/test_apply.sh [path/to/209]
 
@@ -31,7 +31,7 @@ mkdir -p "$HOME/.local/lib"
 mkdir -p "$TEST_ROOT/store"
 mkdir -p "$TEST_ROOT/etc"
 
-# Create a minimal 2O9.nix — just declares packages, no AUR
+# Create a minimal 2O9.nix - just declares packages, no AUR
 cat > "$HOME/.config/2O9/home.nix" <<'EOF'
 { config, ... }:
 {
@@ -76,4 +76,4 @@ else
     echo "WARN: no generation directory created (apply may have failed)"
 fi
 
-echo "=== test_apply: PASS (with warnings — see above) ==="
+echo "=== test_apply: PASS (with warnings - see above) ==="

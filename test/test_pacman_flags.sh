@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_pacman_flags.sh — test pacman-compatible flags
+# test_pacman_flags.sh - test pacman-compatible flags
 #
 # Tests -S -Q -Qs -Qi -Ql -Qm -R -Ss -Si -Sy
 # Verifies they dispatch correctly and produce expected output.
@@ -66,7 +66,7 @@ echo "--- -X (unknown) ---"
 OUT=$("$BINARY" -X 2>&1) || true
 echo "$OUT" | grep -q "unknown flag" && echo "OK: -X gives error" || echo "FAIL: -X should error"
 
-# Test -Sy (sync) — just verify it dispatches (will fail on network)
+# Test -Sy (sync) - just verify it dispatches (will fail on network)
 echo "--- -Sy (sync) ---"
 OUT=$("$BINARY" -Sy 2>&1) || true
 echo "$OUT" | grep -qiE "sync|mirror|repo" && echo "OK: -Sy dispatches to sync" || echo "WARN: -Sy output unexpected"

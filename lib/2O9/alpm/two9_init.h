@@ -1,4 +1,4 @@
-/* two9_init.h — 2O9 programmatic config entrypoint for libalpm
+/* two9_init.h - 2O9 programmatic config entrypoint for libalpm
  *
  * See two9_init.c for implementation details. This is the public API
  * 2O9's CLI uses to construct a configured alpm_handle_t from a 2O9

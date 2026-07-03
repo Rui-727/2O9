@@ -1,4 +1,4 @@
-# 2O9 — Design Document
+# 2O9 - Design Document
 
 **Working title:** 2O9 (stylized; the binary is `209`)
 **License:** GPL-2.0-only (inherited from pacman, the engine we link against)
@@ -35,18 +35,18 @@ These were settled up front and constrain the design:
 
 1. **Single language: C.** The whole 2O9 codebase is C. paru's Rust logic is
    ported to C; the declarative engine is new C. No Rust, no Go.
-2. **Full `/nix/store` — no hash in paths.** Not "Nix-inspired", not "Nix language
+2. **Full `/nix/store` - no hash in paths.** Not "Nix-inspired", not "Nix language
    only". The real store, with atomic generations. Store paths use the form
-   `/nix/store/<name>-<version>/` — **no content hash**. Predictable paths mean
+   `/nix/store/<name>-<version>/` - **no content hash**. Predictable paths mean
    you always know where a package lives; the tradeoff is no dedup by identical
    content (same bytes from two builds share a path anyway since version is the
    same). The `nix` toolchain (C++) is orchestrated as a **subprocess**, never
    linked, because linking `libstore`/`libexpr` would pull a C++ ABI into an
    otherwise pure-C build and break the "all C" constraint.
-3. **No fork of pacman — but the source lives in our tree and we edit it.**
+3. **No fork of pacman - but the source lives in our tree and we edit it.**
    pacman's source is **copied into our git tree** (`git subtree add` from
    upstream) under `subprojects/pacman/` and **modified directly** there. The
-   result is **lib2O9** — our modified build of libalpm, statically linked into
+   result is **lib2O9** - our modified build of libalpm, statically linked into
    the `209` binary. We do not publish a competing pacman; we ship 2O9 only.
 4. **GPL-2.0-only.** Inherited from pacman. The paru C port is original C code,
    so it inherits the project license cleanly.
@@ -60,18 +60,18 @@ These were settled up front and constrain the design:
    `/etc/2O9/2O9.nix` takes precedence. The sysadmin's declaration is authoritative.
 7. **One config format: Nix.** Everything lives in `2O9.nix`. No `config.toml`,
    no `pacman.conf`, no `paru.conf`. One file, one format, one source of truth.
-8. **Own C Nix evaluator — full Nix semantics.** The Nix expression evaluator
+8. **Own C Nix evaluator - full Nix semantics.** The Nix expression evaluator
    is written from scratch in C as part of lib2O9. No vendored C++ nix source.
    The evaluator supports the function form (`{ config, pkgs, ... }: { ... }`)
    with fixed-point recursion so `config.services.sshd.enable` can be referenced
    from within the config itself. It also supports `import`/`include` so configs
    can be split across multiple files (`packages.nix`, `services.nix`) that are
    packed into one big evaluation unit. It does not need to be a full Nix
-   interpreter for all of nixpkgs — just enough to evaluate `2O9.nix` with
+   interpreter for all of nixpkgs - just enough to evaluate `2O9.nix` with
    self-references and imports.
 9. **Lockfile for concurrency.** `/var/lib/2O9/lock` is an exclusive lock held
    during any mutating operation (`apply`, `install`, `remove`, `rollback`).
-   Prevents concurrent writes to the generation DB and store. Simple `flock()` —
+   Prevents concurrent writes to the generation DB and store. Simple `flock()` - 
    no lock daemon, no stale-lock recovery beyond `rm` (same as pacman).
 10. **Services via systemctl.** 2O9 does not manage services itself. Enabling a
     service in `2O9.nix` translates to `systemctl enable <service>`. Disabling
@@ -80,14 +80,14 @@ These were settled up front and constrain the design:
 
 ---
 
-## 3. The core idea — `pacman.conf` becomes `2O9.nix`
+## 3. The core idea - `pacman.conf` becomes `2O9.nix`
 
 Everything starts from one observation: `pacman.conf` is already a declarative
-document — it lists what repos exist, what options are set, what packages to
+document - it lists what repos exist, what options are set, what packages to
 ignore. It just happens to live in an ini-like format that drifts and can't be
 versioned cleanly.
 
-2O9 takes that and makes it real — and puts **everything** in one Nix file:
+2O9 takes that and makes it real - and puts **everything** in one Nix file:
 
 ```
 pacman.conf + paru.conf + package lists + services  ──►  2O9.nix
@@ -101,7 +101,7 @@ pacman.conf + paru.conf + package lists + services  ──►  2O9.nix
 
 There is **no `pacman.conf`, no `paru.conf`, no `config.toml`**. Everything is
 declared in `2O9.nix`. The package repository is **always an Arch Linux mirror**
-— the Nix file just declares *which* mirrors, same as `pacman.conf` does today.
+ - the Nix file just declares *which* mirrors, same as `pacman.conf` does today.
 There are no custom repos, no Nix binary caches for packages, no alternative
 package sources. 2O9 is an Arch Linux package manager that puts files in
 `/nix/store/`.
@@ -119,9 +119,9 @@ one. Both are solved by modifying libalpm into lib2O9.
 
 **Problem 1: Making files visible.** A package in `/nix/store/firefox-120/`
 has its binary at `/nix/store/firefox-120/bin/firefox`, not somewhere on
-`$PATH`. The answer is a **symlink farm** — but the symlinks go into each
+`$PATH`. The answer is a **symlink farm** - but the symlinks go into each
 user's `~/.local/`, not into `/usr/bin/` or any system path. Store paths
-have **no hash** — just `<name>-<version>` — so paths are predictable.
+have **no hash** - just `<name>-<version>` - so paths are predictable.
 
 ```
 /nix/store/firefox-120/bin/firefox
@@ -139,21 +139,21 @@ have **no hash** — just `<name>-<version>` — so paths are predictable.
 The user's shell includes `~/.local/bin` in `$PATH`. That's it. No system-wide
 `/usr/bin` symlinks. Every user gets their own symlink farm in their own
 `~/.local/`. Global packages from `2O9.nix` and per-user packages from
-`home.nix` all land in the same place — the user's `~/.local/`.
+`home.nix` all land in the same place - the user's `~/.local/`.
 
-`/etc` files are symlinked at their real paths — `/etc/foo` → store. Programs
+`/etc` files are symlinked at their real paths - `/etc/foo` → store. Programs
 expect `/etc/foo` to be at `/etc/foo`, and that's where they find it. Only
 binaries and libraries are symlinked into `~/.local/`.
 
 **Problem 2: Making the solver work.** libalpm's solver reads
 `/var/lib/pacman/local/` to know what's installed. It expects files at canonical
-paths like `/usr/bin/firefox`. But in 2O9, nothing goes to `/usr/bin/` —
+paths like `/usr/bin/firefox`. But in 2O9, nothing goes to `/usr/bin/` - 
 it goes to `~/.local/bin/`. The solver still breaks, because it expects the
 old filesystem model. We fix it in lib2O9.
 
 We solve this in lib2O9: the "what's installed" query is rewritten to read from
 the generation DB instead of `/var/lib/pacman/local/`. The solver sees a
-coherent installed set drawn from the current generation — which packages are in
+coherent installed set drawn from the current generation - which packages are in
 it, what versions, what deps. It doesn't care where the files physically live;
 it only needs the metadata. The generation DB provides that metadata, and the
 solver works as before.
@@ -168,7 +168,7 @@ compatibility bridge. We modify the library to match our model.
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  Unified CLI  (C)                                         │
-│  <subject> <verb> — SOV order                            │
+│  <subject> <verb> - SOV order                            │
 │  nginx install | firefox remove | aur search | apply     │
 └──────────────┬───────────────────────────────────────────┘
                │
@@ -205,43 +205,43 @@ compatibility bridge. We modify the library to match our model.
 
 Six components:
 
-1. **Unified CLI** — entrypoint, dispatch.
-2. **Declarative Engine** — turns `2O9.nix` into a transaction.
-3. **AUR Helper** — builds packages that aren't in binary repos, with build
+1. **Unified CLI** - entrypoint, dispatch.
+2. **Declarative Engine** - turns `2O9.nix` into a transaction.
+3. **AUR Helper** - builds packages that aren't in binary repos, with build
    optimization (see §5.2).
-4. **Trakker** — execution sandbox and trace recorder (see §7).
-5. **lib2O9** (libalpm, modified in-tree) — solver reads from generation DB,
+4. **Trakker** - execution sandbox and trace recorder (see §7).
+5. **lib2O9** (libalpm, modified in-tree) - solver reads from generation DB,
    install backend dispatches to store adapter.
-6. **Store Adapter** — puts packages in the store, then symlinks them into view.
+6. **Store Adapter** - puts packages in the store, then symlinks them into view.
 
 ---
 
 ## 5. Component designs
 
-### 5.1 Store Adapter (C) — symlink farm manager
+### 5.1 Store Adapter (C) - symlink farm manager
 
 The adapter has one job: take a package, put it in the store, then make its
 files visible at their conventional paths.
 
 - **`stage_and_register(pkg, files)`**
   Extract `.pkg.tar.zst` to a staging dir → compute tree hash →
-  Move staging dir to `/nix/store/<name>-<version>/` — the store path has **no
+  Move staging dir to `/nix/store/<name>-<version>/` - the store path has **no
   hash**, just name and version. Idempotent: if the path already exists, skip.
 
 - **Symlink farm builder**
   For each store path in a generation, create symlinks from conventional
   locations (`~/.local/bin/`, `~/.local/lib/`, `~/.local/share/`) into the
-  store. **Not `/etc/`** — `/etc/` is `/etc/`. Config files are symlinked at
+  store. **Not `/etc/`** - `/etc/` is `/etc/`. Config files are symlinked at
   their real system paths. Only binaries and libraries go to `~/.local/`.
   A **generation** = an ordered set of store paths + the symlink-farm manifest
   (the union view). `commit_generation()` atomically swaps the active profile
-  symlink via `rename(2)` — that's the rollback primitive.
+  symlink via `rename(2)` - that's the rollback primitive.
 
 - **Mapping table** (under `/var/lib/2O9`, format TBD between SQLite and a plain
   directory of files): `pkgname-version → store-path → generation-id`.
   Generation IDs are **integers**, starting at 1, incrementing by 1.
 
-- **Rollback** = `209 <n> rollback` — repoint the profile symlink to generation
+- **Rollback** = `209 <n> rollback` - repoint the profile symlink to generation
   `n`. Instant, because files never move. `209 generations` lists them:
 
   ```
@@ -263,16 +263,16 @@ files visible at their conventional paths.
   `nix-store --realise`, `nix-store --query`, `nix profile`, `nix-collect-garbage`.
   In/out is JSON or line-oriented stdout. We never `dlopen` or link Nix's C++.
 
-- **Running processes.** A running process whose binary is in the store is fine —
+- **Running processes.** A running process whose binary is in the store is fine - 
   the file is open via file descriptor, so even if the symlink changes, the old
   binary stays readable until the process exits. Store paths are only GC'd when
   no generation references them, so a running process from a recent generation
-  is safe. A process from a very old, unpinned, GC'd generation will break — but
+  is safe. A process from a very old, unpinned, GC'd generation will break - but
   that's the same as deleting a running binary on any system. Don't do that.
 
-### 5.2 AUR Helper — paru ported to C, with build optimization
+### 5.2 AUR Helper - paru ported to C, with build optimization
 
-Paru's responsibilities, mapped onto C libraries — plus compiler optimization
+Paru's responsibilities, mapped onto C libraries - plus compiler optimization
 that actually works via the environment:
 
 | paru (Rust) concern | C implementation in 2O9 |
@@ -291,7 +291,7 @@ so AUR packages land in the store alongside binary ones.
 #### Build optimization
 
 2O9 lets you set compiler flags and parallel jobs for AUR builds. These work by
-injecting environment variables into `makepkg` — the same mechanism Arch's own
+injecting environment variables into `makepkg` - the same mechanism Arch's own
 `makepkg.conf` uses. No PKGBUILD patching, no USE flags, no feature toggles.
 Just the knobs that actually work from the outside:
 
@@ -300,7 +300,7 @@ Just the knobs that actually work from the outside:
 aur = {
   packages = [ "google-chrome" ];
 
-  # Build optimization — injected into makepkg's environment
+  # Build optimization - injected into makepkg's environment
   build = {
     # Optimization profiles: native | safe | custom
     profile = "native";
@@ -328,30 +328,30 @@ aur = {
 };
 ```
 
-These are the same knobs you'd set in `/etc/makepkg.conf` today — 2O9 just
+These are the same knobs you'd set in `/etc/makepkg.conf` today - 2O9 just
 moves them into the Nix file and writes a temporary overlay before invoking
 `makepkg`. Packages that respect `CFLAGS`, `CXXFLAGS`, `MAKEFLAGS`, etc. pick
 up the optimization automatically. Packages that hardcode their own flags don't
-— that's on them, same as today.
+ - that's on them, same as today.
 
 ### 5.3 Declarative Engine (C)
 
 The user writes `2O9.nix` (global) and/or `home.nix` (user scope). This is a
-real Nix file — the language, the evaluator, the store, all of it.
+real Nix file - the language, the evaluator, the store, all of it.
 
 The engine evaluates the file and produces a JSON manifest. The Nix expression
-evaluator is **written from scratch in C** as part of lib2O9 — under
+evaluator is **written from scratch in C** as part of lib2O9 - under
 `lib/2O9/nix/`. It is not a vendored copy of the C++ nix source; it is our own
 implementation that understands the Nix language subset 2O9 needs. It builds as
-C code within `lib2O9.a`, so the declarative engine calls it directly — no `nix
+C code within `lib2O9.a`, so the declarative engine calls it directly - no `nix
 eval` subprocess, no C++ dependency for config parsing. The store still uses
 `nix-store` as a subprocess for store operations, but evaluation is pure C and
 entirely ours.
 
 **The config is a function, not a plain attrset.** The `{ config, pkgs, ... }:`
-form is required — this is what makes it Nix. The `config` argument enables
+form is required - this is what makes it Nix. The `config` argument enables
 self-reference: one part of the config can read another part. The evaluator
-implements fixed-point recursion to resolve this — `config` is the result of
+implements fixed-point recursion to resolve this - `config` is the result of
 evaluating the function itself, resolved lazily. Example:
 
 ```nix
@@ -443,7 +443,7 @@ What the engine produces (JSON manifest):
 }
 ```
 
-The `pacman` block **is** `2O9.nix` — there is no `pacman.conf`. On `209 apply`
+The `pacman` block **is** `2O9.nix` - there is no `pacman.conf`. On `209 apply`
 the engine feeds the `pacman` block **directly into lib2O9's in-memory API**.
 The declaration is the single source of truth.
 
@@ -459,15 +459,15 @@ The transaction is executed through lib2O9 + the AUR helper + the store adapter.
 On success → `commit_generation()`. On failure → abort; the profile is untouched,
 so the system stays consistent.
 
-### 5.4 Unified CLI — SOV order
+### 5.4 Unified CLI - SOV order
 
 The CLI uses **Subject-Object-Verb** order. This is a deliberate design choice,
 not an aesthetic quirk.
 
-`209 nginx install` reads as "nginx — install." The thing comes first, the action
+`209 nginx install` reads as "nginx - install." The thing comes first, the action
 comes last. You already know what you're talking about before you say what to do
 with it. `209 install nginx` puts the verb up front and makes you wait for the
-object — action-first is ceremony; subject-first is intent.
+object - action-first is ceremony; subject-first is intent.
 
 pacman's `src/pacman/` frontend is the base for the CLI. The **binary is `209`**
 (numeric); the project/branding name is 2O9. Commands:
@@ -491,7 +491,7 @@ pacman's `src/pacman/` frontend is the base for the CLI. The **binary is `209`**
 | `209 news` | Show Arch news | paru |
 
 **Special subjects:** `apply`, `generations`, `sync`, `news`, `gc` are
-zero-argument commands — they have no subject, only a verb. These are the
+zero-argument commands - they have no subject, only a verb. These are the
 exceptions that prove the rule: they operate on the system as a whole, not on a
 named thing.
 
@@ -503,14 +503,14 @@ keep working. Scope (global vs user) is selected by flag / config (§7).
 
 ---
 
-## 6. lib2O9 — libalpm + nix evaluator, merged in-tree
+## 6. lib2O9 - libalpm + nix evaluator, merged in-tree
 
 We don't fork pacman upstream and we don't build against it untouched. We do
 something in between: **copy the source into our tree and modify it directly**.
-The result is **lib2O9** — a single static library that merges our modified
+The result is **lib2O9** - a single static library that merges our modified
 libalpm with our modified Nix evaluator, statically linked into the `209` binary.
 
-Both components live under `lib/2O9/` — `alpm/` for the modified libalpm,
+Both components live under `lib/2O9/` - `alpm/` for the modified libalpm,
 `nix/` for our own C Nix evaluator. They're built into one `lib2O9.a`. There
 is no separate lib209, no separate nix-eval library. One library, one build
 step, one thing to link.
@@ -521,17 +521,17 @@ step, one thing to link.
   `lib/2O9/alpm/`. From that point it's **our copy**, committed and version-
   controlled alongside 2O9's own code.
 - The Nix evaluator is **written from scratch in C** under `lib/2O9/nix/`.
-  Not a vendored copy of the C++ nix source — our own implementation of the
+  Not a vendored copy of the C++ nix source - our own implementation of the
   Nix language subset that 2O9 needs.
 - Both build into a single static `lib2O9.a`.
-- We **edit the vendored source directly** — no separate patch series overlaid at
+- We **edit the vendored source directly** - no separate patch series overlaid at
   build time. The modifications are real commits in 2O9's history, visible to
   `git log` and `git blame`.
 - Every modification is marked with a `/* 2O9: <reason> */` comment so the
   touched spots are greppable and auditable.
 
 **Why copy-and-edit, not pristine + patches:**
-- No patch-application step at build — what's in the tree is exactly what builds.
+- No patch-application step at build - what's in the tree is exactly what builds.
 - Reviewers see the final code, not a patch to imagine applying.
 - The downside is real: upstream changes can't be a clean `git am`. We re-pull
   with `git subtree pull` and **resolve conflicts in the modified tree**. To make
@@ -549,7 +549,7 @@ step, one thing to link.
    builtin extractor, so files land in `/nix/store`.
 2. **Installed-set query**: the solver reads "what's installed" from the
    generation DB, not from `/var/lib/pacman/local/`. This is the modification
-   that makes the store model work without lying to the solver — it sees a
+   that makes the store model work without lying to the solver - it sees a
    coherent installed set, just sourced from a different place.
 3. **Config entrypoint**: lib2O9 is configured programmatically from the
    manifest, never from `pacman.conf`. The `alpm_option_set` /
@@ -574,7 +574,7 @@ for everything:
 
 `~/.local/bin` is in `$PATH`. That's the visibility mechanism. Binaries are
 symlinked there. Libraries to `~/.local/lib/`. Config files stay at their real
-paths — `/etc/` is `/etc/`.
+paths - `/etc/` is `/etc/`.
 
 The global `2O9.nix` applies to **all users**. When `209 apply` runs, it
 evaluates the Nix file and produces one manifest for the whole system. Then it
@@ -598,7 +598,7 @@ directly. Each user's `~/.local/` gets their symlinks. System paths (`/etc/`,
 new binaries are visible in the next shell session. If you want them
 immediately: `source /etc/profile.d/2O9.sh`.
 
-A user's `home.nix` overlays on top of the global config — packages and
+A user's `home.nix` overlays on top of the global config - packages and
 settings in `home.nix` are added to that user's `~/.local/` only, without
 affecting anyone else. The merge order (below) determines what wins.
 
@@ -620,7 +620,7 @@ built-in defaults
 
 ### Imperative installs are temporary
 
-`209 <pkg> install` is for temporary use — testing something, debugging,
+`209 <pkg> install` is for temporary use - testing something, debugging,
 one-off needs. The package lands in the current generation and works
 immediately. But it's not in `2O9.nix`, so the next `209 apply` will
 remove it.
@@ -639,55 +639,55 @@ $ 209 apply
 ```
 
 To keep it, add it to `2O9.nix` first. To discard it, say yes. To think
-about it, say no — nothing happens.
+about it, say no - nothing happens.
 
 This is intentional. Imperative installs are ephemeral. If you want
 something permanent, declare it. No hidden overlay, no "layer on top of the
 generation." The generation is what it is. The Nix file declares what it
 should be. `209 apply` closes the gap.
 
-### Services — systemctl enable
+### Services - systemctl enable
 
 2O9 does not manage services. Declaring `services.sshd.enable = true` in
 `2O9.nix` translates to `systemctl enable sshd` during `209 apply`. Disabling
 translates to `systemctl disable <service>`. There is no 2O9 service manager,
 no home-manager-style service activation, no service dependency graph. 2O9
 tells systemd what to enable and gets out of the way. Services that need
-restarting after a generation switch are the user's responsibility — 2O9
+restarting after a generation switch are the user's responsibility - 2O9
 doesn't track running daemons.
 
-### Install scripts — the activation model
+### Install scripts - the activation model
 
 pacman's `.install` scripts run post-install actions (systemd reload, user
 creation, icon cache updates, etc.) against the live filesystem. In a store
-model these don't work — files aren't at their conventional paths, and the
+model these don't work - files aren't at their conventional paths, and the
 scripts would run before symlinks are created.
 
 **2O9's approach: don't run `.install` scripts.** Instead, extract the *intent*
 from packages and execute it through an idempotent activation phase, similar to
 how NixOS handles this. The key insight from NixOS:
 
-1. **Never run install-time scripts** — they're the wrong abstraction for a
+1. **Never run install-time scripts** - they're the wrong abstraction for a
    store-based model. They assume files are at FHS paths, they're not
    idempotent, and they can't be re-run on rollback.
-2. **Scan packages for declarative intents** — systemd unit files, tmpfiles.d
+2. **Scan packages for declarative intents** - systemd unit files, tmpfiles.d
    configs, sysusers.d configs, desktop entries, icon caches. These are the
    actual payloads; the `.install` script is just the delivery mechanism.
-3. **Execute intents in an activation phase** — idempotent, ordered, runs on
+3. **Execute intents in an activation phase** - idempotent, ordered, runs on
    every `209 apply`. The activation phase runs after extraction but before
    the generation is committed.
 
 The activation phases (in order):
 
-1. **Stop affected services** — `systemctl stop <units that changed>`
-2. **Populate `/etc` symlinks** — unit files, configs from the store
-3. **Apply sysusers** — `systemd-sysusers` with configs from the store (idempotent)
-4. **Apply tmpfiles** — `systemd-tmpfiles --create` with rules from the store (idempotent)
-5. **Create/update users and groups** — idempotent, from package metadata
-6. **daemon-reload** — `systemctl daemon-reload` to pick up new unit files
-7. **Enable/disable services** — `systemctl enable`/`disable` per `2O9.nix`
-8. **Rebuild caches** — icon cache, desktop database, font cache, etc.
-9. **Start/restart services** — only those that changed in this generation
+1. **Stop affected services** - `systemctl stop <units that changed>`
+2. **Populate `/etc` symlinks** - unit files, configs from the store
+3. **Apply sysusers** - `systemd-sysusers` with configs from the store (idempotent)
+4. **Apply tmpfiles** - `systemd-tmpfiles --create` with rules from the store (idempotent)
+5. **Create/update users and groups** - idempotent, from package metadata
+6. **daemon-reload** - `systemctl daemon-reload` to pick up new unit files
+7. **Enable/disable services** - `systemctl enable`/`disable` per `2O9.nix`
+8. **Rebuild caches** - icon cache, desktop database, font cache, etc.
+9. **Start/restart services** - only those that changed in this generation
 
 The ~10 patterns that cover the vast majority of Arch `.install` scripts:
 
@@ -700,7 +700,7 @@ The ~10 patterns that cover the vast majority of Arch `.install` scripts:
 | `useradd/usergroup` | activation phase step 5 |
 | `gtk-update-icon-cache` | activation phase step 8 |
 | `update-desktop-database` | activation phase step 8 |
-| `ldconfig` | activation phase step 8 (or skip — store doesn't need ldconfig) |
+| `ldconfig` | activation phase step 8 (or skip - store doesn't need ldconfig) |
 | `chmod/chown /var/lib/...` | activation phase step 4 (tmpfiles rules) |
 | `systemd-tmpfiles --create` | activation phase step 4 |
 
@@ -708,7 +708,7 @@ Anything not matching these patterns gets a warning logged. The user can add
 custom activation commands in `2O9.nix` under `system.activationScripts` if
 needed (Phase 5+).
 
-### Concurrency — lockfile
+### Concurrency - lockfile
 
 `/var/lib/2O9/lock` is an exclusive lock held during any mutating operation:
 `apply`, `install`, `remove`, `rollback`, `gc`. The lock is taken with
@@ -718,7 +718,7 @@ daemon, no stale-lock recovery beyond `rm /var/lib/2O9/lock` (same approach as
 pacman's db lock). The lockfile lives alongside the generation DB because
 they're mutated together.
 
-### Generation switch — reboot required
+### Generation switch - reboot required
 
 After switching generations (via `209 <n> rollback` or `209 apply`), the user
 **must reboot** for the full system state to take effect. The symlink farm is
@@ -728,27 +728,27 @@ services continue running the old code. A reboot ensures everything picks up
 the new generation. This is the tradeoff of not having boot-time rollback
 machinery: simpler code, no activation service, but manual reboot.
 
-### Trakker — execution sandbox and trace recorder
+### Trakker - execution sandbox and trace recorder
 
 `209 trakker <cmd>` runs a command inside 2O9's sandbox, recording everything
 it does and optionally restricting what it's allowed to do.
 
 **What trakker records:**
-- **File I/O** — every file opened, created, modified, or deleted. Full
+- **File I/O** - every file opened, created, modified, or deleted. Full
   before/after paths.
-- **Network** — every connection opened (address, port, protocol).
-- **Process** — fork/exec, signals, exit code.
-- **Memory** — mmap calls, page faults (summary, not full dump).
-- **Registers** — register state at syscall entry (for debugging/reversing).
+- **Network** - every connection opened (address, port, protocol).
+- **Process** - fork/exec, signals, exit code.
+- **Memory** - mmap calls, page faults (summary, not full dump).
+- **Registers** - register state at syscall entry (for debugging/reversing).
 
 **What trakker can restrict (via flags):**
-- `--no-net` — block all network access. Any socket() / connect() call fails.
-- `--redirect-writes /tmp/trakker` — file writes are redirected to a
+- `--no-net` - block all network access. Any socket() / connect() call fails.
+- `--redirect-writes /tmp/trakker` - file writes are redirected to a
   specified directory instead of their real target. The program thinks it
   wrote to `/etc/foo`; the data actually landed in
   `/tmp/trakker/etc/foo`. Reads still see the real filesystem.
-- `--no-write` — block all file writes entirely.
-- `--allow-net port=443` — allow only specific network destinations.
+- `--no-write` - block all file writes entirely.
+- `--allow-net port=443` - allow only specific network destinations.
 
 **How it works:** trakker uses `ptrace` (or `seccomp`-bpf for filtering
 only) to intercept syscalls. On each syscall, it records the action and
@@ -758,12 +758,12 @@ to the traced process. Redirected writes are handled by intercepting
 redirected destination.
 
 **Use cases:**
-- `209 some-app trakker --no-net` — run an app with no network access.
-- `209 pkg trakker --redirect-writes /tmp/test install` — install a package
+- `209 some-app trakker --no-net` - run an app with no network access.
+- `209 pkg trakker --redirect-writes /tmp/test install` - install a package
   but catch every file it would write, without actually writing it.
-- `209 unknown-bin trakker` — run an untrusted binary and see what it does
+- `209 unknown-bin trakker` - run an untrusted binary and see what it does
   before trusting it.
-- `209 aur-pkg trakker --redirect-writes /tmp/aur-review aur build` — build
+- `209 aur-pkg trakker --redirect-writes /tmp/aur-review aur build` - build
   an AUR package but capture all writes for review.
 
 Trakker output is a JSON trace log:
@@ -792,13 +792,13 @@ Trakker output is a JSON trace log:
 
 Trakker is built into the `209` binary. It is not a separate tool. The
 implementation sits in `src/trakker/` and uses Linux's `ptrace` API directly
-— no external tracing dependencies.
+ - no external tracing dependencies.
 
 ---
 
 ## 8. Worked examples
 
-### `209 apply` — success
+### `209 apply` - success
 
 ```
 $ 209 apply
@@ -816,7 +816,7 @@ $ 209 apply
 ✓ done.  rollback with: 209 41 rollback
 ```
 
-### `209 apply` — would remove imperative installs
+### `209 apply` - would remove imperative installs
 
 ```
 $ 209 apply
@@ -829,14 +829,14 @@ $ 209 apply
 If no → nothing happens. Add them to `2O9.nix` and apply again.
 If yes → they're removed, generation #43 is committed.
 
-### `209 apply` — failure
+### `209 apply` - failure
 
 ```
 $ 209 apply
  reconciling manifest ↔ generation #42...
  +chromium (AUR)
  building chromium...
- error: makepkg failed — missing dependency libva
+ error: makepkg failed - missing dependency libva
  transaction aborted. generation #42 unchanged.
  fix the issue and try again.
 ```
@@ -861,14 +861,14 @@ $ 209 gc                    # garbage-collect unreferenced store paths
 ```
 2O9/                              # GPL-2.0-only
 ├── Makefile                      # build system
-├── lib/2O9/                      # lib2O9 — one static library, merged from:
+├── lib/2O9/                      # lib2O9 - one static library, merged from:
 │   ├── alpm/                     #   modified libalpm (from pacman, copied in & edited)
 │   │   └── MODIFICATIONS.md      #   log of every 2O9 change
 │   ├── nix/                      #   own C Nix evaluator (written from scratch)
 │   │   └── README.md             #   evaluator design notes
 │   └── common/                   #   shared utils (ini.c, util-common.c)
 ├── src/
-│   ├── cli/                      # unified front-end (C) — builds the `209` binary
+│   ├── cli/                      # unified front-end (C) - builds the `209` binary
 │   ├── aur/                      # paru logic, ported to C  (NEW)
 │   ├── declarative/              # reconcile engine        (NEW)
 │   ├── store/                    # store adapter           (NEW)
@@ -884,12 +884,12 @@ Build system: **make** (one Makefile, no dependencies beyond a C compiler and ma
 
 | Dep | Used by | Notes |
 |---|---|---|
-| `lib2O9` (alpm copied-in & modified; nix evaluator own C) | core | static `lib2O9.a` — merged libalpm + nix evaluator |
+| `lib2O9` (alpm copied-in & modified; nix evaluator own C) | core | static `lib2O9.a` - merged libalpm + nix evaluator |
 | `libarchive` | lib2O9 | for .pkg.tar.zst extraction |
 | `libcurl` | AUR helper | AUR RPC |
 | `libgit2` | AUR helper | clone PKGBUILDs |
 | `cJSON` | AUR helper, declarative | JSON parse/emit |
-| `nix` (the tool, C++) | store adapter | **subprocess only** — never linked. Not needed for eval (our C evaluator does that) |
+| `nix` (the tool, C++) | store adapter | **subprocess only** - never linked. Not needed for eval (our C evaluator does that) |
 | `makepkg` | AUR helper | invoked as subprocess |
 | `sqlite` (optional) | store adapter | generation DB (or plain files) |
 
@@ -899,16 +899,16 @@ Build system: **make** (one Makefile, no dependencies beyond a C compiler and ma
 
 Phase 1 is the make-or-break. If lib2O9 can't cleanly remap its installed-set
 query and install backend, the "full Nix store on pacman" premise needs
-rethinking — which is exactly why it's first.
+rethinking - which is exactly why it's first.
 
 | Phase | Goal | Exit criterion | Risk |
 |---|---|---|---|
-| **0 — Foundation** | Repo, meson build, copy pacman into `subprojects/`, C→`nix` subprocess spike, name/license settled | `209 -V` builds; one C program can `nix-store --add` a file | Low |
-| **1 — Store adapter MVP** | One binary package → store → symlink farm; one profile; one rollback | `209 sl install` → store path + symlink; `209 1 rollback` restores | **HIGH** |
-| **2 — paru → C port** | AUR RPC, clone, review, makepkg, into the store; build optimization | `209 <pkg> aur build` works end-to-end with custom CFLAGS | ~~Medium~~ **DONE** |
-| **3 — Declarative engine** | own C Nix evaluator (from scratch, in lib2O9) → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
-| **4 — Trakker** | ptrace-based sandbox, syscall tracing, network/write blocking, redirect | `209 some-app trakker --no-net` runs and produces trace JSON | Medium |
-| **5 — Polish** | Unified CLI, hooks, user scope, docs, packaging | distro-installable, documented | Medium |
+| **0 - Foundation** | Repo, meson build, copy pacman into `subprojects/`, C→`nix` subprocess spike, name/license settled | `209 -V` builds; one C program can `nix-store --add` a file | Low |
+| **1 - Store adapter MVP** | One binary package → store → symlink farm; one profile; one rollback | `209 sl install` → store path + symlink; `209 1 rollback` restores | **HIGH** |
+| **2 - paru → C port** | AUR RPC, clone, review, makepkg, into the store; build optimization | `209 <pkg> aur build` works end-to-end with custom CFLAGS | ~~Medium~~ **DONE** |
+| **3 - Declarative engine** | own C Nix evaluator (from scratch, in lib2O9) → reconcile → transaction → generations | `209 apply` from `2O9.nix`, reproducibly | Medium |
+| **4 - Trakker** | ptrace-based sandbox, syscall tracing, network/write blocking, redirect | `209 some-app trakker --no-net` runs and produces trace JSON | Medium |
+| **5 - Polish** | Unified CLI, hooks, user scope, docs, packaging | distro-installable, documented | Medium |
 
 Phase 1 alone is a useful, shippable proof-of-concept even if later phases stall.
 
@@ -928,20 +928,20 @@ Phase 1 alone is a useful, shippable proof-of-concept even if later phases stall
 - **Hooks & install scripts.** pacman's `.install` scripts run post-install
   actions (systemd reload, user creation, etc.). In a store model these need to
   run at generation-activation time, not at package-build time. 2O9's approach
-  is to **not run `.install` scripts at all** — instead, extract the *intent*
+  is to **not run `.install` scripts at all** - instead, extract the *intent*
   from packages (systemd units, tmpfiles rules, sysusers configs) and execute
-  it through an idempotent activation phase (see §7, "Install scripts — the
+  it through an idempotent activation phase (see §7, "Install scripts - the
   activation model"). The ~10 common patterns cover the vast majority of Arch
   packages. Unusual `.install` scripts get a warning; users can add custom
   activation commands in `2O9.nix`. Deferred to Phase 3 but flagged now.
 - **Symlink conflicts.** Two packages shipping the same path (e.g. both install
   `~/.local/bin/foo`) is a conflict in the symlink farm, just as it is in pacman
   today. The store makes it visible earlier (at generation-commit time) rather
-  than at install time, which is actually better — but it still needs a conflict
+  than at install time, which is actually better - but it still needs a conflict
   resolution strategy.
 - **Services after rollback.** When you rollback, symlinks change but running
   processes keep their old binaries (via open FDs). 2O9 does not automatically
-  restart services after a generation switch — the user reboots. Services are
+  restart services after a generation switch - the user reboots. Services are
   managed via `systemctl enable`/`disable`, so after reboot, systemd starts
   exactly what's enabled. This is simple and correct but means there's no
   "live rollback" of services without a reboot.

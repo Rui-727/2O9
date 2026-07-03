@@ -1,6 +1,6 @@
-/* activation.h — what runs after packages land in the store
+/* activation.h - what runs after packages land in the store
  *
- * pacman runs .install scripts after extraction. We don't — those
+ * pacman runs .install scripts after extraction. We don't - those
  * scripts assume files are at FHS paths, they're not idempotent, and
  * they can't be re-run on rollback. Instead, we extract the *intent*
  * (systemd units, tmpfiles, sysusers, icon caches) and run it through
@@ -18,21 +18,21 @@
  *   8. Rebuild caches    (icon cache, desktop db, font cache, ldconfig)
  *   9. Start/restart services that changed in this generation
  *
- * Every step is idempotent — safe to run on every `209 apply`. If a
+ * Every step is idempotent - safe to run on every `209 apply`. If a
  * tool isn't installed (gtk-update-icon-cache on a headless box, say),
  * we skip it silently rather than failing the whole apply.
  *
  * Implementation notes:
- *   - Step 2 is a no-op: the symlink farm already handles /etc/ entries
+ *  - Step 2 is a no-op: the symlink farm already handles /etc/ entries
  *     via the store_manifest is_config flag.
- *   - Step 5 is a no-op: systemd-sysusers (step 3) covers the standard
+ *  - Step 5 is a no-op: systemd-sysusers (step 3) covers the standard
  *     case. Packages needing custom user creation outside sysusers.d
  *     get a warning (DESIGN.md: "don't run .install scripts").
- *   - Steps 3 and 4 invoke systemd-sysusers / systemd-tmpfiles with no
+ *  - Steps 3 and 4 invoke systemd-sysusers / systemd-tmpfiles with no
  *     explicit file args, so they scan the default system directories
  *     where the symlink farm has placed the configs. A future enhancement
  *     is to pass explicit file lists from the new generation's store paths.
- *   - Step 9 starts (not restarts) services — restart would disrupt
+ *  - Step 9 starts (not restarts) services - restart would disrupt
  *     running sessions. The user should still reboot for full state
  *     to take effect (DESIGN.md §7).
  */
@@ -48,7 +48,7 @@
  * the store and the symlink farm is built, but before the generation
  * is reported as committed.
  *
- * txn may be NULL (imperative install path) — services enable/disable
+ * txn may be NULL (imperative install path) - services enable/disable
  * is skipped, but daemon-reload, cache rebuild, and other idempotent
  * steps still run.
  *
@@ -65,7 +65,7 @@ int activation_services_apply(reconcile_txn_t *txn);
 /* The 8 individual step functions (stop_affected_services,
  * populate_etc_symlinks, apply_sysusers, apply_tmpfiles,
  * update_users_groups, daemon_reload, rebuild_caches,
- * start_changed_services) are static in activation.c — only
+ * start_changed_services) are static in activation.c - only
  * activation_run() calls them. If a future caller needs one
  * directly, promote it to a public declaration here. */
 
