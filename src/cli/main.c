@@ -471,13 +471,23 @@ int cmd_install(const char *pkg_name)
                 alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);
 
                 if (!sync_dbs) {
-                        fprintf(stderr, "209: no sync DBs. Run `209 -Sy` first to download repo databases.\n");
+                        fprintf(stderr, "209: no sync DBs registered.\n");
+                        fprintf(stderr, "    Run: 209 -Sy  (to download repo databases)\n");
                         alpm_release(handle);
+                        free(resolved_version);
                         return 1;
                 }
 
+                /* Debug: show what sync DBs exist and how many packages they have */
+                const char *debug = getenv("TWO09_DEBUG");
                 for (alpm_list_t *i = sync_dbs; i; i = alpm_list_next(i)) {
                         alpm_db_t *db = (alpm_db_t *)i->data;
+                        const char *db_name = alpm_db_get_name(db);
+                        alpm_list_t *pkgcache = alpm_db_get_pkgcache(db);
+                        int pkg_count = pkgcache ? alpm_list_count(pkgcache) : 0;
+                        if (debug)
+                                fprintf(stderr, "  [debug] sync DB '%s': %d packages\n",
+                                        db_name ? db_name : "?", pkg_count);
                         pkg = alpm_db_get_pkg(db, pkg_name);
                         if (pkg) {
                                 found_db = db;
@@ -487,13 +497,12 @@ int cmd_install(const char *pkg_name)
 
                 if (!pkg) {
                         fprintf(stderr, "209: package '%s' not found in any repo.\n", pkg_name);
-                        if (sync_dbs) {
-                                fprintf(stderr, "    Repos are synced but package not found.\n");
-                                fprintf(stderr, "    Try: 209 %s aur build  (to build from AUR)\n", pkg_name);
-                        } else {
-                                fprintf(stderr, "    No repo databases found. Run: 209 -Sy\n");
-                        }
-                        fprintf(stderr, "    Or:  209 -Ss %s  (to search)\n", pkg_name);
+                        fprintf(stderr, "    Possible causes:\n");
+                        fprintf(stderr, "    1. Repo DBs not synced. Run: 209 sync\n");
+                        fprintf(stderr, "    2. Repo URLs in 2O9.nix are wrong (still mirror.example.com?)\n");
+                        fprintf(stderr, "       Fix: rm ~/.config/2O9/2O9.nix && 209 init\n");
+                        fprintf(stderr, "    3. Package is in AUR only. Try: 209 %s aur build\n", pkg_name);
+                        fprintf(stderr, "\n    Debug: TWO09_DEBUG=1 209 apply\n");
                         alpm_release(handle);
                         free(resolved_version);
                         return 1;

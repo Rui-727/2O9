@@ -132,4 +132,16 @@ test: test-nix-eval test-nix-lexer test-aur-rpc
         done
 	@echo "=== all tests passed ==="
 
-.PHONY: all clean install test
+# Debug build: no optimization, debug symbols, TWO09_DEBUG enabled
+debug: CFLAGS = -std=gnu11 -Wall -Wextra -O0 -g3 -DDEBUG
+debug: clean 209
+	@echo "=== debug build complete ==="
+	@echo "  Run: TWO09_DEBUG=1 ./209 apply"
+	@echo "  Or: sudo --preserve-env=HOME TWO09_DEBUG=1 ./209 apply"
+
+# Quick rebuild without lib2O9 (for iterating on CLI changes only)
+quick: CFLAGS = -std=gnu11 -Wall -Wextra -O2 -g
+quick: clean
+	$(CC) $(CFLAGS) $(DEFS) $(INCS) -o 209 $(CLI_SRC) $(STORE_SRC) $(DECL_SRC) $(AUR_SRC) $(TRAK_SRC) $(NIX_SRC) lib2O9.a $(LIB2O9_LIBS)
+
+.PHONY: all clean install test debug quick
