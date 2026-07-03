@@ -1,6 +1,6 @@
 # 2O9 Nix Evaluator
 
-This is our own C implementation of the Nix expression language - not a
+This is our own C implementation of the Nix expression language. Not a
 vendored copy of the C++ nix source. It implements just enough of the
 language to evaluate `2O9.nix` config files: the function form with
 self-reference, imports, attrsets, lists, lambdas, the usual builtins.
@@ -9,39 +9,44 @@ self-reference, imports, attrsets, lists, lambdas, the usual builtins.
 
 The features `2O9.nix` actually needs:
 
-- **Attribute sets** - `{ key = value; ... }` and recursive attrsets `rec { ... }`
-- **Lists** - `[ elem1 elem2 ... ]`
-- **Let-bindings** - `let ... in ...`
-- **String interpolation** - `"hello ${name}"`
-- **Function application** - `f x`, `f { ... }`
-- **Lambda functions** - `x: body`, `{ ... }: body`
-- **Function form with config** - `{ config, pkgs, ... }: { ... }` - the
-  standard NixOS pattern. The `config` argument enables self-reference via
-  fixed-point recursion.
-- **Fixed-point recursion** - `config` is the result of evaluating the function
-  itself. The evaluator resolves this lazily so `config.services.sshd.enable`
-  can be read from within the same config.
-- **Import/include** - `import ./packages.nix` reads and evaluates another
-  Nix file. All imports are packed into one evaluation unit. Supports
-  relative paths (relative to the importing file).
-- **With-expressions** - `with pkgs; [ firefox neovim ]`
-- **Conditional expressions** - `if cond then a else b`
-- **Comments** - `# line` and `/* block */`
-- **Primitive operations** - string concatenation, list concatenation, attribute
+- **Attribute sets**: `{ key = value; ... }` and recursive `rec { ... }`
+- **Lists**: `[ elem1 elem2 ... ]`
+- **Let-bindings**: `let ... in ...`
+- **String interpolation**: `"hello ${name}"`
+- **Function application**: `f x`, `f { ... }`
+- **Lambda functions**: `x: body`, `{ ... }: body`
+- **Function form with config**: `{ config, pkgs, ... }: { ... }`, the
+  standard NixOS pattern. The `config` argument enables self-reference
+  via fixed-point recursion.
+- **Fixed-point recursion**: `config` is the result of evaluating the
+  function itself. The evaluator resolves this lazily so
+  `config.services.sshd.enable` can be read from within the same
+  config.
+- **Import / include**: `import ./packages.nix` reads and evaluates
+  another Nix file. All imports are packed into one evaluation unit.
+  Supports relative paths (relative to the importing file).
+- **With-expressions**: `with pkgs; [ firefox neovim ]`
+- **Conditional expressions**: `if cond then a else b`
+- **Comments**: `# line` and `/* block */`
+- **Primitive operations**: string concat, list concat, attribute
   selection (`a.b`), `assert`, `throw`
 
 ## What we do NOT implement
 
 These Nix features are not needed for 2O9's config evaluation:
 
-- **Derivations** - 2O9 has its own build model (Arch .pkg.tar.zst)
-- **Fetchers** - no `fetchTarball`, `fetchGit`, `fetchUrl` (no network during eval)
-- **Flakes** - 2O9 has its own package model
-- **Full Nixpkgs** - we don't evaluate nixpkgs; we evaluate a small config schema
-- **Nix store integration** - evaluation is pure; store operations are separate
+- **Derivations**: 2O9 has its own build model (Arch `.pkg.tar.zst`)
+- **Fetchers**: no `fetchTarball`, `fetchGit`, `fetchUrl` (no network
+  during eval)
+- **Flakes**: 2O9 has its own package model
+- **Full Nixpkgs**: we don't evaluate nixpkgs. We evaluate a small
+  config schema.
+- **Nix store integration**: evaluation is pure. Store operations are
+  separate.
 
-Note: `builtins.pathExists` and `builtins.readFile` ARE supported (needed for
-import resolution). Only network-based builtins are excluded.
+Note: `builtins.pathExists` and `builtins.readFile` ARE supported
+(needed for import resolution). Only network-based builtins are
+excluded.
 
 ## Architecture
 
@@ -59,12 +64,16 @@ import resolution). Only network-based builtins are excluded.
 ```
 
 ### Lexer (`nix_lexer.c`)
-Tokenizes Nix source into: identifiers, strings (with interpolation), integers,
-operators (`+`, `++`, `.`, `:`), keywords (`let`, `in`, `if`, `then`, `else`,
-`with`, `rec`, `assert`), and delimiters (`{`, `}`, `[`, `]`, `(`, `)`, `;`).
+
+Tokenizes Nix source into: identifiers, strings (with interpolation),
+integers, operators (`+`, `++`, `.`, `:`), keywords (`let`, `in`,
+`if`, `then`, `else`, `with`, `rec`, `assert`), and delimiters (`{`,
+`}`, `[`, `]`, `(`, `)`, `;`).
 
 ### Parser (`nix_parser.c`)
+
 Recursive-descent parser producing an AST. Node types:
+
 - `NIX_NODE_ATTR_SET` - attribute set literal
 - `NIX_NODE_LIST` - list literal
 - `NIX_NODE_STRING` - string (possibly with interpolation parts)
@@ -78,8 +87,9 @@ Recursive-descent parser producing an AST. Node types:
 - `NIX_NODE_BINOP` - binary operation (+, ++, etc.)
 
 ### Evaluator (`nix_eval.c`)
-Walks the AST, evaluates expressions in an environment (symbol table of
-name→value bindings). Values are:
+
+Walks the AST, evaluates expressions in an environment (symbol table
+of name-to-value bindings). Values are:
 
 - `NIX_VAL_ATTR_SET` - attribute set (ordered map)
 - `NIX_VAL_LIST` - list (array)
@@ -90,11 +100,12 @@ name→value bindings). Values are:
 - `NIX_VAL_LAMBDA` - closure (env + AST node)
 - `NIX_VAL_PATH` - path literal
 
-The evaluator produces a `nix_value_t *` root value from evaluating `2O9.nix`.
-A separate `nix_to_json()` function walks the value tree and emits a JSON
-manifest that the declarative engine consumes.
+The evaluator produces a `nix_value_t *` root value from evaluating
+`2O9.nix`. A separate `nix_to_json()` function walks the value tree
+and emits a JSON manifest that the declarative engine consumes.
 
-### 2O9-specific primops (`nix_primops.c`)
+### Builtins (`nix_eval.c`)
+
 Custom builtins for 2O9's config schema:
 
 - `builtins.fromJSON` - parse a JSON string into a Nix value
@@ -106,31 +117,37 @@ Custom builtins for 2O9's config schema:
 - `builtins.attrNames` / `builtins.attrValues` - attrset introspection
 - `builtins.hasAttr` / `builtins.getAttr` - attrset access
 - `builtins.trace` - debug tracing (to stderr)
+- `builtins.pathExists` / `builtins.readFile` - filesystem (for imports)
 
-More primops can be added as needed.
+More primops can be added as needed. All builtins are accessible via
+`builtins.<name>` dot-notation.
 
 ## Build
 
-These files compile as part of `lib2O9.a` - pure C, no C++ deps.
+These files compile as part of `lib2O9.a`. Pure C, no C++ deps.
 
 ## Status
 
-Phase 3 - core evaluator implemented. The evaluator handles:
-- Attribute sets (plain & recursive), lists, strings with interpolation
+Done. The evaluator handles:
+
+- Attribute sets (plain and recursive), lists, strings with
+  interpolation
 - Let-bindings, if/then/else, with, assert, select
-- Lambda functions (ident param and formal params `{ a, b ? default, ... }: body`)
-- Function application (including curried application: `(x: y: x + y) 3 4`)
+- Lambda functions: ident param `x: body` and formal params
+  `{ a, b ? default, ... }: body`
+- Function application, including curried: `(x: y: x + y) 3 4`
 - Import resolution with base directory
 - Fixed-point recursion for `{ config, ... }: { ... }` pattern
-- 19 builtins (map, filter, length, head, tail, attrNames, attrValues, etc.)
+- 19 builtins (map, filter, length, head, tail, attrNames,
+  attrValues, etc.)
 - `builtins.<name>` dot-notation select for all builtins
 - `inherit ident;` and `inherit (src) ident1 ident2;` forms
 - JSON serialization of values
 
 The parser is feature-complete for the 2O9.nix subset. All 9 binary
-operator precedence levels are implemented (implication → or → and →
-equality → comparison → concat → add → mul → unary), with correct
-left- and right-associativity.
+operator precedence levels are implemented (implication, or, and,
+equality, comparison, concat, add, mul, unary), with correct left-
+and right-associativity.
 
 The test suite (`test_nix_eval.c`) has 49 passing tests covering all
 of the above.

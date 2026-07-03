@@ -1,15 +1,21 @@
-# 2O9.nix - Configuration Reference
+# Configuration Reference
 
-`2O9.nix` is the declarative config file. It's a Nix expression that
-evaluates to an attrset describing what your system should look like.
-One file, one format, one source of truth.
+2O9 has two config files. `2O9.nix` is the declarative config (Nix
+syntax, says what your system should look like). `2O9.conf` is the
+imperative side config (INI syntax, holds substituters, signing keys,
+and AUR build flags).
+
+# Part 1: `2O9.nix`
+
+A Nix expression that evaluates to an attrset describing what your
+system should look like. One file, one format, one source of truth.
 
 ## Locations
 
 | Scope | File | Notes |
 |---|---|---|
 | User | `~/.config/2O9/home.nix` | Per-user packages and settings |
-| System | `/etc/2O9/2O9.nix` | System-wide; wins on conflict |
+| System | `/etc/2O9/2O9.nix` | System-wide. Wins on conflict |
 
 Both files are evaluated on `209 apply` and merged. The system config
 takes precedence on conflicts; package lists concatenate.
@@ -31,7 +37,7 @@ Every `2O9.nix` must be a function taking at least `{ config, ... }:`:
 ```
 
 The `config` argument enables self-reference. The evaluator resolves
-this via fixed-point recursion - `config` is the result of evaluating
+this via fixed-point recursion: `config` is the result of evaluating
 the function itself, resolved lazily.
 
 ## Schema
@@ -47,8 +53,8 @@ packages = [ "vim" "curl" "git" "htop" ];
 ### `aur.packages` (list of strings)
 
 Packages to build from the AUR. Each is fetched via `git clone` from
-`aur.archlinux.org`, built with `makepkg`, and the resulting
-`.pkg.tar.zst` is added to the store.
+`aur.archlinux.org`, built with `makepkg` (inside a chroot by default),
+and the resulting `.pkg.tar.zst` is added to the store.
 
 ```nix
 aur.packages = [ "google-chrome" "visual-studio-code-bin" ];
@@ -79,7 +85,7 @@ aur.build = {
 ### `pacman.options` (attrset)
 
 Maps directly to pacman.conf options. Passed to lib2O9's
-`alpm_option_set_*` API programmatically - there is no `pacman.conf`.
+`alpm_option_set_*` API programmatically. There is no `pacman.conf`.
 
 ```nix
 pacman.options = {
@@ -89,16 +95,24 @@ pacman.options = {
 };
 ```
 
+`SigLevel` is parsed into the libalpm bitmask and applied to the handle
+and to every registered sync DB. Package `.sig` files are fetched
+alongside the `.pkg.tar.zst` and verified via gpgme before extraction.
+If `SigLevel` includes `Required` and the signature is missing or
+invalid, the install is refused. Set `SigLevel = "Never"` to disable
+signature verification entirely.
+
 ### `pacman.repos` (attrset of attrsets)
 
 Repo definitions. Each repo gets registered via
-`alpm_register_syncdb` + `alpm_db_add_server`.
+`alpm_register_syncdb` (with the parsed `SigLevel`) plus
+`alpm_db_add_server`.
 
 ```nix
 pacman.repos = {
-  core     = { server = "https://mirror.example.com/core/os/x86_64"; };
-  extra    = { server = "https://mirror.example.com/extra/os/x86_64"; };
-  multilib = { server = "https://mirror.example.com/multilib/os/x86_64"; };
+  core     = { server = "https://geo.mirror.pkgbuild.com/core/os/x86_64"; };
+  extra    = { server = "https://geo.mirror.pkgbuild.com/extra/os/x86_64"; };
+  multilib = { server = "https://geo.mirror.pkgbuild.com/multilib/os/x86_64"; };
 };
 ```
 
@@ -118,7 +132,7 @@ services = {
 };
 ```
 
-2O9 does not manage services itself - it just tells systemd what to
+2O9 does not manage services itself, it just tells systemd what to
 enable. After `209 apply`, a reboot is recommended for the full system
 state to take effect.
 
@@ -171,9 +185,10 @@ until `config` stabilizes (up to 100 iterations).
 ## Evaluation
 
 The evaluator is written from scratch in C as part of lib2O9. It is
-not the C++ Nix evaluator - it's a small subset sufficient for `2O9.nix`.
+not the C++ Nix evaluator. It's a small subset sufficient for `2O9.nix`.
 
 Supported:
+
 - Attribute sets (plain and `rec`)
 - Lists, strings (with `${interpolation}`), integers, booleans, null
 - `let ... in ...`, `if ... then ... else ...`, `with`, `assert`
@@ -189,6 +204,7 @@ Supported:
   `!=`, `<`, `<=`, `>`, `>=`, `++`, `+`, `-`, `*`, `/`)
 
 Not supported (not needed for `2O9.nix`):
+
 - Derivations, fetchers, flakes
 - Full nixpkgs evaluation
 
@@ -203,7 +219,7 @@ built-in defaults
       → CLI flags                  ← wins on everything
 ```
 
-For list values (e.g. `packages`), the lists concatenate - both user
+For list values (e.g. `packages`), the lists concatenate. Both user
 and system packages get installed. For everything else, the system
 config wins on conflict.
 
@@ -228,9 +244,9 @@ in
       ParallelDownloads = 10;
     };
     repos = {
-      core     = { server = "https://mirror.example.com/core/os/x86_64"; };
-      extra    = { server = "https://mirror.example.com/extra/os/x86_64"; };
-      multilib = { server = "https://mirror.example.com/multilib/os/x86_64"; };
+      core     = { server = "https://geo.mirror.pkgbuild.com/core/os/x86_64"; };
+      extra    = { server = "https://geo.mirror.pkgbuild.com/extra/os/x86_64"; };
+      multilib = { server = "https://geo.mirror.pkgbuild.com/multilib/os/x86_64"; };
     };
   };
 
@@ -248,3 +264,127 @@ in
 ```
 
 Run `209 apply` to make the system match this file.
+
+---
+
+# Part 2: `2O9.conf`
+
+An optional INI file for stuff that doesn't belong in the declarative
+config. Lives at `~/.config/2O9/2O9.conf` (or `/etc/2O9/2O9.conf` for
+system-wide).
+
+Format: standard INI. `[section]` headers, `key = value` lines, `#` and
+`;` for comments. List values (`MFlags`, `GitFlags`, `URLs`) are
+whitespace-separated.
+
+## Sections
+
+### `[bin]`
+
+Customize which binaries 2O9 invokes and what flags they get.
+
+```ini
+[bin]
+Makepkg = makepkg
+Git = git
+Gpg = gpg
+Sudo = sudo
+Pager = less
+MFlags = --skippgpcheck --nocheck -feA
+GitFlags = --depth 1
+```
+
+`MFlags` replaces the default makepkg flags entirely. If you set it,
+include `-feA` (or whatever you want) yourself. This matches paru's
+MFlags semantics.
+
+### `[chroot]`
+
+AUR build isolation. On by default.
+
+```ini
+[chroot]
+Enabled = yes
+Dir = /var/lib/2O9/chroot
+```
+
+When enabled, AUR builds run inside an `arch-nspawn` chroot via
+`makechrootpkg`. Requires the `devtools` package. If `mkarchroot` or
+`arch-nspawn` is not on `$PATH`, the build fails with a clear error.
+
+Set `Enabled = no` to run makepkg in your user environment. Not
+recommended for untrusted PKGBUILDs.
+
+### `[substituters]`
+
+Binary cache configuration. Lets 2O9 pull packages from caches other
+than the Arch mirror, and push to them.
+
+```ini
+[substituters]
+URLs = https://cache.example.com s3://my-bucket
+PublicKey = r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
+SigningKey = /etc/2O9/secret-key
+KeyName = cache.example.com-1
+AllowUnsigned = no
+```
+
+`URLs` is a whitespace-separated list. Each URL is consulted in order
+on install. `http://` and `https://` URLs use libcurl. `s3://` URLs
+shell out to the `aws` CLI.
+
+`PublicKey` is the base64 Ed25519 public key to verify narinfo
+signatures against. Get it from `209 keygen` on the publishing machine.
+
+`SigningKey` is the path to a file containing the 32-byte Ed25519
+secret key. Used by `209 cache push` to sign narinfos. Only needs to
+be present on publishing machines, not subscribers.
+
+`KeyName` is the human-readable name embedded in the `Sig:` line of
+each narinfo. Subscribers don't need this.
+
+`AllowUnsigned = yes` accepts narinfos with no signature or with a
+signature from an unknown key. Use only for trusted local caches.
+Default is `no`.
+
+## Worked example: two machines sharing a cache
+
+On machine A (the publisher):
+
+```sh
+209 keygen
+# Output:
+#   public key (add to 2O9.conf PublicKey =): r634rsy7nIo/...
+#   cache.example.com-1:r634rsy7nIo/...:TakyhFMCwVcOjdPUJurMrgEQeyuuGukyL+/wWYoCFQ8=
+```
+
+Save the second line to `/etc/2O9/secret-key` (mode 0600). Add to
+`/etc/2O9/2O9.conf`:
+
+```ini
+[substituters]
+URLs = https://cache.example.com
+SigningKey = /etc/2O9/secret-key
+KeyName = cache.example.com-1
+```
+
+Install a package and push it:
+
+```sh
+209 -S neovim
+209 cache push /nix/store/<hash>-neovim-0.10.0
+```
+
+On machine B (the subscriber), add to `/etc/2O9/2O9.conf`:
+
+```ini
+[substituters]
+URLs = https://cache.example.com
+PublicKey = r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
+AllowUnsigned = no
+```
+
+Now `209 -S neovim` on machine B will hit the cache first. If the
+cache has it and the signature verifies, the package is downloaded as a
+NAR and streamed into `/nix/store/` without ever touching the Arch
+mirror.
