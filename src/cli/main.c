@@ -32,6 +32,7 @@
 #include "declarative/activation.h"
 #include "declarative/gen_index.h"
 #include "trakker/trakker.h"
+#include "debag/debag.h"
 #include "nix_eval.h"
 #include "alpm.h"
 #include "two9_init.h"
@@ -94,6 +95,10 @@ static int cmd_usage(void)
         printf("  209 trakker ls -la\n");
         printf("  209 trakker --no-net -- curl https://example.com\n");
         printf("  209 trakker --no-write -- makepkg -f\n\n");
+        printf("Debag (hybrid sandbox — seccomp fast path + ptrace slow path):\n");
+        printf("  209 debag --static-scan -- /bin/ls\n");
+        printf("  209 debag --no-net -- curl https://example.com\n");
+        printf("  209 debag --fast-mode -- ls -la  (seccomp only, ~native speed)\n\n");
         printf("Rollback:\n");
         printf("  209 <n> rollback   Roll back to generation #n\n");
         printf("  209 <n> pin        Pin a generation (protect from GC)\n\n");
@@ -2126,6 +2131,114 @@ static int cmd_trakker_leading(int argc, char **argv)
         return rc == 0 ? 0 : 1;
 }
 
+/* ── 209 debag [flags] [--] <command> [args...] ────────────────────
+ * Hybrid sandbox: seccomp fast path + ptrace slow path.
+ * See debag.h for the full design. */
+static int cmd_debag(int argc, char **argv)
+{
+        debag_policy_t policy = {0};
+        int i = 0;
+
+        /* Parse flags */
+        while (i < argc) {
+                if (strcmp(argv[i], "--static-scan") == 0) {
+                        policy.static_scan_only = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--dynamic-block") == 0) {
+                        policy.dynamic_block = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--fast-mode") == 0) {
+                        policy.fast_mode = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--no-net") == 0) {
+                        policy.no_net = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--no-write") == 0) {
+                        policy.no_write = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--verbose") == 0) {
+                        policy.verbose = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--") == 0) {
+                        i++;
+                        break;
+                } else {
+                        break;
+                }
+        }
+
+        if (i >= argc) {
+                fprintf(stderr, "209 debag: no command specified\n");
+                fprintf(stderr, "    usage: 209 debag [flags] [--] <command> [args...]\n");
+                return 1;
+        }
+
+        /* Find the binary to analyze */
+        const char *binary = argv[i];
+        char resolved[PATH_MAX];
+        const char *analyze_path = binary;
+
+        /* Try to resolve via PATH for static analysis */
+        if (strchr(binary, '/')) {
+                analyze_path = binary;
+        } else {
+                /* Search PATH */
+                char *path_env = getenv("PATH");
+                if (path_env) {
+                        char *p = strdup(path_env);
+                        char *tok = strtok(p, ":");
+                        while (tok) {
+                                snprintf(resolved, sizeof(resolved), "%s/%s", tok, binary);
+                                if (access(resolved, X_OK) == 0) {
+                                        analyze_path = resolved;
+                                        break;
+                                }
+                                tok = strtok(NULL, ":");
+                        }
+                        free(p);
+                }
+        }
+
+        /* Run static analysis */
+        debag_analysis_t *analysis = debag_analyze(analyze_path);
+        if (!analysis) {
+                fprintf(stderr, "209 debag: cannot analyze '%s' (not an ELF binary?)\n", binary);
+                /* Continue without analysis — seccomp will use defaults only */
+        }
+
+        /* If --static-scan, print results and exit */
+        if (policy.static_scan_only) {
+                if (analysis) {
+                        debag_analysis_print(analysis, stdout);
+                        extern void debag_print_seccomp_rules(const debag_analysis_t *,
+                                                               const debag_policy_t *, FILE *);
+                        debag_print_seccomp_rules(analysis, &policy, stdout);
+                }
+                debag_analysis_free(analysis);
+                return 0;
+        }
+
+        /* Run under the hybrid sandbox */
+        const char **cmd_argv = malloc((argc - i + 1) * sizeof(char *));
+        for (int j = 0; j < argc - i; j++)
+                cmd_argv[j] = argv[i + j];
+        cmd_argv[argc - i] = NULL;
+
+        debag_result_t *result = debag_run(argc - i, cmd_argv, &policy, analysis);
+        free(cmd_argv);
+        debag_analysis_free(analysis);
+
+        if (!result) {
+                fprintf(stderr, "209 debag: failed to run\n");
+                return 1;
+        }
+
+        debag_result_print(result, stderr);
+        int rc = result->exit_code;
+        debag_result_free(result);
+        return rc == 0 ? 0 : 1;
+}
+
 int main(int argc, char *argv[])
 {
         /* Handle options */
@@ -2314,20 +2427,12 @@ int main(int argc, char *argv[])
                 return cmd_init(scope);
         }
         if (strcmp(argv[1], "trakker") == 0) {
-                /* 209 trakker [flags] [--] <command> [args...]
-                 *
-                 * This is the leading form — trakker first, then the command.
-                 * The command is resolved via $PATH (execvp), so you can use
-                 * bare names like 'ls', 'curl', 'makepkg'.
-                 *
-                 * Examples:
-                 *   209 trakker ls -la
-                 *   209 trakker --no-net -- curl https://example.com
-                 *   209 trakker --no-write -- makepkg -f
-                 *
-                 * The old SOV form also still works: 209 <cmd> trakker [flags]
-                 */
                 return cmd_trakker_leading(argc - 2, &argv[2]);
+        }
+        if (strcmp(argv[1], "debag") == 0) {
+                /* 209 debag [flags] [--] <command> [args...]
+                 * Hybrid sandbox: seccomp fast path + ptrace slow path. */
+                return cmd_debag(argc - 2, &argv[2]);
         }
 
         /* SOV pattern: need at least subject + verb */

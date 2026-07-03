@@ -17,10 +17,10 @@ DEFS = -D_GNU_SOURCE \
        -DBIN_DIR='"/.local/bin"' \
        -DLIB_DIR='"/.local/lib"'
 
-INCS = -Isrc -Isrc/store -Isrc/declarative -Isrc/aur -Isrc/trakker \
+INCS = -Isrc -Isrc/store -Isrc/declarative -Isrc/aur -Isrc/trakker -Isrc/debag \
        -Ilib/2O9/nix -Ilib/2O9/alpm -Ilib/2O9/common \
        $(LIB2O9_DEPS_INCS)
-LIBS = -lcurl
+LIBS = -lcurl -lseccomp
 
 # ── lib2O9 build (vendored pacman + own Nix evaluator + 2O9 init) ──
 #
@@ -72,7 +72,7 @@ CLI_SRC   = src/cli/main.c
 STORE_SRC = src/store/store.c src/store/symlinks.c
 DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/activation.c src/declarative/gen_index.c
 AUR_SRC   = src/aur/aur_rpc.c src/aur/aur_build.c src/aur/aur_resolve.c
-TRAK_SRC  = src/trakker/trakker.c
+TRAK_SRC  = src/trakker/trakker.c src/debag/debag.c src/debag/static_analysis.c src/debag/seccomp_filter.c
 NIX_SRC   = lib/2O9/nix/nix_eval.c lib/2O9/nix/nix_lexer.c lib/2O9/nix/nix_parser.c
 
 SRC = $(CLI_SRC) $(STORE_SRC) $(DECL_SRC) $(AUR_SRC) $(TRAK_SRC) $(NIX_SRC)
@@ -83,7 +83,7 @@ OBJ = $(SRC:.c=.o)
 # plus libarchive's transitive deps (zlib, lzma, bz2, lz4, zstd, nettle, gmp).
 LIB2O9_LIBS = -lcurl -larchive -lgpgme -lassuan -lgpg-error -lcrypto \
               -lz -llzma -lbz2 -llz4 -lzstd -lnettle -lhogweed -lgmp \
-              -lxml2 -lacl -lm \
+              -lxml2 -lacl -lm -lseccomp \
               $(LIB2O9_DEPS_LIBS)
 
 all: 209 test-aur-rpc test-nix-lexer test-nix-eval
