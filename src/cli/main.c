@@ -587,12 +587,12 @@ int cmd_install(const char *pkg_name)
                 alpm_release(handle);
 
                 /* Extract the .pkg.tar.zst to /nix/store/ via the store adapter */
-                result = store_add(cache_path, STORE_BACKEND_NIX_STORE);
+                result = store_add_named(cache_path, pkg_name, version, STORE_BACKEND_NIX_STORE);
                 if (result.success != 0) {
                         fprintf(stderr, "  nix-store failed (%s), trying direct extraction...\n",
                                 result.error_msg);
                         store_add_result_free(&result);
-                        result = store_add(cache_path, STORE_BACKEND_DIRECT);
+                        result = store_add_named(cache_path, pkg_name, version, STORE_BACKEND_DIRECT);
                         if (result.success != 0) {
                                 fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
                                 store_add_result_free(&result);

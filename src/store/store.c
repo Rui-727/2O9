@@ -190,15 +190,22 @@ static int spawn_nix_store_add(const char *path, char **store_path_out)
 
 /* ── Direct extraction backend (tar subprocess) ──────────────────── */
 
-static int direct_extract(const char *pkg_path, char **store_path_out)
+static int direct_extract(const char *pkg_path, char **store_path_out,
+                           const char *known_name, const char *known_ver)
 {
-        /* Step 1: Read .PKGINFO to get pkgname + pkgver */
         char pkg_name[256] = {0};
         char pkg_ver[128] = {0};
 
-        if (read_pkginfo(pkg_path, pkg_name, sizeof(pkg_name),
-                         pkg_ver, sizeof(pkg_ver)) < 0) {
-                return -1;
+        /* If name+version provided, use them directly (skip .PKGINFO) */
+        if (known_name && known_ver) {
+                strncpy(pkg_name, known_name, sizeof(pkg_name) - 1);
+                strncpy(pkg_ver, known_ver, sizeof(pkg_ver) - 1);
+        } else {
+                /* Read .PKGINFO to get pkgname + pkgver */
+                if (read_pkginfo(pkg_path, pkg_name, sizeof(pkg_name),
+                                 pkg_ver, sizeof(pkg_ver)) < 0) {
+                        return -1;
+                }
         }
 
         /* Step 2: Build the store path: /nix/store/<name>-<version> */
@@ -256,6 +263,12 @@ static int direct_extract(const char *pkg_path, char **store_path_out)
 
 store_add_result_t store_add(const char *pkg_path, store_backend_t backend)
 {
+        return store_add_named(pkg_path, NULL, NULL, backend);
+}
+
+store_add_result_t store_add_named(const char *pkg_path, const char *pkg_name,
+                                    const char *pkg_version, store_backend_t backend)
+{
         store_add_result_t result = {0};
         char *store_path = NULL;
         int rc;
@@ -275,7 +288,7 @@ store_add_result_t store_add(const char *pkg_path, store_backend_t backend)
                 }
                 break;
         case STORE_BACKEND_DIRECT:
-                rc = direct_extract(pkg_path, &store_path);
+                rc = direct_extract(pkg_path, &store_path, pkg_name, pkg_version);
                 if (rc < 0) {
                         result.success = -1;
                         result.error_msg = strdup("extraction failed - "
