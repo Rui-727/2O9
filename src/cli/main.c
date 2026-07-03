@@ -58,6 +58,26 @@ static const char *C_YELLOW(void) { return want_color() ? "\033[33m" : ""; }
 static const char *C_CYAN(void)   { return want_color() ? "\033[36m" : ""; }
 static const char *C_DIM(void)    { return want_color() ? "\033[2m"  : ""; }
 
+/* ── DB path helper ────────────────────────────────────────────────
+ * Returns the generation DB path based on uid:
+ *   root  -> /var/lib/2O9 (system-wide)
+ *   user  -> ~/.local/state/2O9 (per-user)
+ * Writes to the provided buffer, returns a pointer to it. */
+static const char *get_db_root(char *buf, size_t bufsize)
+{
+        if (getuid() == 0) {
+                strncpy(buf, "/var/lib/2O9", bufsize - 1);
+                buf[bufsize - 1] = '\0';
+        } else {
+                char *home = getenv("HOME");
+                if (home)
+                        snprintf(buf, bufsize, "%s/.local/state/2O9", home);
+                else
+                        strncpy(buf, "/var/lib/2O9", bufsize - 1);
+        }
+        return buf;
+}
+
 #ifndef PACKAGE
 #define PACKAGE "2O9"
 #endif
@@ -149,15 +169,8 @@ static gen_pkg_t *read_current_gen_packages(const char *db_root, int current_id)
 
 static int cmd_generations(void)
 {
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-
-        /* Try user DB first, fall back to system */
-        if (home) {
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        } else {
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-        }
+        get_db_root(db_root, sizeof(db_root));
 
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
@@ -531,14 +544,8 @@ static int cmd_install(const char *pkg_name)
         printf("  store path: %s\n", result.store_path);
 
         /* Step 2: open generation DB and lock */
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home) {
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        } else {
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-        }
-
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209: cannot open generation DB\n");
@@ -625,14 +632,8 @@ static int cmd_install(const char *pkg_name)
 
 static int cmd_rollback(int target_id)
 {
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home) {
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        } else {
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-        }
-
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209: cannot open generation DB\n");
@@ -887,14 +888,8 @@ static int cmd_apply(void)
                 printf("209: merged home.nix + 2O9.nix (global wins on conflict)\n");
         }
 
-        /* Step 4: Open generation DB */
-        char db_root[PATH_MAX];
-        if (home) {
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        } else {
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-        }
-
+        /* Step 4: Open generation DB */char db_root[PATH_MAX];
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209: cannot open generation DB at %s\n", db_root);
@@ -1272,14 +1267,8 @@ static int cmd_gc(void)
          *   3. Delete unreferenced paths (unless their generation is pinned)
          *   4. Report how much space was freed
          */
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home) {
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        } else {
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-        }
-
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209: cannot open generation DB\n");
@@ -1407,14 +1396,8 @@ static int cmd_remove(const char *pkg_name)
          * Store files aren't deleted until GC. Services from removed packages are
          * stopped via systemctl. /etc symlinks are removed. */
 
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home) {
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        } else {
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-        }
-
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209: cannot open generation DB\n");
@@ -1834,14 +1817,8 @@ static int cmd_aur_build(const char *pkg_name)
 
         /* Step 5: Install built packages to store */
         build_result_t *r = results;
-        char *home_env = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home_env) {
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home_env);
-        } else {
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-        }
-
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209: cannot open generation DB\n");
@@ -2072,13 +2049,8 @@ static int g_index_gen_id = 0;
 
 static gen_index_t *get_gen_index(void)
 {
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home)
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        else
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) return NULL;
         int current = gen_db_current(db);
@@ -2935,13 +2907,8 @@ static int cmd_bundle(int argc, char **argv)
                         output = argv[++i];
         }
 
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home)
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        else
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-
+        get_db_root(db_root, sizeof(db_root));
         /* Verify the generation exists */
         char gen_dir[PATH_MAX];
         snprintf(gen_dir, sizeof(gen_dir), "%s/generations/%d", db_root, gen_id);
@@ -3063,13 +3030,8 @@ static int cmd_import(const char *tarball_path)
         system(cmd);
 
         /* Copy the manifest into the generation DB with a new ID */
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home)
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        else
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209 import: cannot open generation DB\n");
@@ -3204,13 +3166,8 @@ static int cmd_diff(const char *gen1_str, const char *gen2_str)
                 return 1;
         }
 
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home)
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        else
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-
+        get_db_root(db_root, sizeof(db_root));
         /* Load both manifests */
         gen_pkg_t *pkgs1 = read_current_gen_packages(db_root, gen1);
         gen_pkg_t *pkgs2 = read_current_gen_packages(db_root, gen2);
@@ -3310,13 +3267,8 @@ static int cmd_why(const char *pkg_name)
                C_DIM(), e->version, C_RESET());
 
         /* Try libalpm reverse deps if we have a handle */
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home)
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        else
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-
+        get_db_root(db_root, sizeof(db_root));
         /* Walk all installed packages and check if any depend on pkg_name */
         printf("\nSearching for reverse dependencies...\n\n");
 
@@ -3357,13 +3309,8 @@ static int cmd_why(const char *pkg_name)
 
 static int cmd_upgrade(int use_sandbox)
 {
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home)
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        else
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-
+        get_db_root(db_root, sizeof(db_root));
         gen_index_t *idx = get_gen_index();
         if (!idx) {
                 fprintf(stderr, "209 -Su: no generation DB - run 209 init && 209 apply first\n");
@@ -3373,16 +3320,21 @@ static int cmd_upgrade(int use_sandbox)
         printf("%s=== Checking for upgrades ===%s\n\n", C_BOLD(), C_RESET());
 
         /* Try using lib2O9 to compare installed vs sync DBs */
-        /* Evaluate the config to get the manifest for lib2O9 init */
+        char *home = getenv("HOME");
         char user_config[PATH_MAX] = {0};
         if (home)
-                snprintf(user_config, sizeof(user_config), "%s/.config/2O9/home.nix", home);
+                snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", home);
+        char user_home[PATH_MAX] = {0};
+        if (home)
+                snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", home);
 
         char *manifest_json = NULL;
         char *eval_err = NULL;
         struct stat st;
         if (user_config[0] && stat(user_config, &st) == 0)
                 manifest_json = eval_nix_config(user_config, &eval_err);
+        if (!manifest_json && user_home[0] && stat(user_home, &st) == 0)
+                manifest_json = eval_nix_config(user_home, &eval_err);
         if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
                 manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
 
@@ -3566,13 +3518,8 @@ static int cmd_lockfile_import(const char *lockfile_path)
         cJSON_Delete(root);
 
         /* Commit as a new generation */
-        char *home = getenv("HOME");
         char db_root[PATH_MAX];
-        if (home)
-                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-        else
-                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-
+        get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209: cannot open generation DB\n");
@@ -3622,6 +3569,64 @@ int main(int argc, char *argv[])
         if (argc < 2) {
                 cmd_usage();
                 return 1;
+        }
+
+        /* ── Privilege check ────────────────────────────────────────────
+         * Operations that write to /nix/store/ or /etc/ need root.
+         * If we're not root, re-exec via sudo with the same args.
+         *
+         * Read-only operations (search, info, generations, diff, why,
+         * news, doctor, wiki, lock --export) work fine as a regular user.
+         *
+         * Sync is special: the lib2O9 path writes DB files to the alpm
+         * dbpath which may need root, but the fallback path writes to
+         * ~/.cache/ and works as a user. We let sync try without sudo
+         * and fail naturally if it can't write. */
+        if (getuid() != 0) {
+                /* List of operations that need root */
+                int needs_root = 0;
+
+                /* Pacman flags: -S (install), -R (remove), -Su (upgrade) */
+                if (argv[1][0] == '-' && (argv[1][1] == 'S' || argv[1][1] == 'R'))
+                        needs_root = 1;
+
+                /* Zero-argument commands that need root */
+                if (strcmp(argv[1], "apply") == 0 ||
+                    strcmp(argv[1], "gc") == 0 ||
+                    strcmp(argv[1], "upgrade") == 0)
+                        needs_root = 1;
+
+                /* SOV patterns: <pkg> install, <pkg> remove, <n> rollback, <n> pin */
+                if (argc >= 3) {
+                        if (strcmp(argv[2], "install") == 0 ||
+                            strcmp(argv[2], "remove") == 0 ||
+                            strcmp(argv[2], "rollback") == 0 ||
+                            strcmp(argv[2], "pin") == 0)
+                                needs_root = 1;
+                }
+
+                if (needs_root) {
+                        fprintf(stderr, "209: this operation needs root (writes to /nix/store/)\n");
+                        fprintf(stderr, "    re-running with sudo...\n\n");
+
+                        /* Build sudo + 209 + original args */
+                        char **new_argv = malloc((argc + 2) * sizeof(char *));
+                        new_argv[0] = "sudo";
+                        new_argv[1] = argv[0];  /* the 209 binary path */
+                        for (int i = 1; i < argc; i++)
+                                new_argv[i + 1] = argv[i];
+                        new_argv[argc + 1] = NULL;
+
+                        execvp("sudo", new_argv);
+                        /* If execvp returns, sudo isn't available */
+                        free(new_argv);
+                        fprintf(stderr, "209: sudo is required but not found.\n");
+                        fprintf(stderr, "    run: sudo 209");
+                        for (int i = 1; i < argc; i++)
+                                fprintf(stderr, " %s", argv[i]);
+                        fprintf(stderr, "\n");
+                        return 1;
+                }
         }
 
         /* ── Pacman-style flags ───────────────────────────────────────
@@ -4107,13 +4112,8 @@ int main(int argc, char *argv[])
                 int id = atoi(subject);
                 if (strcmp(verb, "rollback") == 0)  return cmd_rollback(id);
                 if (strcmp(verb, "pin") == 0) {
-                        char *home = getenv("HOME");
                         char db_root[PATH_MAX];
-                        if (home) {
-                                snprintf(db_root, sizeof(db_root), "%s/.local/state/2O9", home);
-                        } else {
-                                snprintf(db_root, sizeof(db_root), "/var/lib/2O9");
-                        }
+        get_db_root(db_root, sizeof(db_root));
                         gen_db_t *db = gen_db_open(db_root);
                         if (!db) {
                                 fprintf(stderr, "209: cannot open generation DB\n");

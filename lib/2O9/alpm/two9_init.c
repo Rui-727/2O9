@@ -42,14 +42,18 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
 {
     if (!manifest_json) return NULL;
 
-    /* Determine DB path: use user's ~/.local/state/2O9 if HOME is set,
-     * otherwise fall back to /var/lib/2O9 */
+    /* Determine DB path: if we're root, use the system DB at /var/lib/2O9.
+     * If we're a regular user, use ~/.local/state/2O9. */
     char dbpath[512];
-    const char *home = getenv("HOME");
-    if (home)
-        snprintf(dbpath, sizeof(dbpath), "%s/.local/state/2O9", home);
-    else
+    if (getuid() == 0) {
         snprintf(dbpath, sizeof(dbpath), "/var/lib/2O9");
+    } else {
+        const char *home = getenv("HOME");
+        if (home)
+            snprintf(dbpath, sizeof(dbpath), "%s/.local/state/2O9", home);
+        else
+            snprintf(dbpath, sizeof(dbpath), "/var/lib/2O9");
+    }
 
     /* Create the DB directory if it doesn't exist */
     /* Walk the path creating each component */
@@ -73,12 +77,17 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
         return NULL;
     }
 
-    /* Set cache dir */
+    /* Set cache dir: /var/cache/2O9/pkg for root, ~/.cache/2O9/pkg for users */
     char cache_dir[512];
-    if (home)
-        snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/2O9/pkg", home);
-    else
+    if (getuid() == 0) {
         snprintf(cache_dir, sizeof(cache_dir), "/var/cache/2O9/pkg");
+    } else {
+        const char *home = getenv("HOME");
+        if (home)
+            snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/2O9/pkg", home);
+        else
+            snprintf(cache_dir, sizeof(cache_dir), "/var/cache/2O9/pkg");
+    }
     alpm_list_t *cachedirs = alpm_list_add(NULL, strdup(cache_dir));
     alpm_option_set_cachedirs(handle, cachedirs);
 
