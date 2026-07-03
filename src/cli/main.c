@@ -821,37 +821,47 @@ static int cmd_apply(void)
          *   9. Run the activation phase (systemctl, sysusers, tmpfiles, ...)
          */
 
-        /* Step 1: Find config files - both user (home.nix) and global
-         * (2O9.nix). Per DESIGN.md §7, merge order is:
-         *   defaults → home.nix → 2O9.nix → CLI flags
+        /* Step 1: Find config files. Check 2O9.nix (what 209 init creates),
+         * home.nix (user scope), and /etc/2O9/2O9.nix (system scope).
+         * Per DESIGN.md §7, merge order is:
+         *   defaults -> home.nix -> 2O9.nix -> CLI flags
          * Global wins on conflict. We evaluate both and merge. */
-        char user_config[PATH_MAX] = {0};
         char *home = getenv("HOME");
+        char user_2O9[PATH_MAX] = {0};
+        char user_home[PATH_MAX] = {0};
         if (home) {
-                snprintf(user_config, sizeof(user_config),
-                         "%s/.config/2O9/home.nix", home);
+                snprintf(user_2O9, sizeof(user_2O9), "%s/.config/2O9/2O9.nix", home);
+                snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", home);
         }
 
         /* Step 2: Evaluate each config that exists */
         char *user_json = NULL;
         char *global_json = NULL;
         char *eval_err = NULL;
+        struct stat st;
 
-        if (user_config[0]) {
-                struct stat st;
-                if (stat(user_config, &st) == 0) {
-                        printf("209: evaluating %s...\n", user_config);
-                        user_json = eval_nix_config(user_config, &eval_err);
-                        if (!user_json) {
-                                fprintf(stderr, "209: %s: %s\n", user_config,
-                                        eval_err ? eval_err : "evaluation failed");
-                                free(eval_err);
-                                return 1;
-                        }
+        /* Check 2O9.nix first (what 209 init creates), then home.nix */
+        if (user_2O9[0] && stat(user_2O9, &st) == 0) {
+                printf("209: evaluating %s...\n", user_2O9);
+                user_json = eval_nix_config(user_2O9, &eval_err);
+                if (!user_json) {
+                        fprintf(stderr, "209: %s: %s\n", user_2O9,
+                                eval_err ? eval_err : "evaluation failed");
+                        free(eval_err);
+                        return 1;
+                }
+        }
+        if (!user_json && user_home[0] && stat(user_home, &st) == 0) {
+                printf("209: evaluating %s...\n", user_home);
+                user_json = eval_nix_config(user_home, &eval_err);
+                if (!user_json) {
+                        fprintf(stderr, "209: %s: %s\n", user_home,
+                                eval_err ? eval_err : "evaluation failed");
+                        free(eval_err);
+                        return 1;
                 }
         }
 
-        struct stat st;
         if (stat(CONFIG_PATH, &st) == 0) {
                 printf("209: evaluating %s...\n", CONFIG_PATH);
                 global_json = eval_nix_config(CONFIG_PATH, &eval_err);
@@ -866,7 +876,8 @@ static int cmd_apply(void)
 
         if (!user_json && !global_json) {
                 fprintf(stderr, "209: no config file found. I looked in:\n");
-                fprintf(stderr, "    %s\n", user_config[0] ? user_config : "~/.config/2O9/home.nix");
+                if (user_2O9[0]) fprintf(stderr, "    %s\n", user_2O9);
+                if (user_home[0]) fprintf(stderr, "    %s\n", user_home);
                 fprintf(stderr, "    %s\n", CONFIG_PATH);
                 fprintf(stderr, "\nRun `209 init` to create a starter config.\n");
                 return 1;
@@ -3609,13 +3620,19 @@ int main(int argc, char *argv[])
                         fprintf(stderr, "209: this operation needs root (writes to /nix/store/)\n");
                         fprintf(stderr, "    re-running with sudo...\n\n");
 
-                        /* Build sudo + 209 + original args */
-                        char **new_argv = malloc((argc + 2) * sizeof(char *));
-                        new_argv[0] = "sudo";
-                        new_argv[1] = argv[0];  /* the 209 binary path */
+                        /* Use sudo --preserve-env=HOME so the elevated process
+                         * can find the user's config (~/.config/2O9/2O9.nix)
+                         * and generation DB (~/.local/state/2O9) instead of
+                         * root's. Without this, sudo sets HOME=/root and the
+                         * user's config becomes invisible. */
+                        char **new_argv = malloc((argc + 4) * sizeof(char *));
+                        int j = 0;
+                        new_argv[j++] = "sudo";
+                        new_argv[j++] = "--preserve-env=HOME";
+                        new_argv[j++] = argv[0];
                         for (int i = 1; i < argc; i++)
-                                new_argv[i + 1] = argv[i];
-                        new_argv[argc + 1] = NULL;
+                                new_argv[j++] = argv[i];
+                        new_argv[j] = NULL;
 
                         execvp("sudo", new_argv);
                         /* If execvp returns, sudo isn't available */
