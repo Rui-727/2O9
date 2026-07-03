@@ -4,6 +4,12 @@
 test-aur-rpc
 test-nix-lexer
 test-nix-eval
+test-nix-eval-edge
+test-nar
+test-db
+test-signing
+test-narinfo
+test-keygen
 lib2O9.a
 
 # Editor / OS noise

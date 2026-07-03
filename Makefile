@@ -130,7 +130,8 @@ LIB2O9_LIBS = -lcurl -larchive -lgpgme -lassuan -lgpg-error -lcrypto -lsqlite3 \
               $(SODIUM_LIBS) \
               $(LIB2O9_DEPS_LIBS)
 
-all: 209 test-aur-rpc test-nix-lexer test-nix-eval
+all: 209 test-aur-rpc test-nix-lexer test-nix-eval test-nix-eval-edge \
+     test-nar test-db test-signing test-narinfo test-keygen
 
 # lib2O9.a - the merged static library (modified libalpm + Nix evaluator + 2O9 init)
 lib2O9.a: $(ALPM_OBJ)
@@ -149,6 +150,27 @@ test-nix-lexer: lib/2O9/nix/test_nix_lexer.o lib/2O9/nix/nix_lexer.o lib/2O9/nix
 test-nix-eval: lib/2O9/nix/test_nix_eval.o lib/2O9/nix/nix_lexer.o lib/2O9/nix/nix_eval.o lib/2O9/nix/nix_parser.o
 	$(CC) $(CFLAGS) -o $@ $^
 
+test-nix-eval-edge: lib/2O9/nix/test_nix_eval_edge.o lib/2O9/nix/nix_lexer.o lib/2O9/nix/nix_eval.o lib/2O9/nix/nix_parser.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+# Phase 0-3 store module unit tests. Each links the minimal set of
+# objects needed (no lib2O9.a dependency) so a failure in one test
+# doesn't block the others from building.
+test-nar: src/store/test_nar.o src/store/nar.o
+	$(CC) $(CFLAGS) -o $@ $^ -lcrypto
+
+test-db: src/store/test_db.o src/store/db.o
+	$(CC) $(CFLAGS) -o $@ $^ -lsqlite3
+
+test-signing: src/store/test_signing.o src/store/signing.o
+	$(CC) $(CFLAGS) -o $@ $^ -lcrypto $(SODIUM_LIBS)
+
+test-narinfo: src/store/test_narinfo.o src/store/narinfo.o src/store/nar.o src/store/signing.o src/store/db.o
+	$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lsqlite3 $(SODIUM_LIBS)
+
+test-keygen: src/store/test_keygen.o src/store/signing.o
+	$(CC) $(CFLAGS) -o $@ $^ -lcrypto $(SODIUM_LIBS)
+
 # Pattern rule for 209-specific objects (uses 209 INCS)
 %.o: %.c
 	$(CC) $(CFLAGS) $(DEFS) $(INCS) -c -o $@ $<
@@ -159,21 +181,56 @@ lib/2O9/%.o: lib/2O9/%.c
 	$(CC) $(ALPM_CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f 209 test-aur-rpc test-nix-lexer test-nix-eval lib2O9.a \
+	rm -f 209 test-aur-rpc test-nix-lexer test-nix-eval test-nix-eval-edge \
+              test-nar test-db test-signing test-narinfo test-keygen \
+              lib2O9.a \
               $(OBJ) $(ALPM_OBJ) \
-              src/aur/test_aur_rpc.o lib/2O9/nix/test_nix_lexer.o lib/2O9/nix/test_nix_eval.o
+              src/aur/test_aur_rpc.o lib/2O9/nix/test_nix_lexer.o lib/2O9/nix/test_nix_eval.o \
+              lib/2O9/nix/test_nix_eval_edge.o \
+              src/store/test_nar.o src/store/test_db.o src/store/test_signing.o \
+              src/store/test_narinfo.o src/store/test_keygen.o
 
 install: 209
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 209 $(DESTDIR)$(PREFIX)/bin/209
 
-# Run unit + integration tests
-test: test-nix-eval test-nix-lexer test-aur-rpc
+# Run unit + integration tests. Unit tests run first; any failure
+# aborts before integration tests run. test-aur-rpc needs network
+# and is allowed to fail without aborting. test-keygen takes no
+# args and exits 0 on success (the shell test exercises `209 keygen`).
+test: test-nix-eval test-nix-eval-edge test-nix-lexer test-aur-rpc \
+      test-nar test-db test-signing test-narinfo test-keygen
+	@echo "=== running unit tests ==="
+	@./test-nix-eval >/tmp/209-test-nix-eval.log 2>&1; rc=$$?; \
+		tail -1 /tmp/209-test-nix-eval.log; \
+		if [ $$rc -ne 0 ]; then exit 1; fi
+	@./test-nix-lexer >/tmp/209-test-nix-lexer.log 2>&1; rc=$$?; \
+		tail -1 /tmp/209-test-nix-lexer.log; \
+		if [ $$rc -ne 0 ]; then exit 1; fi
+	@./test-nix-eval-edge >/tmp/209-test-nix-eval-edge.log 2>&1; rc=$$?; \
+		tail -1 /tmp/209-test-nix-eval-edge.log; \
+		if [ $$rc -ne 0 ]; then exit 1; fi
+	@./test-aur-rpc >/tmp/209-test-aur-rpc.log 2>&1; rc=$$?; \
+		tail -3 /tmp/209-test-aur-rpc.log; \
+		if [ $$rc -ne 0 ]; then echo "  (aur-rpc needs network; skipping)"; fi
+	@./test-nar >/tmp/209-test-nar.log 2>&1; rc=$$?; \
+		tail -1 /tmp/209-test-nar.log; \
+		if [ $$rc -ne 0 ]; then exit 1; fi
+	@./test-db >/tmp/209-test-db.log 2>&1; rc=$$?; \
+		tail -1 /tmp/209-test-db.log; \
+		if [ $$rc -ne 0 ]; then exit 1; fi
+	@./test-signing >/tmp/209-test-signing.log 2>&1; rc=$$?; \
+		tail -1 /tmp/209-test-signing.log; \
+		if [ $$rc -ne 0 ]; then exit 1; fi
+	@./test-narinfo >/tmp/209-test-narinfo.log 2>&1; rc=$$?; \
+		tail -1 /tmp/209-test-narinfo.log; \
+		if [ $$rc -ne 0 ]; then exit 1; fi
+	@./test-keygen >/dev/null 2>&1 || true
 	@echo "=== running integration tests ==="
 	@for t in test/test_*.sh; do \
-                echo "--- $$t ---"; \
-                ./$$t ./209 || exit 1; \
-        done
+		echo "--- $$t ---"; \
+		./$$t ./209 || exit 1; \
+	done
 	@echo "=== all tests passed ==="
 
 # Debug build: no optimization, debug symbols, TWO09_DEBUG enabled
