@@ -369,9 +369,198 @@ static char *eval_nix_config(const char *config_path, char **err_out);
 static size_t sync_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata);
 static gen_index_t *get_gen_index(void);
 
-/* cmd_install and cmd_remove are non-static so reconcile_execute.c can call them */
+/* cmd_install and cmd_remove are non-static so reconcile_execute.c can call them.
+ * cmd_install_only: extracts to store but does NOT commit a generation.
+ * Used by reconcile_execute so cmd_apply can do the single commit. */
 int cmd_install(const char *pkg_name);
+int cmd_install_only(const char *pkg_name, char **store_path_out, char **version_out);
 int cmd_remove(const char *pkg_name);
+
+int cmd_install_only(const char *pkg_name, char **store_path_out, char **version_out)
+{
+        /* Just find, download, and extract the package to /nix/store/.
+         * No generation commit, no symlink farm. The caller handles that. */
+
+        printf("209: installing %s...\n", pkg_name);
+
+        char *resolved_version = NULL;
+        store_add_result_t result;
+        const char *env_path = getenv("TWO09_PKG_PATH");
+        const char *test_mode = getenv("TWO09_TEST_MODE");
+
+        if (test_mode) {
+                char fake_store[PATH_MAX];
+                snprintf(fake_store, sizeof(fake_store), "/nix/store/%s-0.0.0", pkg_name);
+                result.success = 0;
+                result.store_path = strdup(fake_store);
+                result.error_msg = NULL;
+                resolved_version = strdup("0.0.0");
+                printf("  [test mode] fake store path: %s\n", fake_store);
+        } else if (env_path && env_path[0]) {
+                result = store_add(env_path, STORE_BACKEND_NIX_STORE);
+                if (result.success != 0) {
+                        store_add_result_free(&result);
+                        result = store_add(env_path, STORE_BACKEND_DIRECT);
+                        if (result.success != 0) {
+                                store_add_result_free(&result);
+                                return 1;
+                        }
+                }
+                resolved_version = strdup("unknown");
+        } else {
+                /* Use lib2O9 to find, download, extract */
+                char config_home[PATH_MAX];
+                get_config_home(config_home, sizeof(config_home));
+                char user_config[PATH_MAX] = {0};
+                char user_home_config[PATH_MAX] = {0};
+                snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", config_home);
+                snprintf(user_home_config, sizeof(user_home_config), "%s/.config/2O9/home.nix", config_home);
+
+                char *manifest_json = NULL;
+                char *eval_err = NULL;
+                struct stat st;
+                if (stat(user_config, &st) == 0)
+                        manifest_json = eval_nix_config(user_config, &eval_err);
+                if (!manifest_json && stat(user_home_config, &st) == 0)
+                        manifest_json = eval_nix_config(user_home_config, &eval_err);
+                if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
+                        manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
+
+                if (!manifest_json) {
+                        fprintf(stderr, "209: no config file found.\n");
+                        free(eval_err);
+                        return 1;
+                }
+
+                alpm_handle_t *handle = two9_alpm_init_from_manifest(manifest_json);
+                free(manifest_json);
+                free(eval_err);
+                if (!handle) {
+                        fprintf(stderr, "209: failed to init lib2O9\n");
+                        return 1;
+                }
+
+                alpm_pkg_t *pkg = NULL;
+                alpm_db_t *found_db = NULL;
+                alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);
+                if (!sync_dbs) {
+                        fprintf(stderr, "209: no sync DBs. Run: 209 sync\n");
+                        alpm_release(handle);
+                        return 1;
+                }
+
+                const char *debug = getenv("TWO09_DEBUG");
+                for (alpm_list_t *i = sync_dbs; i; i = alpm_list_next(i)) {
+                        alpm_db_t *db = (alpm_db_t *)i->data;
+                        if (debug) {
+                                const char *dbn = alpm_db_get_name(db);
+                                alpm_list_t *pc = alpm_db_get_pkgcache(db);
+                                fprintf(stderr, "  [debug] sync DB '%s': %d packages\n",
+                                        dbn ? dbn : "?", pc ? alpm_list_count(pc) : 0);
+                        }
+                        pkg = alpm_db_get_pkg(db, pkg_name);
+                        if (pkg) { found_db = db; break; }
+                }
+
+                if (!pkg) {
+                        fprintf(stderr, "209: package '%s' not found in any repo.\n", pkg_name);
+                        alpm_release(handle);
+                        return 1;
+                }
+
+                const char *version = alpm_pkg_get_version(pkg);
+                const char *filename = alpm_pkg_get_filename(pkg);
+                resolved_version = strdup(version);
+                printf("  found %s %s\n", pkg_name, version);
+
+                const char *server_url = NULL;
+                alpm_list_t *servers = alpm_db_get_servers(found_db);
+                if (servers) server_url = (const char *)servers->data;
+                if (!server_url || !filename) {
+                        fprintf(stderr, "209: cannot determine download URL\n");
+                        alpm_release(handle);
+                        free(resolved_version);
+                        return 1;
+                }
+
+                /* Download */
+                char url[PATH_MAX * 2];
+                char cache_path[PATH_MAX];
+                snprintf(url, sizeof(url), "%s/%s", server_url, filename);
+
+                /* Cache dir: user's home */
+                char cache_dir[PATH_MAX];
+                snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/2O9/pkg", config_home);
+                /* mkdir -p */
+                char dir_buf[PATH_MAX];
+                strncpy(dir_buf, cache_dir, sizeof(dir_buf) - 1);
+                for (char *p = dir_buf + 1; *p; p++) {
+                        if (*p == '/') { *p = '\0'; mkdir(dir_buf, 0755); *p = '/'; }
+                }
+                mkdir(dir_buf, 0755);
+
+                snprintf(cache_path, sizeof(cache_path), "%s/%s", cache_dir, filename);
+
+                printf("  downloading %s...\n", filename);
+                CURL *curl = curl_easy_init();
+                if (!curl) { alpm_release(handle); free(resolved_version); return 1; }
+                FILE *fp = fopen(cache_path, "wb");
+                if (!fp) { snprintf(cache_path, sizeof(cache_path), "/tmp/2O9-%s", filename); fp = fopen(cache_path, "wb"); }
+                if (!fp) { curl_easy_cleanup(curl); alpm_release(handle); free(resolved_version); return 1; }
+
+                curl_easy_setopt(curl, CURLOPT_URL, url);
+                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sync_write_cb);
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+                curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+                curl_easy_setopt(curl, CURLOPT_USERAGENT, "2O9/0.0.1");
+                CURLcode res = curl_easy_perform(curl);
+                long http_code = 0;
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+                curl_easy_cleanup(curl);
+                fclose(fp);
+
+                if (res != CURLE_OK || http_code != 200) {
+                        fprintf(stderr, "209: download failed: %s (HTTP %ld)\n",
+                                curl_easy_strerror(res), http_code);
+                        unlink(cache_path);
+                        alpm_release(handle);
+                        free(resolved_version);
+                        return 1;
+                }
+
+                printf("  downloaded %s\n", filename);
+                alpm_release(handle);
+
+                /* Extract to /nix/store/ */
+                mkdir("/nix", 0755);
+                mkdir("/nix/store", 0755);
+
+                result = store_add_named(cache_path, pkg_name, version, STORE_BACKEND_NIX_STORE);
+                if (result.success != 0) {
+                        fprintf(stderr, "  nix-store failed (%s), trying direct extraction...\n",
+                                result.error_msg);
+                        store_add_result_free(&result);
+                        result = store_add_named(cache_path, pkg_name, version, STORE_BACKEND_DIRECT);
+                        if (result.success != 0) {
+                                fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
+                                store_add_result_free(&result);
+                                free(resolved_version);
+                                return 1;
+                        }
+                }
+        }
+
+        printf("  store path: %s\n", result.store_path);
+
+        /* Return store path and version to caller */
+        if (store_path_out) *store_path_out = strdup(result.store_path);
+        if (version_out) *version_out = resolved_version ? strdup(resolved_version) : strdup("0.0.0");
+
+        store_add_result_free(&result);
+        free(resolved_version);
+        return 0;
+}
 
 int cmd_install(const char *pkg_name)
 {
@@ -1503,8 +1692,44 @@ static int cmd_gc(void)
         if (removed > 0)
                 printf("  garbage-collected %zu store paths\n", removed);
         else
-                printf("  nothing to garbage-collect\n");
+                printf("  no unreferenced store paths found\n");
 
+        /* Also clean up old generation directories.
+         * Keep: the current generation and all pinned generations.
+         * Remove: everything else. */
+        int current_gen = gen_db_current(db);
+        printf("\n  cleaning up old generations (keeping #%d + pinned)...\n", current_gen);
+
+        int gens_removed = 0;
+        for (size_t i = 0; i < gen_count; i++) {
+                int gid = gens[i]->id;
+                if (gid == current_gen) continue;
+
+                /* Check if pinned */
+                char pin_path[PATH_MAX];
+                snprintf(pin_path, sizeof(pin_path),
+                         "%s/generations/%d/.pinned", db_root, gid);
+                struct stat pin_st;
+                if (stat(pin_path, &pin_st) == 0) continue;
+
+                /* Remove the generation directory */
+                char gen_dir[PATH_MAX];
+                snprintf(gen_dir, sizeof(gen_dir), "%s/generations/%d", db_root, gid);
+                char cmd[PATH_MAX + 32];
+                snprintf(cmd, sizeof(cmd), "rm -rf '%s'", gen_dir);
+                if (system(cmd) == 0) {
+                        printf("  removed generation #%d\n", gid);
+                        gens_removed++;
+                }
+        }
+
+        if (gens_removed > 0)
+                printf("  removed %d old generation(s)\n", gens_removed);
+        else
+                printf("  no old generations to remove\n");
+
+        gen_list_free(gens, gen_count);
+        gen_db_close(db);
         return 0;
 }
 

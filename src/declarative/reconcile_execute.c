@@ -17,9 +17,8 @@
 #include "cJSON.h"
 #include "../aur/build.h"
 
-/* Forward declarations from main.c - we call cmd_install which does
- * the full lib2O9 + store adapter + generation pipeline. */
-extern int cmd_install(const char *pkg_name);
+/* Forward declarations from main.c */
+extern int cmd_install_only(const char *pkg_name, char **store_path_out, char **version_out);
 extern int cmd_remove(const char *pkg_name);
 
 int reconcile_execute(reconcile_txn_t *txn)
@@ -28,7 +27,9 @@ int reconcile_execute(reconcile_txn_t *txn)
 
     int rc = 0;
 
-    /* Step 1: Install repo packages via 209's own install path. */
+    /* Step 1: Install repo packages. Use cmd_install_only which
+     * downloads and extracts to /nix/store/ but does NOT commit
+     * a generation. cmd_apply will do the single commit after. */
     if (txn->repo_install_count > 0) {
         printf("  installing %zu repo packages:", txn->repo_install_count);
         for (pkg_name_t *p = txn->repo_install; p; p = p->next)
@@ -36,12 +37,18 @@ int reconcile_execute(reconcile_txn_t *txn)
         printf("\n");
 
         for (pkg_name_t *p = txn->repo_install; p; p = p->next) {
-            printf("    installing %s...\n", p->name);
-            int ret = cmd_install(p->name);
+            char *store_path = NULL;
+            char *version = NULL;
+            int ret = cmd_install_only(p->name, &store_path, &version);
             if (ret != 0) {
                 fprintf(stderr, "    failed to install %s\n", p->name);
                 rc = ret;
+            } else {
+                printf("    installed %s %s to %s\n", p->name,
+                       version ? version : "?", store_path ? store_path : "?");
             }
+            free(store_path);
+            free(version);
         }
     }
 
