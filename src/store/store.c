@@ -29,37 +29,68 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <limits.h>
+#include <signal.h>
 
 extern char **environ;
 
 #include "store.h"
 
-/* ── Helpers ─────────────────────────────────────────────────────── */
+/* ── Atomic extraction helpers ─────────────────────────────────────
+ * direct_extract() below extracts to /nix/store/.tmp/<name>-<ver>.<pid>/
+ * then renames to /nix/store/<name>-<ver>/ so a Ctrl-C mid-extract never
+ * leaves a half-populated final store path. The .tmp/ subdir is hidden
+ * from cmd_gc (which skips d_name[0] == '.') and from store_manifest_create
+ * (which walks a specific store_path, not /nix/store itself). */
 
-static int mkdirs(const char *path)
+static volatile sig_atomic_t extract_got_signal = 0;
+static char extract_temp_path[PATH_MAX];
+
+static void extract_sig_handler(int sig)
 {
-        char tmp[PATH_MAX];
-        char *p = NULL;
-        size_t len;
+        (void)sig;
+        extract_got_signal = 1;
+}
 
-        snprintf(tmp, sizeof(tmp), "%s", path);
-        len = strlen(tmp);
-        if (len > 0 && tmp[len - 1] == '/')
-                tmp[len - 1] = '\0';
-
-        for (p = tmp + 1; *p; p++) {
-                if (*p == '/') {
-                        *p = '\0';
-                        if (mkdir(tmp, 0755) < 0 && errno != EEXIST)
-                                return -1;
-                        *p = '/';
+/* Recursively remove a directory tree. Best-effort: ignores errors on
+ * individual entries so a stuck file doesn't leak the parent dir. */
+static int rmtree(const char *path)
+{
+        DIR *d = opendir(path);
+        if (!d) {
+                /* Not a dir or doesn't exist - try unlink */
+                return unlink(path);
+        }
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+                if (strcmp(ent->d_name, ".") == 0 ||
+                    strcmp(ent->d_name, "..") == 0)
+                        continue;
+                char child[PATH_MAX];
+                snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+                struct stat st;
+                if (lstat(child, &st) == 0) {
+                        if (S_ISDIR(st.st_mode)) {
+                                rmtree(child);
+                        } else {
+                                unlink(child);
+                        }
                 }
         }
-        if (mkdir(tmp, 0755) < 0 && errno != EEXIST)
-                return -1;
-
-        return 0;
+        closedir(d);
+        return rmdir(path);
 }
+
+/* Ensure /nix/store/.tmp exists with 0700 perms. Idempotent. */
+static void ensure_store_tmp(void)
+{
+        mkdir("/nix", 0755);
+        mkdir("/nix/store", 0755);
+        /* 0700: only owner can see/enter temp dirs (each contains a partial
+         * store path being extracted, possibly with sensitive files). */
+        mkdir("/nix/store/.tmp", 0700);
+}
+
+/* ── Helpers ─────────────────────────────────────────────────────── */
 
 /* Read .PKGINFO from a .pkg.tar.zst to extract pkgname and pkgver.
  * Uses system("tar ... > tempfile") to avoid PATH issues with posix_spawnp
@@ -208,50 +239,147 @@ static int direct_extract(const char *pkg_path, char **store_path_out,
                 }
         }
 
-        /* Step 2: Build the store path: /nix/store/<name>-<version> */
+        /* Step 2: Build the final store path: /nix/store/<name>-<version> */
         char store_path[PATH_MAX];
         snprintf(store_path, sizeof(store_path), "/nix/store/%s-%s",
                  pkg_name, pkg_ver);
 
-        /* Idempotent: if path already exists and is a directory, skip extraction */
+        /* Idempotency: only trust a previously-extracted store path if it
+         * contains a .PKGINFO marker. A bare/empty dir is treated as a
+         * partial extraction (e.g. previous Ctrl-C) and is removed so we
+         * can re-extract atomically. A non-empty dir without .PKGINFO is
+         * left alone (could be user-modified) and skipped. */
         struct stat st;
         if (stat(store_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-                *store_path_out = strdup(store_path);
-                return 0;
+                char marker[PATH_MAX];
+                snprintf(marker, sizeof(marker), "%s/.PKGINFO", store_path);
+                struct stat ms;
+                if (stat(marker, &ms) == 0) {
+                        /* Complete extraction - idempotent skip */
+                        *store_path_out = strdup(store_path);
+                        return 0;
+                }
+                /* No .PKGINFO - check if dir is empty (stale from a
+                 * previous interrupted run that created the dir but
+                 * never renamed a temp into it). */
+                DIR *d = opendir(store_path);
+                int is_empty = 1;
+                if (d) {
+                        struct dirent *e;
+                        while ((e = readdir(d)) != NULL) {
+                                if (strcmp(e->d_name, ".") == 0 ||
+                                    strcmp(e->d_name, "..") == 0)
+                                        continue;
+                                is_empty = 0;
+                                break;
+                        }
+                        closedir(d);
+                }
+                if (is_empty) {
+                        rmdir(store_path);
+                } else {
+                        /* Non-empty dir without .PKGINFO - suspicious. Skip
+                         * rather than destroy unknown content. */
+                        const char *debug = getenv("TWO09_DEBUG");
+                        if (debug)
+                                fprintf(stderr, "  [debug] store path exists "
+                                        "without .PKGINFO, skipping: %s\n",
+                                        store_path);
+                        *store_path_out = strdup(store_path);
+                        return 0;
+                }
         }
 
-        /* Step 3: Create the store directory */
-        if (mkdirs(store_path) < 0)
+        /* Step 3: Ensure /nix/store/.tmp/ exists, then build temp path.
+         * The temp dir is /nix/store/.tmp/<name>-<version>.<pid>/ - the
+         * pid suffix avoids collisions between concurrent 209 installs. */
+        ensure_store_tmp();
+        char temp_path[PATH_MAX];
+        snprintf(temp_path, sizeof(temp_path), "/nix/store/.tmp/%s-%s.%d",
+                 pkg_name, pkg_ver, (int)getpid());
+
+        /* Remove stale temp dir from a previous crashed run with the
+         * same pid (shouldn't happen, but cheap to handle). */
+        rmtree(temp_path);
+
+        if (mkdir(temp_path, 0755) < 0 && errno != EEXIST)
                 return -1;
 
-        /* Step 4: Extract the archive into the store directory.
-         * Use system() so PATH is inherited properly under sudo. */
+        /* Step 4: Install SIGINT/SIGTERM handlers so a Ctrl-C during the
+         * system("tar ...") call cleans up the temp dir. The handler just
+         * sets a flag (async-signal-safe); cleanup happens after system()
+         * returns, then we re-raise the signal so the parent shell sees
+         * the right exit code. */
+        extract_got_signal = 0;
+        strncpy(extract_temp_path, temp_path, sizeof(extract_temp_path) - 1);
+        extract_temp_path[sizeof(extract_temp_path) - 1] = '\0';
+
+        struct sigaction sa, old_int, old_term;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = extract_sig_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGINT, &sa, &old_int);
+        sigaction(SIGTERM, &sa, &old_term);
+
+        /* Step 5: Extract the archive into the temp dir.
+         * Use system() so PATH is inherited properly under sudo. Try
+         * multiple methods: plain tar, tar with --use-compress-program,
+         * then a zstd|tar pipeline. */
         const char *debug = getenv("TWO09_DEBUG");
         char cmd[PATH_MAX * 3];
+        int ret = -1;
 
-        snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s'", pkg_path, store_path);
+        snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s'", pkg_path, temp_path);
         if (debug) fprintf(stderr, "  [debug] extracting: %s\n", cmd);
-        int ret = system(cmd);
+        ret = system(cmd);
 
-        if (ret != 0) {
+        if (ret != 0 && !extract_got_signal) {
                 if (debug) fprintf(stderr, "  [debug] tar failed (rc=%d), trying zstd...\n", ret);
                 snprintf(cmd, sizeof(cmd),
                          "tar --use-compress-program=zstd -xf '%s' -C '%s'",
-                         pkg_path, store_path);
+                         pkg_path, temp_path);
                 ret = system(cmd);
         }
 
-        if (ret != 0) {
+        if (ret != 0 && !extract_got_signal) {
                 if (debug) fprintf(stderr, "  [debug] zstd tar failed (rc=%d), trying pipeline...\n", ret);
                 snprintf(cmd, sizeof(cmd),
                          "zstd -d -c '%s' | tar xf - -C '%s'",
-                         pkg_path, store_path);
+                         pkg_path, temp_path);
                 ret = system(cmd);
+        }
+
+        /* Restore signal handlers regardless of outcome. */
+        sigaction(SIGINT, &old_int, NULL);
+        sigaction(SIGTERM, &old_term, NULL);
+        extract_temp_path[0] = '\0';
+
+        /* If interrupted, clean up the temp dir and re-raise so the
+         * process exits with the right signal disposition. */
+        if (extract_got_signal) {
+                rmtree(temp_path);
+                /* Restore default for whichever signal we got and re-raise.
+                 * Both old_int/old_term were captured before installation,
+                 * so either is the default disposition. Use SIGINT as the
+                 * common case. */
+                raise(SIGINT);
+                return -1;  /* not reached */
         }
 
         if (ret != 0) {
                 if (debug) fprintf(stderr, "  [debug] all extraction methods failed\n");
-                rmdir(store_path);
+                rmtree(temp_path);
+                return -1;
+        }
+
+        /* Step 6: Atomic rename to the final store path. rename() is
+         * atomic on the same filesystem, and /nix/store/.tmp is on the
+         * same filesystem as /nix/store by design. */
+        if (rename(temp_path, store_path) != 0) {
+                if (debug) fprintf(stderr, "  [debug] rename %s -> %s failed: %s\n",
+                                   temp_path, store_path, strerror(errno));
+                rmtree(temp_path);
                 return -1;
         }
 
