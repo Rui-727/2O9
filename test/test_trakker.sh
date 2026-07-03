@@ -2,9 +2,9 @@
 # test_trakker.sh - test the Trakker execution sandbox
 #
 # Runs a harmless command inside the sandbox and verifies:
-#  - The trace JSON is produced
-#  - The --no-net flag actually blocks network access
-#  - The --no-write flag actually blocks file writes
+# - The trace JSON is produced
+# - The --no-net flag actually blocks network access
+# - The --no-write flag actually blocks file writes
 #
 # Usage: ./test/test_trakker.sh [path/to/209]
 

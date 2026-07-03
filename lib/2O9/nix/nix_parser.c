@@ -305,8 +305,8 @@ static nix_ast_t *parse_base(nix_parser_t *p)
          *
          * Strategy: consume first identifier normally (via advance),
          * then check what follows:
-         *  - ',' or '?' or '}'  →  formals (lambda param)
-         *  - '=' or '.'         →  binding (attrset)
+         * - ',' or '?' or '}'  →  formals (lambda param)
+         * - '=' or '.'         →  binding (attrset)
          */
         int line = tok.line, col = tok.col;
         advance(p); /* consume '{' */

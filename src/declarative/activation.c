@@ -6,11 +6,11 @@
  * is built, but before the new generation is reported as committed.
  *
  * How it works:
- *  - For each step that needs to scan package contents, we walk the
+ * - For each step that needs to scan package contents, we walk the
  *     new generation's packages via the generation DB.
- *  - For each package, we walk its store_path directory looking for
+ * - For each package, we walk its store_path directory looking for
  *     files matching known patterns (systemd units, sysusers.d, etc.).
- *  - We invoke the appropriate system tool with the discovered files.
+ * - We invoke the appropriate system tool with the discovered files.
  *
  * All steps are idempotent - safe to run on every 209 apply. Missing
  * tools (exit 127) are treated as non-fatal: a host without

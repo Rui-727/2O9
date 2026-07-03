@@ -12,11 +12,11 @@
  *   2. Child calls PTRACE_TRACEME, sends SIGSTOP, then execs
  *   3. Parent catches SIGSTOP, sets PTRACE_O_TRACESYSGOOD + follow-fork
  *   4. Parent enters ptrace loop:
- *     - On syscall-entry (SIGTRAP|0x80): read regs, record event,
+ *    - On syscall-entry (SIGTRAP|0x80): read regs, record event,
  *        optionally block/redirect, then continue
- *     - On plain SIGTRAP (from exec): suppress, continue
- *     - On other signals: deliver to child
- *     - On exit: record and remove from child list
+ *    - On plain SIGTRAP (from exec): suppress, continue
+ *    - On other signals: deliver to child
+ *    - On exit: record and remove from child list
  *   5. On completion: write JSON trace
  *
  * x86_64 only (matching the Arch Linux target).

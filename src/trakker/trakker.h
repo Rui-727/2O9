@@ -4,11 +4,11 @@
  * it does and optionally restricting what it's allowed to do.
  *
  * From DESIGN.md §7:
- *  - Records: file I/O, network, process, memory (mmap summary)
- *  - Restricts: --no-net, --redirect-writes <dir>, --no-write,
+ * - Records: file I/O, network, process, memory (mmap summary)
+ * - Restricts: --no-net, --redirect-writes <dir>, --no-write,
  *     --allow-net port=443
- *  - Uses ptrace to intercept syscalls
- *  - Output: JSON trace log
+ * - Uses ptrace to intercept syscalls
+ * - Output: JSON trace log
  *
  * Usage: 209 <pkg> trakker [--no-net] [--redirect-writes /tmp/trakker] \
  *                           [--no-write] [--allow-net port=443] <command>

@@ -3,11 +3,11 @@
  * Computes the diff between the desired state (from 2O9.nix evaluation)
  * and the current generation, producing a transaction plan:
  *
- *  - Packages to install from official repos (pacman)
- *  - Packages to build from AUR
- *  - Packages to remove (present in current but not in desired)
- *  - Services to enable (systemctl enable)
- *  - Services to disable (systemctl disable)
+ * - Packages to install from official repos (pacman)
+ * - Packages to build from AUR
+ * - Packages to remove (present in current but not in desired)
+ * - Services to enable (systemctl enable)
+ * - Services to disable (systemctl disable)
  *
  * The transaction is then executed by cmd_apply.
  *

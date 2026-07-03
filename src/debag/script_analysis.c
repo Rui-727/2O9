@@ -10,14 +10,14 @@
  *
  * This is a heuristic parser, not a full shell interpreter. It looks
  * for known patterns:
- *  - systemctl enable/disable/start/stop
- *  - systemd-sysusers
- *  - systemd-tmpfiles
- *  - install -D, mkdir, touch, cp (file creation)
- *  - chown, chmod (permission changes)
- *  - gtk-update-icon-cache, update-desktop-database, fc-cache (cache rebuilds)
- *  - useradd, groupadd (user/group creation)
- *  - rm, rmdir (file removal)
+ * - systemctl enable/disable/start/stop
+ * - systemd-sysusers
+ * - systemd-tmpfiles
+ * - install -D, mkdir, touch, cp (file creation)
+ * - chown, chmod (permission changes)
+ * - gtk-update-icon-cache, update-desktop-database, fc-cache (cache rebuilds)
+ * - useradd, groupadd (user/group creation)
+ * - rm, rmdir (file removal)
  *
  * Unknown commands are listed as "Runs: <command>" so the user can
  * inspect them manually.
@@ -360,7 +360,7 @@ void debag_print_script_analysis(const script_analysis_t *a, FILE *out)
         if (func->intent_count == 0) continue;
         fprintf(out, "  %s():\n", func->function_name);
         for (script_intent_t *i = func->intents; i; i = i->next) {
-            fprintf(out, "   - %s: %s", intent_label(i->type),
+            fprintf(out, "  - %s: %s", intent_label(i->type),
                     i->target ? i->target : "?");
             if (i->detail)
                 fprintf(out, " (%s)", i->detail);

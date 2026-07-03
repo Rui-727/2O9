@@ -1,9 +1,9 @@
 /* aur_rpc.h - AUR RPC client
  *
  * Rewrites paru's raur crate in C. Provides:
- *  - AUR search (/rpc/v5/?type=search)
- *  - AUR info   (/rpc/v5/?type=info)
- *  - Batch info queries with caching
+ * - AUR search (/rpc/v5/?type=search)
+ * - AUR info   (/rpc/v5/?type=info)
+ * - Batch info queries with caching
  *
  * Uses libcurl for HTTP, cJSON for JSON parsing.
  * See: https://aur.archlinux.org/rpc

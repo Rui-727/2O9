@@ -5,18 +5,18 @@
  * derivations, no fetchers, no flakes.
  *
  * Supports:
- *  - Attribute sets (plain & recursive)
- *  - Lists, strings (with interpolation), integers, bools, null, paths
- *  - Lambda functions (ident and formal-param forms)
- *  - Function application (curried, left-associative)
- *  - Let-bindings, if/then/else, with, assert
- *  - Binary ops: +, ++ (list concat), *, /, -, &&, ||, ==, !=,
+ * - Attribute sets (plain & recursive)
+ * - Lists, strings (with interpolation), integers, bools, null, paths
+ * - Lambda functions (ident and formal-param forms)
+ * - Function application (curried, left-associative)
+ * - Let-bindings, if/then/else, with, assert
+ * - Binary ops: +, ++ (list concat), *, /, -, &&, ||, ==, !=,
  *     <, <=, >, >=, -> (implication)
- *  - Unary: !, - (negate)
- *  - Select (a.b.c), has-attr (e ? attr), or-default (e.a or default)
- *  - Import (read & evaluate another .nix file, relative paths)
- *  - Fixed-point recursion for { config, ... }: { ... } pattern
- *  - Builtins: map, filter, length, head, tail, attrNames, attrValues,
+ * - Unary: !, - (negate)
+ * - Select (a.b.c), has-attr (e ? attr), or-default (e.a or default)
+ * - Import (read & evaluate another .nix file, relative paths)
+ * - Fixed-point recursion for { config, ... }: { ... } pattern
+ * - Builtins: map, filter, length, head, tail, attrNames, attrValues,
  *     hasAttr, getAttr, fromJSON, toJSON, trace, pathExists, readFile
  *
  * Part of lib2O9.  Pure C, no C++ dependencies.

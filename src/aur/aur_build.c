@@ -312,10 +312,10 @@ build_result_t *aur_build(const char *pkg_name, const char *build_dir,
         argv[i++] = "makepkg";
 
         /* Flags:
-         *   -f  - force rebuild (overwrite existing package)
-         *   -e  - extract source files (don't use cached)
-         *   -A  - ignore arch check
-         *   -s  - install missing deps with pacman (for repo deps)
+         *   -f - force rebuild (overwrite existing package)
+         *   -e - extract source files (don't use cached)
+         *   -A - ignore arch check
+         *   -s - install missing deps with pacman (for repo deps)
          *   --noconfirm - skip prompts
          */
         argv[i++] = "-feA";

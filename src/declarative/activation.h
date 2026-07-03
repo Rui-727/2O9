@@ -23,16 +23,16 @@
  * we skip it silently rather than failing the whole apply.
  *
  * Implementation notes:
- *  - Step 2 is a no-op: the symlink farm already handles /etc/ entries
+ * - Step 2 is a no-op: the symlink farm already handles /etc/ entries
  *     via the store_manifest is_config flag.
- *  - Step 5 is a no-op: systemd-sysusers (step 3) covers the standard
+ * - Step 5 is a no-op: systemd-sysusers (step 3) covers the standard
  *     case. Packages needing custom user creation outside sysusers.d
  *     get a warning (DESIGN.md: "don't run .install scripts").
- *  - Steps 3 and 4 invoke systemd-sysusers / systemd-tmpfiles with no
+ * - Steps 3 and 4 invoke systemd-sysusers / systemd-tmpfiles with no
  *     explicit file args, so they scan the default system directories
  *     where the symlink farm has placed the configs. A future enhancement
  *     is to pass explicit file lists from the new generation's store paths.
- *  - Step 9 starts (not restarts) services - restart would disrupt
+ * - Step 9 starts (not restarts) services - restart would disrupt
  *     running sessions. The user should still reboot for full state
  *     to take effect (DESIGN.md §7).
  */

@@ -3,12 +3,12 @@
 #
 # Creates a 2O9.nix fixture that exercises the features the evaluator
 # claims to support:
-#  - Function form with { config, ... }:
-#  - Fixed-point recursion (config self-reference)
-#  - import/include (split config across files)
-#  - List and attrset literals
-#  - Conditional expressions
-#  - builtins.length, builtins.filter
+# - Function form with { config, ... }:
+# - Fixed-point recursion (config self-reference)
+# - import/include (split config across files)
+# - List and attrset literals
+# - Conditional expressions
+# - builtins.length, builtins.filter
 #
 # Runs `209 apply` and verifies the manifest contains the expected
 # packages derived from the conditional + self-reference logic.

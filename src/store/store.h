@@ -8,8 +8,8 @@
  *   3. Build a manifest of files (so the symlink farm knows what to link)
  *
  * Two backends, picked at runtime:
- *   - NIX_STORE: shells out to `nix-store --add` (the real Nix toolchain)
- *   - DIRECT:    extracts with tar directly (no nix dependency,
+ *  - NIX_STORE: shells out to `nix-store --add` (the real Nix toolchain)
+ *  - DIRECT:    extracts with tar directly (no nix dependency,
  *                useful for testing and for systems without nix installed)
  *
  * See DESIGN.md section 4 and 6 for the why.

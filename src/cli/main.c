@@ -6,9 +6,9 @@
  * Phase 1: <pkg> install, <n> rollback, generations, apply, sync, gc
  *
  * From DESIGN.md §5:
- *   209 <subject> <verb>          - SOV pattern
- *   209 <command>                 - zero-argument command
- *   209 <pkg1> <pkg2> <verb>     - multi-subject
+ *   209 <subject> <verb>         - SOV pattern
+ *   209 <command>                - zero-argument command
+ *   209 <pkg1> <pkg2> <verb>    - multi-subject
  */
 
 #include <stdio.h>
