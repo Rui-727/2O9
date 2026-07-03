@@ -30,10 +30,12 @@
 #include <dirent.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdint.h>
 
 extern char **environ;
 
 #include "store.h"
+#include "nar.h"
 
 /* ── Atomic extraction helpers ─────────────────────────────────────
  * direct_extract() below extracts to /nix/store/.tmp/<name>-<ver>.<pid>/
@@ -222,10 +224,14 @@ static int spawn_nix_store_add(const char *path, char **store_path_out)
 /* ── Direct extraction backend (tar subprocess) ──────────────────── */
 
 static int direct_extract(const char *pkg_path, char **store_path_out,
-                           const char *known_name, const char *known_ver)
+                           const char *known_name, const char *known_ver,
+                           char **nar_hash_out, int64_t *nar_size_out)
 {
         char pkg_name[256] = {0};
         char pkg_ver[128] = {0};
+
+        *nar_hash_out = NULL;
+        *nar_size_out = 0;
 
         /* If name+version provided, use them directly (skip .PKGINFO) */
         if (known_name && known_ver) {
@@ -239,53 +245,32 @@ static int direct_extract(const char *pkg_path, char **store_path_out,
                 }
         }
 
-        /* Step 2: Build the final store path: /nix/store/<name>-<version> */
-        char store_path[PATH_MAX];
-        snprintf(store_path, sizeof(store_path), "/nix/store/%s-%s",
+        /* Phase 2: legacy pre-check on the un-hashed /nix/store/<name>-<ver>/
+         * path. If a Phase 0/1 install left this here with a .PKGINFO marker,
+         * treat it as an idempotent skip and return that path - the spec
+         * says new installs use hashed paths but old ones still work for
+         * reads, and re-extracting would just duplicate the data. The
+         * returned store_path goes into the generation DB verbatim, so
+         * future operations on this generation keep using the legacy path
+         * until the user upgrades. */
+        char legacy_path[PATH_MAX];
+        snprintf(legacy_path, sizeof(legacy_path), "/nix/store/%s-%s",
                  pkg_name, pkg_ver);
-
-        /* Idempotency: only trust a previously-extracted store path if it
-         * contains a .PKGINFO marker. A bare/empty dir is treated as a
-         * partial extraction (e.g. previous Ctrl-C) and is removed so we
-         * can re-extract atomically. A non-empty dir without .PKGINFO is
-         * left alone (could be user-modified) and skipped. */
-        struct stat st;
-        if (stat(store_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        struct stat legacy_st;
+        if (stat(legacy_path, &legacy_st) == 0 && S_ISDIR(legacy_st.st_mode)) {
                 char marker[PATH_MAX];
-                snprintf(marker, sizeof(marker), "%s/.PKGINFO", store_path);
+                snprintf(marker, sizeof(marker), "%s/.PKGINFO", legacy_path);
                 struct stat ms;
                 if (stat(marker, &ms) == 0) {
-                        /* Complete extraction - idempotent skip */
-                        *store_path_out = strdup(store_path);
-                        return 0;
-                }
-                /* No .PKGINFO - check if dir is empty (stale from a
-                 * previous interrupted run that created the dir but
-                 * never renamed a temp into it). */
-                DIR *d = opendir(store_path);
-                int is_empty = 1;
-                if (d) {
-                        struct dirent *e;
-                        while ((e = readdir(d)) != NULL) {
-                                if (strcmp(e->d_name, ".") == 0 ||
-                                    strcmp(e->d_name, "..") == 0)
-                                        continue;
-                                is_empty = 0;
-                                break;
-                        }
-                        closedir(d);
-                }
-                if (is_empty) {
-                        rmdir(store_path);
-                } else {
-                        /* Non-empty dir without .PKGINFO - suspicious. Skip
-                         * rather than destroy unknown content. */
+                        /* Legacy complete extraction - idempotent skip.
+                         * We do not compute the NAR hash here because we
+                         * didn't extract anything; nar_hash_out stays NULL
+                         * and the caller skips DB registration. */
                         const char *debug = getenv("TWO09_DEBUG");
                         if (debug)
-                                fprintf(stderr, "  [debug] store path exists "
-                                        "without .PKGINFO, skipping: %s\n",
-                                        store_path);
-                        *store_path_out = strdup(store_path);
+                                fprintf(stderr, "  [debug] legacy store path "
+                                        "exists, skipping: %s\n", legacy_path);
+                        *store_path_out = strdup(legacy_path);
                         return 0;
                 }
         }
@@ -373,17 +358,97 @@ static int direct_extract(const char *pkg_path, char **store_path_out,
                 return -1;
         }
 
-        /* Step 6: Atomic rename to the final store path. rename() is
+        /* Step 6 (Phase 2): Compute NAR hash of the extracted tree.
+         * The hash is what makes the store path content-addressed. If
+         * hashing fails (e.g. FIFO/socket in the tree, scandir failure),
+         * fall back to the legacy un-hashed path so we still ship the
+         * package - the caller just doesn't get a NAR hash to register. */
+        char nar_hash_hex[65];
+        size_t nar_size = 0;
+        int hash_ok = (nar_hash_directory(temp_path, nar_hash_hex, &nar_size) == 0);
+        if (debug && hash_ok)
+                fprintf(stderr, "  [debug] nar hash: %s (%zu bytes)\n",
+                        nar_hash_hex, nar_size);
+        else if (!hash_ok)
+                fprintf(stderr, "  [warn] nar_hash_directory failed (%s); "
+                        "installing without content address\n",
+                        strerror(errno));
+
+        /* Step 7: Compute the final content-addressed store path. */
+        char final_path[PATH_MAX];
+        int have_hashed = 0;
+        if (hash_ok) {
+                char *hashed = compute_store_path(nar_hash_hex, pkg_name, pkg_ver);
+                if (hashed) {
+                        snprintf(final_path, sizeof(final_path), "%s", hashed);
+                        free(hashed);
+                        have_hashed = 1;
+                }
+        }
+        if (!have_hashed) {
+                snprintf(final_path, sizeof(final_path), "/nix/store/%s-%s",
+                         pkg_name, pkg_ver);
+        }
+
+        /* Step 8: Idempotency on the final path. If a previous run already
+         * installed the same content (same hash), drop our temp and return
+         * the existing path. Empty/stale dirs are removed; non-empty dirs
+         * without .PKGINFO are left alone (could be user-modified). */
+        struct stat st;
+        if (stat(final_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+                char marker[PATH_MAX];
+                snprintf(marker, sizeof(marker), "%s/.PKGINFO", final_path);
+                struct stat ms;
+                if (stat(marker, &ms) == 0) {
+                        rmtree(temp_path);
+                        *store_path_out = strdup(final_path);
+                        if (have_hashed) {
+                                *nar_hash_out = strdup(nar_hash_hex);
+                                *nar_size_out = (int64_t)nar_size;
+                        }
+                        return 0;
+                }
+                DIR *d = opendir(final_path);
+                int is_empty = 1;
+                if (d) {
+                        struct dirent *e;
+                        while ((e = readdir(d)) != NULL) {
+                                if (strcmp(e->d_name, ".") == 0 ||
+                                    strcmp(e->d_name, "..") == 0)
+                                        continue;
+                                is_empty = 0;
+                                break;
+                        }
+                        closedir(d);
+                }
+                if (is_empty) {
+                        rmdir(final_path);
+                } else {
+                        if (debug)
+                                fprintf(stderr, "  [debug] store path exists "
+                                        "without .PKGINFO, leaving as-is: %s\n",
+                                        final_path);
+                        rmtree(temp_path);
+                        *store_path_out = strdup(final_path);
+                        return 0;
+                }
+        }
+
+        /* Step 9: Atomic rename to the final store path. rename() is
          * atomic on the same filesystem, and /nix/store/.tmp is on the
          * same filesystem as /nix/store by design. */
-        if (rename(temp_path, store_path) != 0) {
+        if (rename(temp_path, final_path) != 0) {
                 if (debug) fprintf(stderr, "  [debug] rename %s -> %s failed: %s\n",
-                                   temp_path, store_path, strerror(errno));
+                                   temp_path, final_path, strerror(errno));
                 rmtree(temp_path);
                 return -1;
         }
 
-        *store_path_out = strdup(store_path);
+        *store_path_out = strdup(final_path);
+        if (have_hashed) {
+                *nar_hash_out = strdup(nar_hash_hex);
+                *nar_size_out = (int64_t)nar_size;
+        }
         return 0;
 }
 
@@ -416,7 +481,8 @@ store_add_result_t store_add_named(const char *pkg_path, const char *pkg_name,
                 }
                 break;
         case STORE_BACKEND_DIRECT:
-                rc = direct_extract(pkg_path, &store_path, pkg_name, pkg_version);
+                rc = direct_extract(pkg_path, &store_path, pkg_name, pkg_version,
+                                    &result.nar_hash, &result.nar_size);
                 if (rc < 0) {
                         result.success = -1;
                         result.error_msg = strdup("extraction failed - "
@@ -440,6 +506,7 @@ void store_add_result_free(store_add_result_t *r)
         if (!r) return;
         free(r->store_path);
         free(r->error_msg);
+        free(r->nar_hash);
 }
 
 /* ── Manifest: walk store directory and build entry list ─────────── */

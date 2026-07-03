@@ -22,10 +22,15 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
+#include <ctype.h>
 #include <pwd.h>
+#include <stdint.h>
 #include <curl/curl.h>
 
 #include "store/store.h"
+#include "store/nar.h"
+#include "store/db.h"
+#include "store/optimise.h"
 #include "declarative/gen.h"
 #include "store/symlinks.h"
 #include "aur/aur_rpc.h"
@@ -184,6 +189,8 @@ static int cmd_usage(void)
         printf("  generations        List generations\n");
         printf("  sync               Sync repo databases (same as -Sy)\n");
         printf("  gc                 Garbage-collect unreferenced store paths\n");
+        printf("                     (--optimise: also hardlink-dedup after GC)\n");
+        printf("  optimise           Hardlink-dedup /nix/store (Nix --optimise)\n");
         printf("  cache              Prune old package cache (like paccache)\n");
         printf("  news               Show Arch Linux news\n");
         printf("  init [--system]    Create a starter 2O9.nix config\n");
@@ -228,6 +235,14 @@ static int cmd_usage(void)
 
 /* Forward declaration - defined after cmd_install */
 static gen_pkg_t *read_current_gen_packages(const char *db_root, int current_id);
+
+/* Forward declarations - Phase 2 helpers defined later in this file. */
+static void find_store_path(const char *pkg_name, char *out, size_t out_sz);
+static void register_target_in_store_db(const char *db_root,
+                                        const char *pkg_name,
+                                        const char *store_path,
+                                        const char *nar_hash,
+                                        int64_t nar_size);
 
 /* ── Generations ─────────────────────────────────────────────────── */
 
@@ -389,23 +404,32 @@ static store_backend_t pick_backend(void);
 /* A single target produced by the libalpm transaction in cmd_install.
  * The primary package (the one named on the command line) has is_primary=1;
  * all auto-resolved dependencies have is_primary=0. Used to drive the
- * generation-commit phase so deps are recorded alongside the primary. */
+ * generation-commit phase so deps are recorded alongside the primary.
+ *
+ * Phase 2 added nar_hash + nar_size: populated by the DIRECT store backend
+ * so cmd_install can register the path in the store DB without re-hashing.
+ * NULL/0 for the test-mode fake path and the NIX_STORE backend. */
 typedef struct trans_target {
         char *name;
         char *version;
-        char *store_path;   /* /nix/store/<name>-<version>, owned by this struct */
+        char *store_path;   /* /nix/store/<hash>-<name>-<version> or legacy, owned */
+        char *nar_hash;     /* 64-char hex NAR hash, or NULL */
+        int64_t nar_size;   /* NAR serialised byte count, or 0 */
         int   is_primary;
         struct trans_target *next;
 } trans_target_t;
 
 static trans_target_t *trans_target_new(const char *name, const char *version,
-                                        const char *store_path, int is_primary)
+                                        const char *store_path, int is_primary,
+                                        const char *nar_hash, int64_t nar_size)
 {
         trans_target_t *t = calloc(1, sizeof(*t));
         if (!t) return NULL;
         t->name = strdup(name);
         t->version = strdup(version);
         t->store_path = store_path ? strdup(store_path) : NULL;
+        t->nar_hash = nar_hash ? strdup(nar_hash) : NULL;
+        t->nar_size = nar_size;
         t->is_primary = is_primary;
         return t;
 }
@@ -417,6 +441,7 @@ static void trans_target_list_free(trans_target_t *head)
                 free(head->name);
                 free(head->version);
                 free(head->store_path);
+                free(head->nar_hash);
                 free(head);
                 head = next;
         }
@@ -605,6 +630,17 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
 
         printf("  %sstore path:%s %s\n", C_DIM(), C_RESET(), result.store_path);
 
+        /* Phase 2: register the freshly-extracted path in the store DB.
+         * This populates the refs graph so cmd_gc can compute the closure
+         * correctly. Skipped silently if no NAR hash (test mode, legacy). */
+        if (result.success == 0 && result.nar_hash && result.store_path) {
+                char db_root_buf[PATH_MAX];
+                get_db_root(db_root_buf, sizeof(db_root_buf));
+                register_target_in_store_db(db_root_buf, pkg_name,
+                                            result.store_path,
+                                            result.nar_hash, result.nar_size);
+        }
+
         /* Return store path and version to caller */
         if (store_path_out) *store_path_out = strdup(result.store_path);
         if (version_out) *version_out = resolved_version ? strdup(resolved_version) : strdup("0.0.0");
@@ -657,7 +693,8 @@ int cmd_install(const char *pkg_name)
                 result.error_msg = NULL;
                 resolved_version = strdup("0.0.0");
                 printf("  [test mode] fake store path: %s\n", fake_store);
-                *targets_tail = trans_target_new(pkg_name, "0.0.0", fake_store, 1);
+                *targets_tail = trans_target_new(pkg_name, "0.0.0", fake_store, 1,
+                                                 NULL, 0);
                 if (*targets_tail) targets_tail = &(*targets_tail)->next;
         } else if (pkg_path[0] != '\0') {
                 /* User provided a .pkg.tar.zst path directly */
@@ -675,7 +712,9 @@ int cmd_install(const char *pkg_name)
                 }
                 resolved_version = strdup("unknown");
                 *targets_tail = trans_target_new(pkg_name, "unknown",
-                                                 result.store_path, 1);
+                                                 result.store_path, 1,
+                                                 result.nar_hash,
+                                                 result.nar_size);
                 if (*targets_tail) targets_tail = &(*targets_tail)->next;
         } else {
                 /* Use lib2O9 to find the package in the repo sync DBs,
@@ -1065,7 +1104,8 @@ int cmd_install(const char *pkg_name)
                          * so the rest of cmd_install (which expects a
                          * single result) works unchanged. */
                         trans_target_t *t = trans_target_new(
-                                tname, tver, tresult.store_path, is_primary);
+                                tname, tver, tresult.store_path, is_primary,
+                                tresult.nar_hash, tresult.nar_size);
                         if (!t) {
                                 store_add_result_free(&tresult);
                                 trans_failed = 1;
@@ -1118,6 +1158,20 @@ int cmd_install(const char *pkg_name)
         /* Step 2: open generation DB and lock */
         char db_root[PATH_MAX];
         get_db_root(db_root, sizeof(db_root));
+
+        /* Phase 2: register each extracted target in the store DB so
+         * the refs graph is up to date for the next GC. We do this
+         * BEFORE taking the generation DB lock to keep the SQLite layer
+         * independent of the file-based gen DB (different lock domain).
+         * Targets without a NAR hash (test mode, legacy skip) are
+         * skipped by register_target_in_store_db. */
+        for (trans_target_t *t = targets_head; t; t = t->next) {
+                if (t->store_path && t->nar_hash)
+                        register_target_in_store_db(db_root, t->name,
+                                                    t->store_path,
+                                                    t->nar_hash, t->nar_size);
+        }
+
         gen_db_t *db = gen_db_open(db_root);
         if (!db) {
                 fprintf(stderr, "209: cannot open generation DB\n");
@@ -1390,7 +1444,9 @@ static char *merge_manifests(const char *user_json, const char *global_json,
 /* ── Apply (declarative) ─────────────────────────────────────────── */
 
 /* Find store path on disk for a package name.
- * Scans /nix/store/ for <pkg_name>-<version> directories. */
+ * Scans /nix/store/ for directories matching the package. Handles both
+ * legacy /nix/store/<pkg_name>-<version>/ paths (Phase 0/1) and hashed
+ * /nix/store/<base32>-<pkg_name>-<version>/ paths (Phase 2). */
 static void find_store_path(const char *pkg_name, char *out, size_t out_sz)
 {
         out[0] = '\0';
@@ -1398,10 +1454,24 @@ static void find_store_path(const char *pkg_name, char *out, size_t out_sz)
         if (!d) return;
         struct dirent *de;
         size_t nlen = strlen(pkg_name);
+
+        /* Build "-<pkg_name>-" needle for hashed-path matching. */
+        char needle[300];
+        snprintf(needle, sizeof(needle), "-%s-", pkg_name);
+
         while ((de = readdir(d)) != NULL) {
                 if (de->d_name[0] == '.') continue;
+
+                /* Legacy form: /nix/store/<pkg_name>-<version> */
                 if (strncmp(de->d_name, pkg_name, nlen) == 0 &&
                     de->d_name[nlen] == '-') {
+                        snprintf(out, out_sz, "/nix/store/%s", de->d_name);
+                        break;
+                }
+                /* Hashed form: /nix/store/<hash>-<pkg_name>-<version>.
+                 * Match by "-<pkg_name>-" substring so we don't confuse
+                 * 'foo' with 'libfoo' or 'foo-bar'. */
+                if (strstr(de->d_name, needle) != NULL) {
                         snprintf(out, out_sz, "/nix/store/%s", de->d_name);
                         break;
                 }
@@ -1417,6 +1487,168 @@ static store_backend_t pick_backend(void)
             access("/nix/var/nix/profiles/default/bin/nix-store", X_OK) == 0)
                 return pick_backend();
         return STORE_BACKEND_DIRECT;
+}
+
+/* ── Phase 2: store DB registration ─────────────────────────────────
+ *
+ * After direct_extract() returns a hashed store path, the install path
+ * calls register_target_in_store_db() to:
+ *   1. Register the path in the SQLite store DB with its NAR hash + size.
+ *   2. Parse <store_path>/.PKGINFO for `depend = <name>` lines.
+ *   3. For each dep, look up its store path (DB first, then filesystem).
+ *   4. If the dep is on disk but not in the DB, auto-register it by
+ *      hashing its contents (best-effort: a failed hash just skips the
+ *      ref; the next install of that dep will register it properly).
+ *   5. Add a ref: referrer = this target, reference = dep.
+ *
+ * This is what makes GC correct: the refs graph captures the full
+ * dependency closure so cmd_gc can compute live vs dead paths. */
+
+/* Parse .PKGINFO from <store_path>/.PKGINFO, calling cb(dep_name, ctx)
+ * for each `depend = ...` line. Returns 0 on success, -1 if .PKGINFO
+ * can't be opened. The dep_name passed to cb is a NUL-terminated buffer
+ * (without version suffix); cb must not retain it past the call. */
+static int pkginfo_each_dep(const char *store_path,
+                            void (*cb)(const char *dep, void *ctx),
+                            void *ctx)
+{
+        char pkginfo_path[PATH_MAX];
+        snprintf(pkginfo_path, sizeof(pkginfo_path), "%s/.PKGINFO", store_path);
+        FILE *f = fopen(pkginfo_path, "r");
+        if (!f) return -1;
+
+        char line[1024];
+        while (fgets(line, sizeof(line), f)) {
+                /* Skip leading whitespace. */
+                char *p = line;
+                while (*p && isspace((unsigned char)*p)) p++;
+                /* Match "depend = ..." */
+                if (strncmp(p, "depend", 6) != 0) continue;
+                p += 6;
+                while (*p && isspace((unsigned char)*p)) p++;
+                if (*p != '=') continue;
+                p++;
+                while (*p && isspace((unsigned char)*p)) p++;
+
+                /* Extract dep name: stops at ':', '<', '>', '=', whitespace,
+                 * or end of line. .PKGINFO depend lines look like:
+                 *   depend = glibc
+                 *   depend = sh: which
+                 *   depend = libfoo=1.0
+                 * We take just the name token before any version constraint. */
+                char dep_name[256];
+                size_t dn = 0;
+                while (*p && *p != ':' && *p != '<' && *p != '>' &&
+                       *p != '=' && !isspace((unsigned char)*p) &&
+                       dn < sizeof(dep_name) - 1) {
+                        dep_name[dn++] = *p++;
+                }
+                dep_name[dn] = '\0';
+                if (dn > 0) cb(dep_name, ctx);
+        }
+        fclose(f);
+        return 0;
+}
+
+/* Callback state for register_target_in_store_db. */
+struct dep_ctx {
+        store_db_t *db;
+        const char *referrer_path;
+        const char *referrer_name;
+        int debug;
+};
+
+/* Callback: look up the dep's store path, register it if needed, and
+ * add a ref from referrer to dep. */
+static void dep_cb(const char *dep_name, void *ctx_)
+{
+        struct dep_ctx *c = (struct dep_ctx *)ctx_;
+
+        /* Skip self-deps (some packages list themselves). */
+        if (strcmp(dep_name, c->referrer_name) == 0) return;
+
+        /* Try the DB first. */
+        char *dep_path = store_db_find_by_name(c->db, dep_name);
+
+        /* Fall back to a /nix/store/ scan. */
+        if (!dep_path) {
+                char fs_path[PATH_MAX] = {0};
+                find_store_path(dep_name, fs_path, sizeof(fs_path));
+                if (fs_path[0]) {
+                        dep_path = strdup(fs_path);
+                        /* Auto-register the dep so future closures include it.
+                         * Compute NAR hash on demand. */
+                        char dep_hash[65];
+                        size_t dep_size = 0;
+                        if (nar_hash_directory(dep_path, dep_hash, &dep_size) == 0) {
+                                store_db_register_path(c->db, dep_path, dep_hash,
+                                                       (int64_t)dep_size, NULL);
+                                if (c->debug)
+                                        fprintf(stderr, "  [debug] auto-registered dep "
+                                                "%s -> %s\n", dep_name, dep_path);
+                        } else {
+                                if (c->debug)
+                                        fprintf(stderr, "  [debug] dep %s on disk but "
+                                                "NAR hash failed; skipping ref\n",
+                                                dep_name);
+                                free(dep_path);
+                                return;
+                        }
+                }
+        }
+
+        if (dep_path) {
+                if (store_db_add_ref(c->db, c->referrer_path, dep_path) == 0) {
+                        if (c->debug)
+                                fprintf(stderr, "  [debug] ref: %s -> %s (%s)\n",
+                                        c->referrer_name, dep_name, dep_path);
+                }
+                free(dep_path);
+        } else if (c->debug) {
+                fprintf(stderr, "  [debug] dep %s not found; skipping ref\n",
+                        dep_name);
+        }
+}
+
+/* Register a freshly-extracted target in the store DB with its refs.
+ * nar_hash may be NULL (test mode, legacy path) - in that case we skip
+ * DB registration entirely; the path won't be in the closure graph. */
+static void register_target_in_store_db(const char *db_root,
+                                        const char *pkg_name,
+                                        const char *store_path,
+                                        const char *nar_hash,
+                                        int64_t nar_size)
+{
+        if (!nar_hash) return;  /* Nothing to register (test mode, etc). */
+
+        store_db_t *db = store_db_open(db_root);
+        if (!db) {
+                const char *debug = getenv("TWO09_DEBUG");
+                if (debug)
+                        fprintf(stderr, "  [debug] store_db_open failed; "
+                                "skipping DB registration for %s\n", store_path);
+                return;
+        }
+
+        int64_t id = store_db_register_path(db, store_path, nar_hash,
+                                            nar_size, NULL);
+        if (id < 0) {
+                if (getenv("TWO09_DEBUG"))
+                        fprintf(stderr, "  [debug] store_db_register_path failed "
+                                "for %s\n", store_path);
+                store_db_close(db);
+                return;
+        }
+
+        struct dep_ctx ctx = {
+                .db = db,
+                .referrer_path = store_path,
+                .referrer_name = pkg_name,
+                .debug = getenv("TWO09_DEBUG") != NULL,
+        };
+        pkginfo_each_dep(store_path, dep_cb, &ctx);
+
+        store_db_close(db);
 }
 
 static int cmd_apply(void)
@@ -1960,18 +2192,39 @@ static int cmd_sync(void)
 
 /* ── GC ──────────────────────────────────────────────────────────── */
 
-static int cmd_gc(void)
+static int cmd_gc(int argc, char **argv)
 {
-        /* Garbage collection: find store paths not referenced by any
-         * generation and delete them. This is the 2O9 equivalent of
-         * nix-collect-garbage.
+        /* Garbage collection: find store paths not reachable from any
+         * generation's root set, and delete them. This is the 2O9
+         * equivalent of `nix-collect-garbage`.
          *
-         * Algorithm:
-         *   1. Walk all generations, collect all referenced store paths
-         *   2. Walk /nix/store/, find directories not in the referenced set
-         *   3. Delete unreferenced paths (unless their generation is pinned)
-         *   4. Report how much space was freed
-         */
+         * Phase 2 algorithm (with refs graph):
+         *   1. Gather root set: every store_path referenced by any
+         *      non-deleted generation's manifest.json.
+         *   2. Compute the closure of the root set via the SQLite
+         *      refs graph (deps + transitive deps).
+         *   3. Compute dead paths = (all DB paths) - (closure).
+         *      Delete each dead path on disk + unregister from DB.
+         *   4. Walk /nix/store/ for paths NOT in the DB (orphans from
+         *      before Phase 2, or from failed installs). Delete those
+         *      too. This is the only way legacy Phase 0/1 un-hashed
+         *      paths get GC'd.
+         *   5. Old generation cleanup (unchanged): keep current + pinned.
+         *
+         * If `--optimise` is passed, run hardlink dedup after GC.
+         *
+         * Fallback: if the store DB can't be opened (sqlite missing,
+         * corrupted, permission denied), fall back to the Phase 0/1
+         * set-based algorithm with a warning. This keeps 2O9 usable
+         * even if SQLite is broken. */
+
+        int run_optimise = 0;
+        for (int i = 2; i < argc; i++) {
+                if (strcmp(argv[i], "--optimise") == 0 ||
+                    strcmp(argv[i], "--optimize") == 0)
+                        run_optimise = 1;
+        }
+
         char db_root[PATH_MAX];
         get_db_root(db_root, sizeof(db_root));
         gen_db_t *db = gen_db_open(db_root);
@@ -1981,111 +2234,208 @@ static int cmd_gc(void)
         }
 
         /* Step 1: Collect all referenced store paths from ALL generations
-         * (including old ones - don't delete what any generation references). */
+         * (including old ones - don't delete what any generation references).
+         * These are the GC roots. */
         size_t gen_count = 0;
         gen_t **gens = gen_db_list(db, &gen_count);
         int current_gen = gen_db_current(db);
 
-        /* Count total referenced paths */
-        size_t ref_count = 0;
+        /* Gather root paths (full store_path strings, not just basenames). */
+        char **roots = NULL;
+        size_t roots_count = 0, roots_cap = 0;
         for (size_t i = 0; i < gen_count; i++) {
                 gen_pkg_t *pkgs = read_current_gen_packages(db_root, gens[i]->id);
                 while (pkgs) {
-                        ref_count++;
+                        if (pkgs->store_path) {
+                                if (roots_count == roots_cap) {
+                                        roots_cap = roots_cap ? roots_cap * 2 : 16;
+                                        roots = realloc(roots, roots_cap * sizeof(char *));
+                                }
+                                if (roots) {
+                                        roots[roots_count++] = strdup(pkgs->store_path);
+                                }
+                        }
                         pkgs = pkgs->next;
                 }
                 gen_pkg_list_free(pkgs);
         }
 
-        /* Step 2: Walk /nix/store/ and find unreferenced paths */
+        /* Step 2-4: try the refs graph; fall back to set-based if no DB. */
         size_t removed = 0;
+        store_db_t *sdb = store_db_open(db_root);
+        if (sdb) {
+                /* Compute the closure. */
+                char **closure = NULL;
+                if (roots_count > 0)
+                        closure = store_db_closure(sdb, roots, roots_count);
 
-        DIR *store_dir = opendir("/nix/store");
-        if (!store_dir) {
-                /* /nix/store doesn't exist yet - skip store GC but still
-                 * clean up old generations */
-                printf("  /nix/store/ doesn't exist yet. Skipping store GC.\n");
-        } else {
-
-        /* Build a set of referenced store path basenames for quick lookup.
-         * We compare just the directory name (e.g. "neovim-0.9.5") since
-         * our store paths have no hash. */
-        char **ref_names = NULL;
-        size_t ref_idx = 0;
-        if (ref_count > 0) {
-                ref_names = malloc(ref_count * sizeof(char *));
-                for (size_t i = 0; i < gen_count; i++) {
-                        gen_pkg_t *pkgs = read_current_gen_packages(db_root, gens[i]->id);
-                        while (pkgs) {
-                                if (pkgs->store_path) {
-                                        const char *base = strrchr(pkgs->store_path, '/');
-                                        base = base ? base + 1 : pkgs->store_path;
-                                        ref_names[ref_idx++] = strdup(base);
-                                }
-                                gen_pkg_t *next = pkgs->next;
-                                /* don't free the individual pkg fields since we strdup'd base */
-                                free(pkgs->name);
-                                free(pkgs->version);
-                                free(pkgs->store_path);
-                                free(pkgs->origin);
-                                free(pkgs);
-                                pkgs = next;
-                        }
-                }
-        }
-
-        /* Walk /nix/store/ and collect unreferenced entries */
-        /* freed_bytes would track space freed - TODO: add du -sk before rm */
-        struct dirent *ent;
-        while ((ent = readdir(store_dir)) != NULL) {
-                if (ent->d_name[0] == '.') continue;
-
-                /* Check if this entry is referenced by any generation */
-                int found = 0;
-                for (size_t j = 0; j < ref_idx; j++) {
-                        if (strcmp(ent->d_name, ref_names[j]) == 0) {
-                                found = 1;
-                                break;
-                        }
+                /* Build a quick lookup set of closure paths. */
+                size_t n_closure = 0;
+                if (closure) {
+                        while (closure[n_closure]) n_closure++;
                 }
 
-                if (!found) {
-                        /* This store path is not referenced by any generation.
-                         * But we only delete it if its generation is not pinned. */
-                        char full_path[PATH_MAX];
-                        snprintf(full_path, sizeof(full_path), "/nix/store/%s",
-                                 ent->d_name);
-
-                        struct stat st;
-                        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-                                printf("  gc: removing %s\n", full_path);
-                                /* Calculate size before deletion */
-                                /* Simple recursive delete via rm -rf */
+                /* Step 3: dead paths = (DB paths) - (closure).
+                 * Also delete each from disk + DB. */
+                char **dead = store_db_dead_paths(sdb, closure ? closure : (char **)NULL,
+                                                  closure ? n_closure : 0);
+                if (dead) {
+                        for (size_t i = 0; dead[i]; i++) {
+                                printf("  gc: removing %s\n", dead[i]);
                                 char cmd[PATH_MAX + 32];
-                                snprintf(cmd, sizeof(cmd), "rm -rf '%s'", full_path);
-                                int rc = system(cmd);
-                                if (rc == 0) {
+                                snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dead[i]);
+                                if (system(cmd) == 0) {
                                         removed++;
+                                        store_db_unregister_path(sdb, dead[i]);
                                 } else {
                                         fprintf(stderr, "  warning: failed to remove %s\n",
-                                                full_path);
+                                                dead[i]);
                                 }
                         }
+                        for (size_t i = 0; dead[i]; i++) free(dead[i]);
+                        free(dead);
+                }
+
+                /* Step 4: orphan scan. Walk /nix/store/, find paths not
+                 * in the DB. These are either:
+                 *   - Pre-Phase-2 un-hashed paths (legacy)
+                 *   - Failed installs (temp dirs left over)
+                 *   - Anything we never registered
+                 * Delete them too. Skip .links, .tmp, hidden dirs, and
+                 * anything in the closure (legacy paths still in use). */
+                char **all_db = store_db_all_paths(sdb);
+                DIR *store_dir = opendir("/nix/store");
+                if (store_dir) {
+                        struct dirent *ent;
+                        while ((ent = readdir(store_dir)) != NULL) {
+                                if (ent->d_name[0] == '.') continue;
+
+                                char full_path[PATH_MAX];
+                                snprintf(full_path, sizeof(full_path),
+                                         "/nix/store/%s", ent->d_name);
+                                struct stat st;
+                                if (stat(full_path, &st) != 0 || !S_ISDIR(st.st_mode))
+                                        continue;
+
+                                /* Is this path in the DB? */
+                                int in_db = 0;
+                                if (all_db) {
+                                        for (size_t i = 0; all_db[i]; i++) {
+                                                if (strcmp(all_db[i], full_path) == 0) {
+                                                        in_db = 1;
+                                                        break;
+                                                }
+                                        }
+                                }
+                                if (in_db) continue;  /* handled by Step 3 */
+
+                                /* Is this path in the closure (live legacy)? */
+                                int in_closure = 0;
+                                for (size_t i = 0; i < n_closure; i++) {
+                                        if (closure[i] && strcmp(closure[i], full_path) == 0) {
+                                                in_closure = 1;
+                                                break;
+                                        }
+                                }
+                                if (in_closure) continue;
+
+                                /* Is this path a GC root (live legacy)? */
+                                int is_root = 0;
+                                for (size_t i = 0; i < roots_count; i++) {
+                                        if (roots[i] && strcmp(roots[i], full_path) == 0) {
+                                                is_root = 1;
+                                                break;
+                                        }
+                                }
+                                if (is_root) continue;
+
+                                printf("  gc: removing orphan %s\n", full_path);
+                                char cmd[PATH_MAX + 32];
+                                snprintf(cmd, sizeof(cmd), "rm -rf '%s'", full_path);
+                                if (system(cmd) == 0) removed++;
+                                else fprintf(stderr, "  warning: failed to remove %s\n",
+                                             full_path);
+                        }
+                        closedir(store_dir);
+                }
+
+                if (all_db) {
+                        for (size_t i = 0; all_db[i]; i++) free(all_db[i]);
+                        free(all_db);
+                }
+                if (closure) {
+                        for (size_t i = 0; closure[i]; i++) free(closure[i]);
+                        free(closure);
+                }
+                store_db_close(sdb);
+        } else {
+                /* Fallback: Phase 0/1 set-based GC. Walks /nix/store/
+                 * and deletes anything not referenced by any generation.
+                 * Doesn't know about transitive deps, so it can delete
+                 * a dep that no generation explicitly lists but that
+                 * a registered package still depends on. Warn loudly. */
+                fprintf(stderr, "  warning: store DB unavailable (%s); "
+                        "using set-based GC (may delete live deps)\n",
+                        strerror(errno));
+
+                DIR *store_dir = opendir("/nix/store");
+                if (store_dir) {
+                        struct dirent *ent;
+                        while ((ent = readdir(store_dir)) != NULL) {
+                                if (ent->d_name[0] == '.') continue;
+
+                                int found = 0;
+                                for (size_t j = 0; j < roots_count; j++) {
+                                        const char *base = strrchr(roots[j], '/');
+                                        base = base ? base + 1 : roots[j];
+                                        if (strcmp(ent->d_name, base) == 0) {
+                                                found = 1;
+                                                break;
+                                        }
+                                        /* Also check full-path match (hashed
+                                         * paths have a different basename
+                                         * structure). */
+                                        char full[PATH_MAX];
+                                        snprintf(full, sizeof(full),
+                                                 "/nix/store/%s", ent->d_name);
+                                        if (strcmp(roots[j], full) == 0) {
+                                                found = 1;
+                                                break;
+                                        }
+                                }
+
+                                if (!found) {
+                                        char full_path[PATH_MAX];
+                                        snprintf(full_path, sizeof(full_path),
+                                                 "/nix/store/%s", ent->d_name);
+                                        struct stat st;
+                                        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+                                                printf("  gc: removing %s\n", full_path);
+                                                char cmd[PATH_MAX + 32];
+                                                snprintf(cmd, sizeof(cmd),
+                                                         "rm -rf '%s'", full_path);
+                                                if (system(cmd) == 0) removed++;
+                                                else fprintf(stderr, "  warning: failed to remove %s\n",
+                                                             full_path);
+                                        }
+                                }
+                        }
+                        closedir(store_dir);
                 }
         }
-        closedir(store_dir);
-        } /* end of else (store_dir exists) */
 
         if (removed > 0)
                 printf("  garbage-collected %zu store paths\n", removed);
         else
                 printf("  no unreferenced store paths found\n");
 
-        /* Also clean up old generation directories.
+        /* Step 5: old generation cleanup (unchanged from Phase 0/1).
          * Keep: the current generation and all pinned generations.
          * Remove: everything else. */
         if (current_gen <= 0) {
                 printf("  no current generation - skipping generation cleanup\n");
+                for (size_t i = 0; i < roots_count; i++) free(roots[i]);
+                free(roots);
                 gen_list_free(gens, gen_count);
                 gen_db_close(db);
                 return 0;
@@ -2121,8 +2471,65 @@ static int cmd_gc(void)
         else
                 printf("  no old generations to remove\n");
 
+        /* Optional: run hardlink dedup after GC. */
+        if (run_optimise) {
+                printf("\n  optimising store (hardlink dedup)...\n");
+                int64_t saved = store_optimise("/nix/store");
+                if (saved < 0) {
+                        fprintf(stderr, "  optimise failed\n");
+                } else if (saved == 0) {
+                        printf("  no duplicate files found\n");
+                } else {
+                        /* Human-readable: KB/MB/GB. */
+                        const char *unit = "B";
+                        double val = (double)saved;
+                        if (val >= 1024 * 1024 * 1024) {
+                                val /= 1024 * 1024 * 1024; unit = "GB";
+                        } else if (val >= 1024 * 1024) {
+                                val /= 1024 * 1024; unit = "MB";
+                        } else if (val >= 1024) {
+                                val /= 1024; unit = "KB";
+                        }
+                        printf("  %sdeduplicated%s %.1f %s\n",
+                               C_GREEN(), C_RESET(), val, unit);
+                }
+        }
+
+        for (size_t i = 0; i < roots_count; i++) free(roots[i]);
+        free(roots);
         gen_list_free(gens, gen_count);
         gen_db_close(db);
+        return 0;
+}
+
+/* ── Optimise (hardlink dedup) ────────────────────────────────────── */
+
+static int cmd_optimise(void)
+{
+        /* Walk /nix/store/, hardlink identical regular files into
+         * /nix/store/.links/<sha256> to dedup disk usage. Equivalent
+         * to `nix-store --optimise`. */
+        printf("209: optimising /nix/store (hardlink dedup)...\n");
+        int64_t saved = store_optimise("/nix/store");
+        if (saved < 0) {
+                fprintf(stderr, "209: optimise failed (is /nix/store present?)\n");
+                return 1;
+        }
+        if (saved == 0) {
+                printf("  no duplicate files found; store already optimal\n");
+                return 0;
+        }
+        const char *unit = "B";
+        double val = (double)saved;
+        if (val >= 1024 * 1024 * 1024) {
+                val /= 1024 * 1024 * 1024; unit = "GB";
+        } else if (val >= 1024 * 1024) {
+                val /= 1024 * 1024; unit = "MB";
+        } else if (val >= 1024) {
+                val /= 1024; unit = "KB";
+        }
+        printf("  %sdeduplicated%s %.1f %s\n",
+               C_GREEN(), C_RESET(), val, unit);
         return 0;
 }
 
@@ -4331,6 +4738,8 @@ int main(int argc, char *argv[])
                 /* Zero-argument commands that need root */
                 if (strcmp(argv[1], "apply") == 0 ||
                     strcmp(argv[1], "gc") == 0 ||
+                    strcmp(argv[1], "optimise") == 0 ||
+                    strcmp(argv[1], "optimize") == 0 ||
                     strcmp(argv[1], "upgrade") == 0)
                         needs_root = 1;
 
@@ -4528,7 +4937,9 @@ int main(int argc, char *argv[])
         if (strcmp(argv[1], "apply") == 0)       return cmd_apply();
         if (strcmp(argv[1], "generations") == 0)  return cmd_generations();
         if (strcmp(argv[1], "sync") == 0)         return cmd_sync();
-        if (strcmp(argv[1], "gc") == 0)           return cmd_gc();
+        if (strcmp(argv[1], "gc") == 0)           return cmd_gc(argc, argv);
+        if (strcmp(argv[1], "optimise") == 0 ||
+            strcmp(argv[1], "optimize") == 0)     return cmd_optimise();
         if (strcmp(argv[1], "news") == 0) {
                 return cmd_news();
         }

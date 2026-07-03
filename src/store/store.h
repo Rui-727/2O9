@@ -19,36 +19,47 @@
 #define TWO9_STORE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* A single file entry in a store path */
 typedef struct store_entry {
-	char *path;       /* relative path within the store (e.g. "bin/nvim") */
-	char *symlink;    /* if not NULL, this entry is a symlink to this target */
-	int is_dir;       /* 1 if directory entry */
-	int is_config;    /* 1 if file should go to /etc/ instead of ~/.local/ */
-	struct store_entry *next;
+        char *path;       /* relative path within the store (e.g. "bin/nvim") */
+        char *symlink;    /* if not NULL, this entry is a symlink to this target */
+        int is_dir;       /* 1 if directory entry */
+        int is_config;    /* 1 if file should go to /etc/ instead of ~/.local/ */
+        struct store_entry *next;
 } store_entry_t;
 
 /* A store path with its file manifest */
 typedef struct store_manifest {
-	char *store_path;   /* e.g. /nix/store/neovim-0.9.5 (no hash, just name-version) */
-	char *pkg_name;     /* e.g. neovim */
-	char *pkg_version;  /* e.g. 0.9.5 */
-	store_entry_t *entries;  /* linked list of files */
-	size_t entry_count;
+        char *store_path;   /* e.g. /nix/store/<base32-hash>-<name>-<version>
+                             * (Phase 2: content-addressed. Older installs
+                             * from Phase 0/1 may still use the legacy
+                             * /nix/store/<name>-<version> form for reads.) */
+        char *pkg_name;     /* e.g. neovim */
+        char *pkg_version;  /* e.g. 0.9.5 */
+        store_entry_t *entries;  /* linked list of files */
+        size_t entry_count;
 } store_manifest_t;
 
 /* Store backend selection */
 typedef enum {
-	STORE_BACKEND_NIX_STORE,  /* uses nix-store --add subprocess */
-	STORE_BACKEND_DIRECT,     /* extracts with tar directly */
+        STORE_BACKEND_NIX_STORE,  /* uses nix-store --add subprocess */
+        STORE_BACKEND_DIRECT,     /* extracts with tar directly */
 } store_backend_t;
 
 /* Result of adding a package to the store */
 typedef struct store_add_result {
-	int success;               /* 0 = ok, nonzero = error */
-	char *store_path;          /* set on success */
-	char *error_msg;           /* set on failure */
+        int success;               /* 0 = ok, nonzero = error */
+        char *store_path;          /* set on success */
+        char *error_msg;           /* set on failure */
+        /* Phase 2: NAR hash + size of the extracted tree. Populated by
+         * the DIRECT backend so the caller can register the path in the
+         * store DB without re-hashing. NULL/0 for the NIX_STORE backend
+         * (nix-store --add computes its own hash internally and doesn't
+         * expose it on stdout) and for the legacy test-mode fake path. */
+        char *nar_hash;            /* 64-char lowercase hex, or NULL */
+        int64_t nar_size;          /* NAR serialised byte count, or 0 */
 } store_add_result_t;
 
 /* Add a package to the store. Reads .PKGINFO to determine name+version. */

@@ -4,6 +4,20 @@ CFLAGS ?= -std=gnu11 -Wall -Wextra -O2 -g
 PREFIX ?= /usr
 VERSION := $(shell git describe --abbrev=4 --dirty 2>/dev/null || echo 0.0.1)
 
+# Phase 2: sqlite3 detection (store DB / refs graph for GC).
+HAVE_SQLITE3 := $(shell pkg-config --exists sqlite3 2>/dev/null && echo yes)
+ifeq ($(HAVE_SQLITE3),yes)
+SQLITE_DEFS   := -DHAVE_SQLITE3
+SQLITE_LIBS   := $(shell pkg-config --libs sqlite3)
+SQLITE_CFLAGS := $(shell pkg-config --cflags sqlite3)
+else
+$(warning libsqlite3 not found via pkg-config; building without store DB - GC falls back to set-based)
+SQLITE_DEFS   :=
+SQLITE_LIBS   :=
+SQLITE_CFLAGS :=
+endif
+
+
 # 2O9-specific defines - paths the CLI binary uses
 DEFS = -D_GNU_SOURCE \
        -DPACKAGE='"2O9"' \
@@ -15,11 +29,12 @@ DEFS = -D_GNU_SOURCE \
        -DPROFILE_DIR='"/nix/var/nix/profiles/per-user/2O9-system"' \
        -DUSER_PROFILE_DIR='"/.local/state/2O9/profile"' \
        -DBIN_DIR='"/.local/bin"' \
-       -DLIB_DIR='"/.local/lib"'
+       -DLIB_DIR='"/.local/lib"' \
+       $(SQLITE_DEFS)
 
 INCS = -Isrc -Isrc/store -Isrc/declarative -Isrc/aur -Isrc/trakker -Isrc/debag \
        -Ilib/2O9/nix -Ilib/2O9/alpm -Ilib/2O9/common \
-       $(LIB2O9_DEPS_INCS)
+       $(LIB2O9_DEPS_INCS) $(SQLITE_CFLAGS)
 LIBS = -lcurl -lseccomp
 
 # ── lib2O9 build (vendored pacman + own Nix evaluator + 2O9 init) ──
@@ -69,7 +84,10 @@ ALPM_OBJ = $(patsubst lib/2O9/%.c,lib/2O9/%.o,$(ALPM_SRC))
 
 # ── 209 binary source ──
 CLI_SRC   = src/cli/main.c
-STORE_SRC = src/store/store.c src/store/symlinks.c
+STORE_SRC = src/store/store.c src/store/symlinks.c src/store/nar.c src/store/optimise.c
+ifeq ($(HAVE_SQLITE3),yes)
+STORE_SRC += src/store/db.c
+endif
 DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/reconcile_execute.c src/declarative/activation.c src/declarative/gen_index.c
 AUR_SRC   = src/aur/aur_rpc.c src/aur/aur_build.c src/aur/aur_resolve.c \
             src/aur/chroot.c src/aur/pgp.c src/aur/config.c
@@ -82,7 +100,7 @@ OBJ = $(SRC:.c=.o)
 # Link libs: libcurl for AUR + libalpm downloads, libarchive for .pkg.tar.zst,
 # libgpgme + assuan + gpg-error for signature verification, openssl for crypto,
 # plus libarchive's transitive deps (zlib, lzma, bz2, lz4, zstd, nettle, gmp).
-LIB2O9_LIBS = -lcurl -larchive -lgpgme -lassuan -lgpg-error -lcrypto \
+LIB2O9_LIBS = -lcurl -larchive -lgpgme -lassuan -lgpg-error -lcrypto -lsqlite3 \
               -lz -llzma -lbz2 -llz4 -lzstd -lnettle -lhogweed -lgmp \
               -lxml2 -lacl -lm -lseccomp \
               $(LIB2O9_DEPS_LIBS)
