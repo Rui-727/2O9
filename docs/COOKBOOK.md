@@ -260,13 +260,14 @@ r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
 # chmod 0600 /etc/2O9/secret-key
 ```
 
-Add to `/etc/2O9/2O9.conf` on machine A:
+Add to `/etc/2O9/extra.nix` on machine A:
 
-```ini
-[substituters]
-URLs = https://cache.example.com
-SigningKey = /etc/2O9/secret-key
-KeyName = cache.example.com-1
+```nix
+substituters = {
+  URLs = [ "https://cache.example.com" ];
+  SigningKey = "/etc/2O9/secret-key";
+  KeyName = "cache.example.com-1";
+};
 ```
 
 Push a path and its closure:
@@ -275,13 +276,14 @@ Push a path and its closure:
 # 209 cache push /nix/store/0v4v8...-cpufetch-1.07-1
 ```
 
-On the subscriber (machine B), add to `/etc/2O9/2O9.conf`:
+On the subscriber (machine B), add to `/etc/2O9/extra.nix`:
 
-```ini
-[substituters]
-URLs = https://cache.example.com
-PublicKey = r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
-AllowUnsigned = no
+```nix
+substituters = {
+  URLs = [ "https://cache.example.com" ];
+  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
+  AllowUnsigned = false;
+};
 ```
 
 Now `209 -S cpufetch` on machine B fetches the NAR from

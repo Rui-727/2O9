@@ -217,10 +217,11 @@ from the store are symlinked there. Libraries go to `~/.local/lib/`.
 Config files stay at their real paths: `/etc/` is `/etc/`, never
 `~/.local/etc/`.
 
-There is also an optional INI file at `~/.config/2O9/2O9.conf` for
+There is also an optional Nix file at `~/.config/2O9/extra.nix` for
 stuff that doesn't belong in the declarative config: substituter URLs,
-signing keys, AUR build flags. See [`docs/CONFIG.md`](./docs/CONFIG.md)
-for the full schema.
+signing keys, AUR build flags. Per locked decision #7 in DESIGN.md
+("One declarative config format: Nix"), there is no INI file. See
+[`docs/CONFIG.md`](./docs/CONFIG.md) for the full schema.
 
 Services are managed with `systemctl enable`/`disable`. There is no
 2O9 service manager. After `209 apply` changes which systemd units are
@@ -345,13 +346,14 @@ SHA-256s every regular file, and hardlinks identical files into
 locale file cost 50 MB on disk instead of 100 MB.
 
 And **binary cache substitution**. Configure one or more cache URLs in
-`~/.config/2O9/2O9.conf`:
+`~/.config/2O9/extra.nix`:
 
-```
-[substituters]
-URLs = https://cache.example.com
-PublicKey = <from 209 keygen>
-AllowUnsigned = no
+```nix
+substituters = {
+  URLs = [ "https://cache.example.com" ];
+  PublicKey = "<from 209 keygen>";
+  AllowUnsigned = false;
+};
 ```
 
 On install, 2O9 first checks each cache for `<hash>.narinfo`. If found
@@ -367,7 +369,7 @@ its closure to all configured caches.
 - [Use cases](./docs/USE_CASES.md): real-world scenarios
 - [Migration guide](./docs/MIGRATION.md): from pacman, paru, Nix, NixOS
 - [Manpage](./docs/MANPAGE.md): command reference
-- [Config reference](./docs/CONFIG.md): `2O9.nix` and `2O9.conf` schema
+- [Config reference](./docs/CONFIG.md): `2O9.nix` and `extra.nix` schema
 - [Design document](./DESIGN.md): full architecture
 
 ## Status
@@ -395,7 +397,7 @@ What works and what's left.
 - **Phase 2 (AUR helper): DONE.** AUR RPC, PKGBUILD clone, review,
   recursive dep resolution, makepkg. Chroot builds via `mkarchroot` +
   `arch-nspawn` + `makechrootpkg` (on by default). PGP key auto-import
-  for `validpgpkeys`. MFlags pass-through from `2O9.conf`.
+  for `validpgpkeys`. MFlags pass-through from `extra.nix`.
 
 - **Phase 3 (Declarative engine): DONE.** The Nix evaluator handles
   everything `2O9.nix` needs: attrsets, lists, strings, let, if/else,

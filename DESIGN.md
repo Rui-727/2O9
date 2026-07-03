@@ -64,8 +64,9 @@ These were settled up front and constrain the design:
 7. **One declarative config format: Nix.** Everything that says what your
    system should look like lives in `2O9.nix`. No `config.toml`, no
    `pacman.conf`, no `paru.conf`. One file, one format, one source of truth.
-   (There is also a small INI file `2O9.conf` for imperative side config:
-   substituter URLs, signing keys, AUR build flags. See `docs/CONFIG.md`.)
+   (There is also a small Nix file `extra.nix` for imperative side config:
+   substituter URLs, signing keys, AUR build flags. Both files are Nix,
+   evaluated by the same C Nix evaluator. See `docs/CONFIG.md`.)
 8. **Own C Nix evaluator.** The Nix expression evaluator is written from
    scratch in C as part of lib2O9. No vendored C++ nix source. The evaluator
    supports the function form (`{ config, pkgs, ... }: { ... }`) with
@@ -291,8 +292,8 @@ files visible at their conventional paths.
   via `209 gc --optimise`.
 
 - **Binary cache substitution.** Configure one or more cache URLs in
-  `2O9.conf` under `[substituters]`. On install, 2O9 first checks each
-  cache for `<hash>.narinfo`. If found and the Ed25519 signature
+  `extra.nix` under `substituters.URLs`. On install, 2O9 first checks
+  each cache for `<hash>.narinfo`. If found and the Ed25519 signature
   verifies, it downloads the NAR, decompresses it, and streams it into
   the store path. Falls through to the Arch mirror only if no cache has
   it. `209 cache push <path>` uploads a path and its closure to all
@@ -329,7 +330,7 @@ that actually works via the environment:
 | chroot builds | `mkarchroot` + `arch-nspawn` + `makechrootpkg` |
 | PGP key import | `gpg --recv-keys` for `validpgpkeys` |
 | clean-after, news, mflags | direct ports from `paru.conf` semantics |
-| config | `2O9.nix` (declarative) + `2O9.conf` (imperative) |
+| config | `2O9.nix` (declarative) + `extra.nix` (imperative), both Nix |
 
 The resulting `.pkg.tar.*` is handed to the **store adapter** (not `pacman -U`),
 so AUR packages land in the store alongside binary ones.

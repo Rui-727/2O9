@@ -1,9 +1,12 @@
 # Configuration Reference
 
-2O9 has two config files. `2O9.nix` is the declarative config (Nix
-syntax, says what your system should look like). `2O9.conf` is the
-imperative side config (INI syntax, holds substituters, signing keys,
-and AUR build flags).
+2O9 has two config files, both Nix. `2O9.nix` is the declarative
+config (Nix syntax, says what your system should look like).
+`extra.nix` is the imperative side config (also Nix, holds
+substituters, signing keys, and AUR build flags).
+
+Per locked decision #7 in DESIGN.md: "One declarative config format:
+Nix." There is no INI file anymore.
 
 # Part 1: `2O9.nix`
 
@@ -267,71 +270,100 @@ Run `209 apply` to make the system match this file.
 
 ---
 
-# Part 2: `2O9.conf`
+# Part 2: `extra.nix`
 
-An optional INI file for stuff that doesn't belong in the declarative
-config. Lives at `~/.config/2O9/2O9.conf` (or `/etc/2O9/2O9.conf` for
-system-wide).
+An optional Nix file for stuff that doesn't belong in the declarative
+config. Lives at `~/.config/2O9/extra.nix` (or `/etc/2O9/extra.nix`
+for system-wide).
 
-Format: standard INI. `[section]` headers, `key = value` lines, `#` and
-`;` for comments. List values (`MFlags`, `GitFlags`, `URLs`) are
-whitespace-separated.
+Format: a Nix attrset (or `{ config, ... }: { ... }` function form, but
+plain attrset is recommended since extra.nix has no need for the
+`config` self-reference that 2O9.nix uses). The evaluator handles both.
+List values (`MFlags`, `GitFlags`, `URLs`) are Nix lists of strings.
+
+```nix
+{
+  bin = {
+    Makepkg = "makepkg";
+    Git = "git";
+    Gpg = "gpg";
+    Sudo = "sudo";
+    MFlags = [ "--skippgpcheck" "--nocheck" "-feA" ];
+    GitFlags = [ "--depth" "1" ];
+  };
+
+  chroot = {
+    Enabled = true;
+    Dir = "/var/lib/2O9/chroot";
+  };
+
+  substituters = {
+    URLs = [ "https://cache.example.com" ];
+    PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
+    SigningKey = "/etc/2O9/secret-key";
+    KeyName = "cache.example.com-1";
+    AllowUnsigned = false;
+  };
+}
+```
 
 ## Sections
 
-### `[bin]`
+### `bin`
 
 Customize which binaries 2O9 invokes and what flags they get.
 
-```ini
-[bin]
-Makepkg = makepkg
-Git = git
-Gpg = gpg
-Sudo = sudo
-Pager = less
-MFlags = --skippgpcheck --nocheck -feA
-GitFlags = --depth 1
+```nix
+bin = {
+  Makepkg = "makepkg";
+  Git = "git";
+  Gpg = "gpg";
+  Sudo = "sudo";
+  MFlags = [ "--skippgpcheck" "--nocheck" "-feA" ];
+  GitFlags = [ "--depth" "1" ];
+};
 ```
 
-`MFlags` replaces the default makepkg flags entirely. If you set it,
-include `-feA` (or whatever you want) yourself. This matches paru's
-MFlags semantics.
+`bin.MFlags` replaces the default makepkg flags entirely. If you set
+it, include `"-feA"` (or whatever you want) yourself. This matches
+paru's MFlags semantics.
 
-### `[chroot]`
+### `chroot`
 
 AUR build isolation. On by default.
 
-```ini
-[chroot]
-Enabled = yes
-Dir = /var/lib/2O9/chroot
+```nix
+chroot = {
+  Enabled = true;
+  Dir = "/var/lib/2O9/chroot";
+};
 ```
 
 When enabled, AUR builds run inside an `arch-nspawn` chroot via
 `makechrootpkg`. Requires the `devtools` package. If `mkarchroot` or
 `arch-nspawn` is not on `$PATH`, the build fails with a clear error.
 
-Set `Enabled = no` to run makepkg in your user environment. Not
+Set `Enabled = false` to run makepkg in your user environment. Not
 recommended for untrusted PKGBUILDs.
 
-### `[substituters]`
+### `substituters`
 
 Binary cache configuration. Lets 2O9 pull packages from caches other
 than the Arch mirror, and push to them.
 
-```ini
-[substituters]
-URLs = https://cache.example.com s3://my-bucket
-PublicKey = r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
-SigningKey = /etc/2O9/secret-key
-KeyName = cache.example.com-1
-AllowUnsigned = no
+```nix
+substituters = {
+  URLs = [ "https://cache.example.com" "s3://my-bucket" ];
+  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
+  SigningKey = "/etc/2O9/secret-key";
+  KeyName = "cache.example.com-1";
+  AllowUnsigned = false;
+};
 ```
 
-`URLs` is a whitespace-separated list. Each URL is consulted in order
-on install. `http://` and `https://` URLs use libcurl. `s3://` URLs
-shell out to the `aws` CLI.
+`URLs` is a Nix list of strings. Each URL is consulted in order on
+install. `http://` and `https://` URLs use libcurl. `s3://` URLs shell
+out to the `aws` CLI.
 
 `PublicKey` is the base64 Ed25519 public key to verify narinfo
 signatures against. Get it from `209 keygen` on the publishing machine.
@@ -343,9 +375,9 @@ be present on publishing machines, not subscribers.
 `KeyName` is the human-readable name embedded in the `Sig:` line of
 each narinfo. Subscribers don't need this.
 
-`AllowUnsigned = yes` accepts narinfos with no signature or with a
+`AllowUnsigned = true` accepts narinfos with no signature or with a
 signature from an unknown key. Use only for trusted local caches.
-Default is `no`.
+Default is `false`.
 
 ## Worked example: two machines sharing a cache
 
@@ -354,18 +386,19 @@ On machine A (the publisher):
 ```sh
 209 keygen
 # Output:
-#   public key (add to 2O9.conf PublicKey =): r634rsy7nIo/...
+#   public key (add to extra.nix substituters.PublicKey): r634rsy7nIo/...
 #   cache.example.com-1:r634rsy7nIo/...:TakyhFMCwVcOjdPUJurMrgEQeyuuGukyL+/wWYoCFQ8=
 ```
 
 Save the second line to `/etc/2O9/secret-key` (mode 0600). Add to
-`/etc/2O9/2O9.conf`:
+`/etc/2O9/extra.nix`:
 
-```ini
-[substituters]
-URLs = https://cache.example.com
-SigningKey = /etc/2O9/secret-key
-KeyName = cache.example.com-1
+```nix
+substituters = {
+  URLs = [ "https://cache.example.com" ];
+  SigningKey = "/etc/2O9/secret-key";
+  KeyName = "cache.example.com-1";
+};
 ```
 
 Install a package and push it:
@@ -375,16 +408,17 @@ Install a package and push it:
 209 cache push /nix/store/<hash>-neovim-0.10.0
 ```
 
-On machine B (the subscriber), add to `/etc/2O9/2O9.conf`:
+On machine B (the subscriber), add to `/etc/2O9/extra.nix`:
 
-```ini
-[substituters]
-URLs = https://cache.example.com
-PublicKey = r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
-AllowUnsigned = no
+```nix
+substituters = {
+  URLs = [ "https://cache.example.com" ];
+  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
+  AllowUnsigned = false;
+};
 ```
 
 Now `209 -S neovim` on machine B will hit the cache first. If the
-cache has it and the signature verifies, the package is downloaded as a
-NAR and streamed into `/nix/store/` without ever touching the Arch
+cache has it and the signature verifies, the package is downloaded as
+a NAR and streamed into `/nix/store/` without ever touching the Arch
 mirror.

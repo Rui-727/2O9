@@ -348,20 +348,21 @@ On machine A (the publisher), generate an Ed25519 keypair:
 
 ```sh
 $ 209 keygen
-public key (add to 2O9.conf PublicKey = on subscribers):
+public key (add to extra.nix substituters.PublicKey on subscribers):
   r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
 
 cache.example.com-1:r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=:TakyhFMCwVcOjdPUJurMrgEQeyuuGukyL+/wWYoCFQ8=
 ```
 
 Save the second line (the `name:public:secret` triple) to a file with
-mode 0600. Add to `/etc/2O9/2O9.conf`:
+mode 0600. Add to `/etc/2O9/extra.nix`:
 
-```ini
-[substituters]
-URLs = https://cache.example.com
-SigningKey = /etc/2O9/secret-key
-KeyName = cache.example.com-1
+```nix
+substituters = {
+  URLs = [ "https://cache.example.com" ];
+  SigningKey = "/etc/2O9/secret-key";
+  KeyName = "cache.example.com-1";
+};
 ```
 
 Push a path and its closure:
@@ -376,13 +377,14 @@ Push a path and its closure:
 ```
 
 On machine B (the subscriber), add the public key to its
-`/etc/2O9/2O9.conf`:
+`/etc/2O9/extra.nix`:
 
-```ini
-[substituters]
-URLs = https://cache.example.com
-PublicKey = r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
-AllowUnsigned = no
+```nix
+substituters = {
+  URLs = [ "https://cache.example.com" ];
+  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
+  AllowUnsigned = false;
+};
 ```
 
 Now when machine B runs `209 -S cpufetch`, 2O9 first asks

@@ -44,18 +44,18 @@ the same 200 MB package update from the mirror is wasteful, and you want
 guaranteed byte-identical binaries across the fleet.
 
 Pick one machine as the publisher. It has the build tools, the signing
-key, and a public HTTPS endpoint. Configure `/etc/2O9/2O9.conf` on it
-with `[substituters] URLs = https://cache.example.com` plus the signing
-key. Run `209 sync && sudo 209 apply` there first, then `209 cache push
-<nix-store-path>` for the closure of the apply. Or, run a cron job that
-pushes the current generation's closure every night.
+key, and a public HTTPS endpoint. Configure `/etc/2O9/extra.nix` on it
+with `substituters.URLs = [ "https://cache.example.com" ];` plus the
+signing key. Run `209 sync && sudo 209 apply` there first, then
+`209 cache push <nix-store-path>` for the closure of the apply. Or, run
+a cron job that pushes the current generation's closure every night.
 
-On every other machine, configure `[substituters] URLs =
-https://cache.example.com` with the publisher's public key. The next
-`209 -Su` on those machines hits the cache first. If the path is there
-and the Ed25519 signature verifies, the NAR is downloaded and streamed
-into the store. The Arch mirror is only consulted for paths the cache
-does not have.
+On every other machine, configure
+`substituters.URLs = [ "https://cache.example.com" ];` with the
+publisher's public key. The next `209 -Su` on those machines hits the
+cache first. If the path is there and the Ed25519 signature verifies,
+the NAR is downloaded and streamed into the store. The Arch mirror is
+only consulted for paths the cache does not have.
 
 Day to day, the sysadmin edits `2O9.nix` on the publisher, applies it,
 pushes the new closure to the cache, then runs `209 -Su` on the

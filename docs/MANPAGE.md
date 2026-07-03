@@ -162,7 +162,7 @@ Each maps to the equivalent 2O9 command.
 
 `209 keygen`
 : Generate a new Ed25519 keypair for signing narinfos. Prints the
-  public key (to put in `2O9.conf` on subscriber machines) and a
+  public key (to put in `extra.nix` on subscriber machines) and a
   `KeyName:PublicKey:SecretKey` triple (to put on the publishing
   machine).
 
@@ -206,24 +206,25 @@ Both are evaluated and merged per `DESIGN.md` section 7: global wins on
 conflict, packages concatenate. See [`docs/CONFIG.md`](./CONFIG.md) for
 the full schema reference.
 
-`2O9.conf` is the imperative side config. INI syntax. Holds stuff that
-doesn't belong in the declarative config: substituter URLs, signing
-keys, AUR build flags, chroot settings. Lives at `~/.config/2O9/2O9.conf`
-(or `/etc/2O9/2O9.conf` for system-wide). See [`docs/CONFIG.md`](./CONFIG.md)
-for the schema.
+`extra.nix` is the imperative side config. Also Nix syntax (per
+locked decision #7: "One declarative config format: Nix"). Holds
+stuff that doesn't belong in the declarative config: substituter URLs,
+signing keys, AUR build flags, chroot settings. Lives at
+`~/.config/2O9/extra.nix` (or `/etc/2O9/extra.nix` for system-wide).
+See [`docs/CONFIG.md`](./CONFIG.md) for the schema.
 
 ## FILES
 
 `/etc/2O9/2O9.nix`
 : System-wide declarative config.
 
-`/etc/2O9/2O9.conf`
+`/etc/2O9/extra.nix`
 : System-wide imperative side config (substituters, signing keys).
 
 `~/.config/2O9/home.nix`
 : Per-user declarative config (overlaid on the system config).
 
-`~/.config/2O9/2O9.conf`
+`~/.config/2O9/extra.nix`
 : Per-user imperative side config.
 
 `/var/lib/2O9/`
@@ -285,7 +286,7 @@ for the schema.
 
 - [`README.md`](../README.md) - overview and quick start
 - [`DESIGN.md`](../DESIGN.md) - full architecture
-- [`docs/CONFIG.md`](./CONFIG.md) - `2O9.nix` and `2O9.conf` schema reference
+- [`docs/CONFIG.md`](./CONFIG.md) - `2O9.nix` and `extra.nix` schema reference
 - [`lib/2O9/nix/README.md`](../lib/2O9/nix/README.md) - Nix evaluator
 - [`lib/2O9/alpm/MODIFICATIONS.md`](../lib/2O9/alpm/MODIFICATIONS.md) - libalpm mods
 

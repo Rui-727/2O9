@@ -48,7 +48,7 @@ import` for a local `.pkg.tar.zst`), and the binary cache protocol is
 | `pacman -Sc` | `209 gc` |
 | `pacman -Scc` | `209 gc` (closures of pinned gens still kept) |
 | `pacman -U <file>` | `209 import <file>` |
-| `pacman.conf` | `2O9.nix` + `2O9.conf` |
+| `pacman.conf` | `2O9.nix` + `extra.nix` |
 | `/var/lib/pacman/local/` | `~/.local/state/2O9/` (or `/var/lib/2O9/`) |
 | file paths `/usr/bin/foo` | `/nix/store/<hash>-foo-<ver>/bin/foo` (symlinked from `~/.local/bin/foo`) |
 
@@ -58,8 +58,8 @@ You use paru as your AUR helper. 2O9's AUR workflow is a C port of
 paru's, so the pipeline is the same: AUR RPC for search and info, git
 clone of the PKGBUILD repo, PKGBUILD review diff, recursive dependency
 resolution, makepkg, store add. The big differences are: chroot builds
-are on by default, there is no `paru.conf` (use `2O9.conf`), MFlags live
-in `2O9.conf`, and PGP key handling is automatic.
+are on by default, there is no `paru.conf` (use `extra.nix`), MFlags live
+in `extra.nix`, and PGP key handling is automatic.
 
 Under paru, the default is to run makepkg in your user environment. You
 can opt into chroot builds via `paru.conf`, but it is off by default and
@@ -68,8 +68,8 @@ you have to install `devtools` and configure the chroot path. Under
 `/var/lib/2O9/chroot` and is created automatically via `mkarchroot` on
 the first AUR build. If `devtools` is not installed, 2O9 fails with a
 clear "install devtools" message. To disable chroot for one build, pass
-`--no-chroot`. To disable globally, set `[chroot] Enabled = no` in
-`2O9.conf`.
+`--no-chroot`. To disable globally, set `chroot.Enabled = false` in
+`extra.nix`.
 
 What is the same: AUR search, AUR info, PKGBUILD review diff, recursive
 dep resolution, `makepkg` invocation, `validpgpkeys` handling, MFlags
@@ -88,17 +88,18 @@ substitution uniformly.
 | `paru -Si <pkg>` | `209 <pkg> aur info` |
 | `paru -G <pkg>` | (no equivalent; clone happens automatically during build) |
 | `paru -Gp <pkg>` | `209 <pkg> aur review` |
-| `paru.conf` `[bin] MFlags` | `2O9.conf` `[bin] MFlags` |
-| `paru.conf` `[chroot] Enabled` | `2O9.conf` `[chroot] Enabled` |
-| `paru --noconfirm` | add `--noconfirm` to `MFlags` in `2O9.conf` |
+| `paru.conf` `[bin] MFlags` | `extra.nix` `bin.MFlags` |
+| `paru.conf` `[chroot] Enabled` | `extra.nix` `chroot.Enabled` |
+| `paru --noconfirm` | add `"--noconfirm"` to `bin.MFlags` in `extra.nix` |
 | `paru --skipreview` | (always runs review; if you want to skip, pipe to `/dev/null`) |
 | review diff against last build | same, automatic during `209 apply` |
 
 The gotcha: 2O9's MFlags replace the default `-feA` entirely. If you
-set `MFlags = --noconfirm`, you lose `-feA` and makepkg will prompt for
-everything else. Include `-feA` (or whatever flags you want) explicitly
-in `MFlags`. This matches paru's MFlags semantics but surprises users
-coming from yay, where MFlags are appended.
+set `bin.MFlags = [ "--noconfirm" ];`, you lose `-feA` and makepkg
+will prompt for everything else. Include `"-feA"` (or whatever flags
+you want) explicitly in `bin.MFlags`. This matches paru's MFlags
+semantics but surprises users coming from yay, where MFlags are
+appended.
 
 ## From Nix
 
