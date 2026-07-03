@@ -66,7 +66,23 @@ static const char *C_DIM(void)    { return want_color() ? "\033[2m"  : ""; }
  * Writes to the provided buffer, returns a pointer to it. */
 static const char *get_db_root(char *buf, size_t bufsize)
 {
+        /* When running as root via sudo, resolve the original user's home
+         * via SUDO_USER so we use the same DB that the user's 209 sync
+         * and 209 apply wrote to. */
         if (getuid() == 0) {
+                const char *sudo_user = getenv("SUDO_USER");
+                if (sudo_user && sudo_user[0]) {
+                        struct passwd *pw = getpwnam(sudo_user);
+                        if (pw && pw->pw_dir) {
+                                snprintf(buf, bufsize, "%s/.local/state/2O9", pw->pw_dir);
+                                return buf;
+                        }
+                }
+                const char *env_home = getenv("HOME");
+                if (env_home && strcmp(env_home, "/root") != 0) {
+                        snprintf(buf, bufsize, "%s/.local/state/2O9", env_home);
+                        return buf;
+                }
                 strncpy(buf, "/var/lib/2O9", bufsize - 1);
                 buf[bufsize - 1] = '\0';
         } else {
