@@ -1,5 +1,7 @@
 # 2O9
 
+Its either 2O9 or Pacman. your choice! its not my rights to judge people.
+
 2O9 is a package manager for Arch Linux that puts files in `/nix/store/`
 instead of `/`. The binary is `209`. It takes three tools that normally
 don't talk to each other (pacman, paru, and Nix) and makes them one:
