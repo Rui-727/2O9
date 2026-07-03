@@ -38,6 +38,110 @@
  * We include it from there to avoid duplicating JSON parsing logic. */
 #include "cJSON.h"
 
+/* ── SigLevel string parsing ───────────────────────────────────────
+ * Mirrors pacman's parseSigLevel() (lib/libalpm/handle.c): tokens are
+ * whitespace-separated, a leading '~' means "unset these bits", and
+ * the recognised names match pacman.conf(5):
+ *   Package PackageOptional PackageRequired PackageMarginalOk PackageTrustUnknown
+ *   Database DatabaseOptional DatabaseRequired DatabaseMarginalOk DatabaseTrustUnknown
+ *   Required Optional MarginalOk TrustUnknown Never Default
+ * Note: the ALPM_SIG_*_TRUST_UNKNOWN enum constant in alpm.h is actually
+ * named ALPM_SIG_*_UNKNOWN_OK; the "TrustUnknown" config string maps to it. */
+
+static int siglevel_apply_token(int *level, const char *tok, int unset)
+{
+    if (strcmp(tok, "Package") == 0) {
+        if (unset) *level &= ~ALPM_SIG_PACKAGE;
+        else *level |= ALPM_SIG_PACKAGE;
+    } else if (strcmp(tok, "PackageOptional") == 0) {
+        if (unset) *level &= ~(ALPM_SIG_PACKAGE | ALPM_SIG_PACKAGE_OPTIONAL);
+        else *level |= ALPM_SIG_PACKAGE | ALPM_SIG_PACKAGE_OPTIONAL;
+    } else if (strcmp(tok, "PackageRequired") == 0) {
+        if (unset) *level &= ~ALPM_SIG_PACKAGE;
+        else { *level |= ALPM_SIG_PACKAGE; *level &= ~ALPM_SIG_PACKAGE_OPTIONAL; }
+    } else if (strcmp(tok, "PackageMarginalOk") == 0) {
+        if (unset) *level &= ~ALPM_SIG_PACKAGE_MARGINAL_OK;
+        else *level |= ALPM_SIG_PACKAGE_MARGINAL_OK;
+    } else if (strcmp(tok, "PackageTrustUnknown") == 0) {
+        if (unset) *level &= ~ALPM_SIG_PACKAGE_UNKNOWN_OK;
+        else *level |= ALPM_SIG_PACKAGE_UNKNOWN_OK;
+    } else if (strcmp(tok, "Database") == 0) {
+        if (unset) *level &= ~ALPM_SIG_DATABASE;
+        else *level |= ALPM_SIG_DATABASE;
+    } else if (strcmp(tok, "DatabaseOptional") == 0) {
+        if (unset) *level &= ~(ALPM_SIG_DATABASE | ALPM_SIG_DATABASE_OPTIONAL);
+        else *level |= ALPM_SIG_DATABASE | ALPM_SIG_DATABASE_OPTIONAL;
+    } else if (strcmp(tok, "DatabaseRequired") == 0) {
+        if (unset) *level &= ~ALPM_SIG_DATABASE;
+        else { *level |= ALPM_SIG_DATABASE; *level &= ~ALPM_SIG_DATABASE_OPTIONAL; }
+    } else if (strcmp(tok, "DatabaseMarginalOk") == 0) {
+        if (unset) *level &= ~ALPM_SIG_DATABASE_MARGINAL_OK;
+        else *level |= ALPM_SIG_DATABASE_MARGINAL_OK;
+    } else if (strcmp(tok, "DatabaseTrustUnknown") == 0) {
+        if (unset) *level &= ~ALPM_SIG_DATABASE_UNKNOWN_OK;
+        else *level |= ALPM_SIG_DATABASE_UNKNOWN_OK;
+    } else if (strcmp(tok, "Required") == 0) {
+        if (unset) *level &= ~(ALPM_SIG_PACKAGE | ALPM_SIG_DATABASE);
+        else {
+            *level |= ALPM_SIG_PACKAGE | ALPM_SIG_DATABASE;
+            *level &= ~(ALPM_SIG_PACKAGE_OPTIONAL | ALPM_SIG_DATABASE_OPTIONAL);
+        }
+    } else if (strcmp(tok, "Optional") == 0) {
+        if (unset) *level &= ~(ALPM_SIG_PACKAGE | ALPM_SIG_PACKAGE_OPTIONAL
+                              | ALPM_SIG_DATABASE | ALPM_SIG_DATABASE_OPTIONAL);
+        else {
+            *level |= ALPM_SIG_PACKAGE | ALPM_SIG_PACKAGE_OPTIONAL
+                   |  ALPM_SIG_DATABASE | ALPM_SIG_DATABASE_OPTIONAL;
+        }
+    } else if (strcmp(tok, "MarginalOk") == 0) {
+        if (unset) *level &= ~(ALPM_SIG_PACKAGE_MARGINAL_OK | ALPM_SIG_DATABASE_MARGINAL_OK);
+        else *level |= ALPM_SIG_PACKAGE_MARGINAL_OK | ALPM_SIG_DATABASE_MARGINAL_OK;
+    } else if (strcmp(tok, "TrustUnknown") == 0) {
+        if (unset) *level &= ~(ALPM_SIG_PACKAGE_UNKNOWN_OK | ALPM_SIG_DATABASE_UNKNOWN_OK);
+        else *level |= ALPM_SIG_PACKAGE_UNKNOWN_OK | ALPM_SIG_DATABASE_UNKNOWN_OK;
+    } else if (strcmp(tok, "Never") == 0) {
+        *level = 0;
+    } else if (strcmp(tok, "Default") == 0) {
+        *level |= ALPM_SIG_USE_DEFAULT;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+/* Parse a SigLevel config string (whitespace-separated tokens, ~ = unset).
+ * Returns 0 on success (out_level always written, 0 if string empty),
+ * -1 on unknown token (out_level left untouched). */
+static int parse_siglevel(const char *str, int *out_level)
+{
+    int level = 0;
+    if (!str || !*str) {
+        *out_level = 0;
+        return 0;
+    }
+
+    char *copy = strdup(str);
+    if (!copy) return -1;
+
+    char *save = NULL;
+    char *tok = strtok_r(copy, " \t", &save);
+    while (tok) {
+        int unset = 0;
+        char *actual = tok;
+        if (*actual == '~') { unset = 1; actual++; }
+        if (siglevel_apply_token(&level, actual, unset) != 0) {
+            fprintf(stderr, "2O9: unknown SigLevel token '%s'\n", actual);
+            free(copy);
+            return -1;
+        }
+        tok = strtok_r(NULL, " \t", &save);
+    }
+
+    free(copy);
+    *out_level = level;
+    return 0;
+}
+
 /* ── Public: build a configured alpm_handle_t from a 2O9 manifest ── */
 
 alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
@@ -121,6 +225,9 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
     /* Walk pacman.options and pacman.repos */
     cJSON *pacman = cJSON_GetObjectItem(root, "pacman");
     if (pacman) {
+        int siglevel = 0;  /* 0 = no signature checking (legacy default) */
+        int have_siglevel = 0;
+
         cJSON *options = cJSON_GetObjectItem(pacman, "options");
         if (options) {
             cJSON *pd = cJSON_GetObjectItem(options, "ParallelDownloads");
@@ -128,11 +235,26 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
                 handle->parallel_downloads = (unsigned int)pd->valueint;
             }
 
-            /* SigLevel - parsing the SigLevel string is non-trivial
-             * (alpm_option_set_siglevel needs a mask). Logged for now;
-             * full impl lands when lib2O9 is actually built and linked. */
+            /* SigLevel: parse the pacman.conf-style string into a bitmask
+             * (Package/Database/Required/Optional/MarginalOk/TrustUnknown/
+             *  Never/Default, leading '~' to unset). Applied to the handle's
+             *  default + local/remote file siglevels, AND passed as the level
+             *  arg to alpm_register_syncdb so database signatures are checked
+             *  by alpm_db_update() automatically. */
             cJSON *sl = cJSON_GetObjectItem(options, "SigLevel");
-            (void)sl;
+            if (cJSON_IsString(sl) && sl->valuestring &&
+                parse_siglevel(sl->valuestring, &siglevel) == 0) {
+                have_siglevel = 1;
+                if (siglevel != 0) {
+                    alpm_option_set_default_siglevel(handle, siglevel);
+                    /* Mirror pacman: the local-file and remote-file levels
+                     * inherit from the default unless overridden separately.
+                     * 2O9 doesn't expose LocalFileSigLevel / RemoteFileSigLevel
+                     * yet, so we set both to the same value. */
+                    alpm_option_set_local_file_siglevel(handle, siglevel);
+                    alpm_option_set_remote_file_siglevel(handle, siglevel);
+                }
+            }
 
             /* IgnorePkg list */
             cJSON *ignore = cJSON_GetObjectItem(options, "IgnorePkg");
@@ -146,7 +268,11 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
             }
         }
 
-        /* Register sync DBs from pacman.repos */
+        /* Register sync DBs from pacman.repos.
+         * Per alpm_register_syncdb(3): "what level of signature checking to
+         * perform on the database". Passing the parsed SigLevel here makes
+         * alpm_db_update() verify .db.sig files automatically when the level
+         * includes ALPM_SIG_DATABASE. */
         cJSON *repos = cJSON_GetObjectItem(pacman, "repos");
         if (cJSON_IsObject(repos)) {
             cJSON *repo;
@@ -155,7 +281,8 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
                 cJSON *server = cJSON_GetObjectItem(repo, "server");
                 if (!cJSON_IsString(server)) continue;
 
-                alpm_db_t *db = alpm_register_syncdb(handle, repo_name, 0);
+                int db_level = have_siglevel ? siglevel : 0;
+                alpm_db_t *db = alpm_register_syncdb(handle, repo_name, db_level);
                 if (db) {
                     alpm_db_add_server(db, server->valuestring);
                 }
