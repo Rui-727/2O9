@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "alpm.h"
 #include "handle.h"
@@ -41,16 +42,44 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
 {
     if (!manifest_json) return NULL;
 
+    /* Determine DB path: use user's ~/.local/state/2O9 if HOME is set,
+     * otherwise fall back to /var/lib/2O9 */
+    char dbpath[512];
+    const char *home = getenv("HOME");
+    if (home)
+        snprintf(dbpath, sizeof(dbpath), "%s/.local/state/2O9", home);
+    else
+        snprintf(dbpath, sizeof(dbpath), "/var/lib/2O9");
+
+    /* Create the DB directory if it doesn't exist */
+    /* Walk the path creating each component */
+    char tmp[512];
+    strncpy(tmp, dbpath, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+
     alpm_errno_t err = 0;
-    alpm_handle_t *handle = alpm_initialize("/", "/var/lib/2O9", &err);
+    alpm_handle_t *handle = alpm_initialize("/", dbpath, &err);
     if (!handle) {
-        fprintf(stderr, "2O9: alpm_initialize failed: %s\n",
-                alpm_strerror(err));
+        fprintf(stderr, "2O9: alpm_initialize failed (dbpath=%s): %s\n",
+                dbpath, alpm_strerror(err));
         return NULL;
     }
 
     /* Set cache dir */
-    alpm_list_t *cachedirs = alpm_list_add(NULL, strdup("/var/cache/2O9/pkg/"));
+    char cache_dir[512];
+    if (home)
+        snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/2O9/pkg", home);
+    else
+        snprintf(cache_dir, sizeof(cache_dir), "/var/cache/2O9/pkg");
+    alpm_list_t *cachedirs = alpm_list_add(NULL, strdup(cache_dir));
     alpm_option_set_cachedirs(handle, cachedirs);
 
     /* Set architectures */
