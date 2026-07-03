@@ -31,11 +31,15 @@
 #include "store/nar.h"
 #include "store/db.h"
 #include "store/optimise.h"
+#include "store/narinfo.h"
+#include "store/binary-cache.h"
+#include "store/signing.h"
 #include "declarative/gen.h"
 #include "store/symlinks.h"
 #include "aur/aur_rpc.h"
 #include "aur/build.h"
 #include "aur/resolver.h"
+#include "aur/config.h"
 #include "cJSON.h"
 #include "declarative/reconcile.h"
 #include "declarative/activation.h"
@@ -454,6 +458,10 @@ int cmd_install(const char *pkg_name);
 int cmd_install_only(const char *pkg_name, char **store_path_out, char **version_out);
 int cmd_remove(const char *pkg_name);
 
+/* Phase 3 forward declarations - defined later in this file. */
+static int try_substitute_pkg(const char *pkg_name, const char *pkg_version,
+                              char **store_path_out);
+
 int cmd_install_only(const char *pkg_name, char **store_path_out, char **version_out)
 {
         /* Just find, download, and extract the package to /nix/store/.
@@ -566,6 +574,27 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
                         return 1;
                 }
 
+                /* Phase 3: try substituters before hitting the mirror.
+                 * Substitution looks up a previously-recorded store path
+                 * for this pkg_name+version in the local store DB, then
+                 * fetches from configured caches. Falls through silently
+                 * to mirror download if not found or no substituters
+                 * configured. */
+                char *subst_path = NULL;
+                if (try_substitute_pkg(pkg_name, version, &subst_path) == 0
+                    && subst_path) {
+                        printf("  %ssubstituted%s %s\n",
+                               C_GREEN(), C_RESET(), subst_path);
+                        alpm_release(handle);
+                        result.success = 0;
+                        result.store_path = subst_path;
+                        result.error_msg = NULL;
+                        result.nar_hash = NULL;
+                        result.nar_size = 0;
+                        goto install_only_post_extract;
+                }
+                free(subst_path);
+
                 /* Download */
                 char url[PATH_MAX * 2];
                 char cache_path[PATH_MAX];
@@ -628,6 +657,7 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
                 }
         }
 
+install_only_post_extract:
         printf("  %sstore path:%s %s\n", C_DIM(), C_RESET(), result.store_path);
 
         /* Phase 2: register the freshly-extracted path in the store DB.
@@ -937,6 +967,33 @@ int cmd_install(const char *pkg_name)
                                        C_BOLD(), tname, C_RESET(),
                                        C_GREEN(), tver, C_RESET());
                         }
+
+                        /* Phase 3: try substituters before downloading.
+                         * If a substituter has this exact store path (looked
+                         * up by name+version in the local store DB), fetch
+                         * the NAR and skip the mirror download + sig
+                         * verification. Falls through silently on miss. */
+                        char *subst_path = NULL;
+                        if (try_substitute_pkg(tname, tver, &subst_path) == 0
+                            && subst_path) {
+                                printf("  %ssubstituted%s %s\n",
+                                       C_GREEN(), C_RESET(), subst_path);
+                                trans_target_t *t = trans_target_new(
+                                        tname, tver, subst_path, is_primary,
+                                        NULL, 0);
+                                free(subst_path);
+                                if (!t) { trans_failed = 1; break; }
+                                *targets_tail = t;
+                                targets_tail = &t->next;
+                                if (is_primary) {
+                                        primary_done = 1;
+                                        result.success = 0;
+                                        result.store_path = strdup(t->store_path);
+                                        result.error_msg = NULL;
+                                }
+                                continue;  /* next target */
+                        }
+                        free(subst_path);
 
                         /* Build URL + cache path for this target. */
                         char turl[PATH_MAX * 2];
@@ -3906,6 +3963,345 @@ static int cmd_cache(int argc, char **argv)
         return 0;
 }
 
+/* ── Phase 3: binary cache push / pull / keygen ──────────────────── */
+
+/* Build a binary_cache_t for each configured substituter URL.
+ * Returns a NULL-terminated list (caller frees each + the list).
+ * Returns NULL if no substituters configured. */
+static binary_cache_t **build_substituter_list(const two9_config_t *cfg)
+{
+        if (!cfg || !cfg->substituters || !cfg->substituters[0])
+                return NULL;
+        size_t n = 0;
+        while (cfg->substituters[n]) n++;
+        binary_cache_t **list = calloc(n + 1, sizeof(binary_cache_t *));
+        if (!list) return NULL;
+        for (size_t i = 0; i < n; i++) {
+                list[i] = binary_cache_new(cfg->substituters[i],
+                                            cfg->public_key_b64,
+                                            cfg->allow_unsigned);
+                if (!list[i]) {
+                        for (size_t j = 0; j < i; j++) binary_cache_free(list[j]);
+                        free(list);
+                        return NULL;
+                }
+        }
+        list[n] = NULL;
+        return list;
+}
+
+static void free_substituter_list(binary_cache_t **list)
+{
+        if (!list) return;
+        for (size_t i = 0; list[i]; i++) binary_cache_free(list[i]);
+        free(list);
+}
+
+/* Load the signing key (if configured) into pub/sec/name buffers.
+ * Returns 0 on success, -1 if no key configured or load failed. */
+static int load_signing_key(const two9_config_t *cfg,
+                            char **out_name,
+                            unsigned char *out_pub /* 32 */,
+                            unsigned char *out_sec /* 32 */)
+{
+        if (!cfg || !cfg->signing_key_file) return -1;
+        char *name = NULL;
+        if (signing_load_keyfile(cfg->signing_key_file, &name, out_pub, out_sec) != 0)
+                return -1;
+        /* Prefer config-supplied KeyName if set; else use the file's. */
+        *out_name = cfg->signing_key_name ? strdup(cfg->signing_key_name) : name;
+        if (cfg->signing_key_name) free(name);
+        return 0;
+}
+
+/* Try to substitute a package from configured caches. Looks up the
+ * package by name in the local store DB to find a previously-recorded
+ * store path (since the install path doesn't know the content-addressed
+ * store path before downloading). If found, walks substituters and
+ * fetches the NAR if available.
+ *
+ * On success: returns 0, sets *store_path_out to the fetched path.
+ * On no-substitution: returns -1 (caller falls through to mirror). */
+static int try_substitute_pkg(const char *pkg_name, const char *pkg_version,
+                              char **store_path_out)
+{
+        *store_path_out = NULL;
+        two9_config_t *cfg = two9_config_load();
+        if (!cfg) return -1;
+        if (!cfg->substituters || !cfg->substituters[0]) {
+                two9_config_free(cfg);
+                return -1;
+        }
+
+        /* Look up the store path recorded for this package in the DB.
+         * store_db_find_by_name returns the first match by name; we
+         * further filter by version (store path basename contains
+         * "-<version>" as the suffix). */
+        char db_root_buf[PATH_MAX];
+        get_db_root(db_root_buf, sizeof(db_root_buf));
+        store_db_t *db = store_db_open(db_root_buf);
+        if (!db) {
+                two9_config_free(cfg);
+                return -1;
+        }
+        char *candidate = store_db_find_by_name(db, pkg_name);
+        store_db_close(db);
+        if (!candidate) {
+                two9_config_free(cfg);
+                return -1;
+        }
+
+        /* Verify the candidate's path ends with "-<version>". If not,
+         * it's a different version - don't substitute. */
+        size_t clen = strlen(candidate);
+        size_t vlen = pkg_version ? strlen(pkg_version) : 0;
+        if (vlen == 0 || clen <= vlen + 1 ||
+            strcmp(candidate + clen - vlen, pkg_version) != 0 ||
+            candidate[clen - vlen - 1] != '-') {
+                free(candidate);
+                two9_config_free(cfg);
+                return -1;
+        }
+
+        /* If the path already exists locally, no need to substitute. */
+        struct stat st;
+        if (stat(candidate, &st) == 0) {
+                *store_path_out = candidate;  /* take ownership */
+                two9_config_free(cfg);
+                return 0;
+        }
+
+        binary_cache_t **caches = build_substituter_list(cfg);
+        two9_config_free(cfg);
+        if (!caches) { free(candidate); return -1; }
+
+        int substituted = 0;
+        for (size_t i = 0; caches[i] && !substituted; i++) {
+                narinfo_t *ni = binary_cache_lookup(caches[i], candidate);
+                if (!ni) continue;
+                printf("  %ssubstituting%s %s from %s\n",
+                       C_DIM(), C_RESET(), pkg_name, caches[i]->base_url);
+                if (binary_cache_fetch(caches[i], ni, candidate) == 0) {
+                        *store_path_out = strdup(candidate);
+                        substituted = 1;
+                }
+                narinfo_free(ni);
+        }
+
+        free_substituter_list(caches);
+        free(candidate);
+        return substituted ? 0 : -1;
+}
+
+/* `209 cache push <store-path>` - upload a store path + its closure
+ * to all configured caches. */
+static int cmd_cache_push(int argc, char **argv)
+{
+        if (argc < 1) {
+                fprintf(stderr, "usage: 209 cache push <store-path-or-pkgname>\n");
+                return 1;
+        }
+        const char *arg = argv[0];
+
+        /* Resolve arg to a store path: if it looks like an absolute
+         * path with a hash-name-version basename, use as-is; otherwise
+         * look up by package name in the store DB. */
+        char *store_path = NULL;
+        const char *base = strrchr(arg, '/');
+        base = base ? base + 1 : arg;
+        if (arg[0] == '/' && strchr(base, '-')) {
+                store_path = strdup(arg);
+        } else {
+                char db_root_buf[PATH_MAX];
+                get_db_root(db_root_buf, sizeof(db_root_buf));
+                store_db_t *db = store_db_open(db_root_buf);
+                if (!db) {
+                        fprintf(stderr, "209: cannot open store DB\n");
+                        return 1;
+                }
+                store_path = store_db_find_by_name(db, arg);
+                store_db_close(db);
+                if (!store_path) {
+                        fprintf(stderr, "209: no store path found for '%s'\n", arg);
+                        return 1;
+                }
+        }
+
+        two9_config_t *cfg = two9_config_load();
+        if (!cfg) { free(store_path); return 1; }
+        if (!cfg->substituters || !cfg->substituters[0]) {
+                fprintf(stderr, "209: no substituters configured in 2O9.conf\n");
+                fprintf(stderr, "    add a [substituters] section with URLs = ...\n");
+                two9_config_free(cfg);
+                free(store_path);
+                return 1;
+        }
+
+        /* Load signing key (optional - push works unsigned if KeyName
+         * and SigningKey are not set). */
+        char *key_name = NULL;
+        unsigned char sec[32];
+        unsigned char pub[32];
+        int have_key = (load_signing_key(cfg, &key_name, pub, sec) == 0);
+
+        binary_cache_t **caches = build_substituter_list(cfg);
+        if (!caches) {
+                fprintf(stderr, "209: failed to build substituter list\n");
+                free(key_name);
+                two9_config_free(cfg);
+                free(store_path);
+                return 1;
+        }
+
+        /* Compute the closure (the root + all transitive refs). */
+        char db_root_buf[PATH_MAX];
+        get_db_root(db_root_buf, sizeof(db_root_buf));
+        store_db_t *db = store_db_open(db_root_buf);
+
+        char **closure = NULL;
+        size_t n_closure = 0;
+        if (db) {
+                char *roots[1] = { store_path };
+                closure = store_db_closure(db, roots, 1);
+                if (closure) {
+                        while (closure[n_closure]) n_closure++;
+                }
+        }
+        if (!closure) {
+                /* No DB - just push the root. */
+                closure = calloc(2, sizeof(char *));
+                closure[0] = strdup(store_path);
+                closure[1] = NULL;
+                n_closure = 1;
+        }
+
+        int failed = 0;
+        for (size_t i = 0; i < n_closure; i++) {
+                const char *p = closure[i];
+                printf("pushing %s\n", p);
+                for (size_t c = 0; caches[c]; c++) {
+                        int rc = binary_cache_push(caches[c], p, db,
+                                                    key_name,
+                                                    have_key ? sec : NULL);
+                        if (rc != 0) {
+                                fprintf(stderr, "  failed on %s\n",
+                                        caches[c]->base_url);
+                                failed = 1;
+                        }
+                }
+        }
+
+        for (size_t i = 0; i < n_closure; i++) free(closure[i]);
+        free(closure);
+        if (db) store_db_close(db);
+        free_substituter_list(caches);
+        free(key_name);
+        two9_config_free(cfg);
+        free(store_path);
+        return failed ? 1 : 0;
+}
+
+/* `209 cache pull <store-path>` - explicitly fetch from configured caches. */
+static int cmd_cache_pull(int argc, char **argv)
+{
+        if (argc < 1) {
+                fprintf(stderr, "usage: 209 cache pull <store-path>\n");
+                return 1;
+        }
+        const char *store_path = argv[0];
+        if (store_path[0] != '/') {
+                fprintf(stderr, "209: cache pull expects an absolute store path\n");
+                return 1;
+        }
+
+        two9_config_t *cfg = two9_config_load();
+        if (!cfg) return 1;
+        if (!cfg->substituters || !cfg->substituters[0]) {
+                fprintf(stderr, "209: no substituters configured\n");
+                two9_config_free(cfg);
+                return 1;
+        }
+
+        binary_cache_t **caches = build_substituter_list(cfg);
+        two9_config_free(cfg);
+        if (!caches) return 1;
+
+        int ok = 0;
+        for (size_t i = 0; caches[i] && !ok; i++) {
+                narinfo_t *ni = binary_cache_lookup(caches[i], store_path);
+                if (!ni) continue;
+                printf("  found on %s\n", caches[i]->base_url);
+                if (binary_cache_fetch(caches[i], ni, store_path) == 0) {
+                        printf("  fetched -> %s\n", store_path);
+                        ok = 1;
+                }
+                narinfo_free(ni);
+        }
+
+        free_substituter_list(caches);
+        if (!ok) {
+                fprintf(stderr, "209: not found on any configured cache\n");
+                return 1;
+        }
+        return 0;
+}
+
+/* `209 keygen [--out <file>] [--name <name>]` - generate a new Ed25519
+ * keypair for signing narinfos. Prints "name:pub_b64:sec_b64" to stdout
+ * (or writes to file). */
+static int cmd_keygen(int argc, char **argv)
+{
+        const char *out_path = NULL;
+        const char *name = "209-local-1";
+        for (int i = 0; i < argc; i++) {
+                if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
+                        out_path = argv[++i];
+                } else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+                        name = argv[++i];
+                } else if (strcmp(argv[i], "--help") == 0) {
+                        printf("Usage: 209 keygen [--out <file>] [--name <name>]\n");
+                        printf("  Generates an Ed25519 keypair for signing narinfos.\n");
+                        printf("  Output format: <name>:<base64-public>:<base64-secret>\n");
+                        return 0;
+                }
+        }
+
+        unsigned char pub[32], sec[32];
+        if (signing_keygen(pub, sec) != 0) {
+                fprintf(stderr, "209: key generation failed\n");
+                return 1;
+        }
+
+        char *pub_b64 = b64_encode(pub, 32);
+        char *sec_b64 = b64_encode(sec, 32);
+        if (!pub_b64 || !sec_b64) {
+                free(pub_b64); free(sec_b64);
+                fprintf(stderr, "209: base64 encode failed\n");
+                return 1;
+        }
+
+        FILE *out = out_path ? fopen(out_path, "w") : stdout;
+        if (!out) {
+                fprintf(stderr, "209: cannot open %s\n", out_path);
+                free(pub_b64); free(sec_b64);
+                return 1;
+        }
+        fprintf(out, "%s:%s:%s\n", name, pub_b64, sec_b64);
+        if (out != stdout) {
+                fclose(out);
+                fprintf(stderr, "wrote keypair to %s\n", out_path);
+                fprintf(stderr, "public key (add to 2O9.conf PublicKey =): %s\n", pub_b64);
+        } else {
+                fprintf(stderr, "public key (add to 2O9.conf PublicKey =): %s\n", pub_b64);
+        }
+
+        /* Best-effort: scrub the secret from memory. */
+        memset(sec, 0, 32);
+        free(pub_b64);
+        free(sec_b64);
+        return 0;
+}
+
 /* 209 <pkg> tree - dependency tree visualizer */
 static void print_dep_tree(const char *pkg_name, int depth, int *visited, int visited_count)
 {
@@ -4971,8 +5367,18 @@ int main(int argc, char *argv[])
                 return cmd_wiki(argv[2]);
         }
         if (strcmp(argv[1], "cache") == 0) {
-                /* 209 cache [--keep=N] [--dry-run] - paccache-like pruning */
+                /* 209 cache [--keep=N] [--dry-run]              - paccache-like pruning
+                 * 209 cache push <store-path-or-pkgname>       - Phase 3: upload closure
+                 * 209 cache pull <store-path>                  - Phase 3: explicit fetch */
+                if (argc >= 3 && strcmp(argv[2], "push") == 0)
+                        return cmd_cache_push(argc - 3, &argv[3]);
+                if (argc >= 3 && strcmp(argv[2], "pull") == 0)
+                        return cmd_cache_pull(argc - 3, &argv[3]);
                 return cmd_cache(argc - 2, &argv[2]);
+        }
+        if (strcmp(argv[1], "keygen") == 0) {
+                /* 209 keygen [--out <file>] [--name <name>] - Phase 3 */
+                return cmd_keygen(argc - 2, &argv[2]);
         }
         if (strcmp(argv[1], "fuzz") == 0) {
                 /* 209 fuzz <binary> - basic fuzzing */

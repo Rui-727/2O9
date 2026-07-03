@@ -46,6 +46,14 @@ int nar_hash_directory(const char *path, char *hash_out, size_t *size_out);
  * cache export. Returns 0 on success, -1 on error. */
 int nar_dump(const char *path, FILE *out);
 
+/* Phase 3: extract a NAR stream (as produced by nar_dump) back into a
+ * filesystem tree at dest_dir. dest_dir must already exist. Restores
+ * regular files (with executable bit), symlinks, and directory structure.
+ * Returns 0 on success, -1 on error (errno set). Used by the binary
+ * cache substitution path: download NAR -> decompress -> nar_extract
+ * into a temp dir -> rename to final store path. */
+int nar_extract(FILE *in, const char *dest_dir);
+
 /* Build the final 2O9 store path: /nix/store/<base32>-<name>-<version>
  *   nar_hash_hex - 64-char lowercase hex NAR hash
  *   name         - package name (e.g. "neovim")

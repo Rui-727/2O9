@@ -142,6 +142,23 @@ static void apply_kv(two9_config_t *cfg, const char *section,
                         free(cfg->chroot_dir);
                         cfg->chroot_dir = str_dup_trim(value);
                 }
+        } else if (strcmp(section, "substituters") == 0) {
+                /* Phase 3: binary cache config. */
+                if (strcasecmp(key, "URLs") == 0) {
+                        free_str_list(cfg->substituters);
+                        cfg->substituters = split_ws(value);
+                } else if (strcasecmp(key, "AllowUnsigned") == 0) {
+                        cfg->allow_unsigned = parse_bool(value);
+                } else if (strcasecmp(key, "SigningKey") == 0) {
+                        free(cfg->signing_key_file);
+                        cfg->signing_key_file = str_dup_trim(value);
+                } else if (strcasecmp(key, "KeyName") == 0) {
+                        free(cfg->signing_key_name);
+                        cfg->signing_key_name = str_dup_trim(value);
+                } else if (strcasecmp(key, "PublicKey") == 0) {
+                        free(cfg->public_key_b64);
+                        cfg->public_key_b64 = str_dup_trim(value);
+                }
         }
         /* Unknown sections/keys: silently ignored (forward-compat). */
 }
@@ -243,5 +260,9 @@ void two9_config_free(two9_config_t *cfg)
         free(cfg->gpg_bin);
         free(cfg->sudo_bin);
         free(cfg->chroot_dir);
+        free_str_list(cfg->substituters);
+        free(cfg->signing_key_name);
+        free(cfg->signing_key_file);
+        free(cfg->public_key_b64);
         free(cfg);
 }

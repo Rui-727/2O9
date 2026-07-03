@@ -67,6 +67,13 @@ char *store_db_find_by_name(store_db_t *db, const char *pkg_name);
  * the roots themselves. Returns NULL on error or empty input. */
 char **store_db_closure(store_db_t *db, char **roots, size_t n_roots);
 
+/* Get the direct references of a single store path (the things it
+ * depends on, one level deep - not the transitive closure). Returns a
+ * NULL-terminated list of store path basenames (caller frees each + the
+ * list). Returns NULL if the path is not registered or on error.
+ * Phase 3: used by narinfo_from_store_path to populate References:. */
+char **store_db_get_refs(store_db_t *db, const char *path);
+
 /* List all valid paths NOT in the given live closure. Used by GC to
  * find dead paths. Returns a NULL-terminated list (caller frees).
  * Returns NULL on error. */

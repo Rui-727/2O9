@@ -30,11 +30,12 @@ DEFS = -D_GNU_SOURCE \
        -DUSER_PROFILE_DIR='"/.local/state/2O9/profile"' \
        -DBIN_DIR='"/.local/bin"' \
        -DLIB_DIR='"/.local/lib"' \
-       $(SQLITE_DEFS)
+       $(SQLITE_DEFS) \
+       $(SODIUM_DEFS)
 
 INCS = -Isrc -Isrc/store -Isrc/declarative -Isrc/aur -Isrc/trakker -Isrc/debag \
        -Ilib/2O9/nix -Ilib/2O9/alpm -Ilib/2O9/common \
-       $(LIB2O9_DEPS_INCS) $(SQLITE_CFLAGS)
+       $(LIB2O9_DEPS_INCS) $(SQLITE_CFLAGS) $(SODIUM_CFLAGS)
 LIBS = -lcurl -lseccomp
 
 # ── lib2O9 build (vendored pacman + own Nix evaluator + 2O9 init) ──
@@ -61,6 +62,28 @@ comma := ,
 LIB2O9_DEPS_INCS := $(if $(wildcard $(LIB2O9_DEPS_PREFIX)/usr/include),-I$(LIB2O9_DEPS_PREFIX)/usr/include -I$(LIB2O9_DEPS_PREFIX)/usr/include/x86_64-linux-gnu -I$(LIB2O9_DEPS_PREFIX)/usr/include/libxml2,)
 LIB2O9_DEPS_LIBS := $(if $(wildcard $(LIB2O9_DEPS_PREFIX)/usr/lib),-L$(LIB2O9_DEPS_PREFIX)/usr/lib/x86_64-linux-gnu -Wl$(comma)-rpath$(comma)$(LIB2O9_DEPS_PREFIX)/usr/lib/x86_64-linux-gnu,)
 
+
+# Phase 3: Ed25519 signing for binary-cache narinfo signatures.
+# Prefer libsodium (smaller, cleaner API); fall back to OpenSSL 1.1+
+# Ed25519 via EVP_DigestSign/DigestVerify (-lcrypto is already linked).
+# pkg-config check; if no .pc file but sodium.h is on the local deps
+# prefix include path, accept that too.
+HAVE_SODIUM_PC := $(shell pkg-config --exists libsodium 2>/dev/null && echo yes)
+HAVE_SODIUM_HDR := $(shell test -f $(LIB2O9_DEPS_PREFIX)/usr/include/sodium.h && echo yes)
+ifeq ($(HAVE_SODIUM_PC),yes)
+SODIUM_DEFS := -DHAVE_SODIUM
+SODIUM_LIBS := $(shell pkg-config --libs libsodium)
+SODIUM_CFLAGS := $(shell pkg-config --cflags libsodium)
+else ifeq ($(HAVE_SODIUM_HDR),yes)
+SODIUM_DEFS := -DHAVE_SODIUM
+SODIUM_LIBS := -lsodium
+SODIUM_CFLAGS :=
+else
+$(warning libsodium not found; falling back to OpenSSL Ed25519 for signing)
+SODIUM_DEFS :=
+SODIUM_LIBS :=
+SODIUM_CFLAGS :=
+endif
 ALPM_DEFS = -DHAVE_LIBCURL -DHAVE_LIBARCHIVE -DHAVE_LIBGPGME -DHAVE_LIBSSL \
             -DHAVE_STRNLEN \
             -DHAVE_SYS_STATVFS_H -DHAVE_SYS_MOUNT_H -DHAVE_SYS_TYPES_H \
@@ -84,7 +107,8 @@ ALPM_OBJ = $(patsubst lib/2O9/%.c,lib/2O9/%.o,$(ALPM_SRC))
 
 # ── 209 binary source ──
 CLI_SRC   = src/cli/main.c
-STORE_SRC = src/store/store.c src/store/symlinks.c src/store/nar.c src/store/optimise.c
+STORE_SRC = src/store/store.c src/store/symlinks.c src/store/nar.c src/store/optimise.c \
+            src/store/narinfo.c src/store/binary-cache.c src/store/signing.c
 ifeq ($(HAVE_SQLITE3),yes)
 STORE_SRC += src/store/db.c
 endif
@@ -103,6 +127,7 @@ OBJ = $(SRC:.c=.o)
 LIB2O9_LIBS = -lcurl -larchive -lgpgme -lassuan -lgpg-error -lcrypto -lsqlite3 \
               -lz -llzma -lbz2 -llz4 -lzstd -lnettle -lhogweed -lgmp \
               -lxml2 -lacl -lm -lseccomp \
+              $(SODIUM_LIBS) \
               $(LIB2O9_DEPS_LIBS)
 
 all: 209 test-aur-rpc test-nix-lexer test-nix-eval

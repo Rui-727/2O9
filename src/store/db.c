@@ -87,6 +87,12 @@ char **store_db_closure(store_db_t *db, char **roots, size_t n_roots)
         return NULL;
 }
 
+char **store_db_get_refs(store_db_t *db, const char *path)
+{
+        (void)db; (void)path;
+        return NULL;
+}
+
 char **store_db_dead_paths(store_db_t *db, char **live_closure, size_t n_live)
 {
         (void)db; (void)live_closure; (void)n_live;
@@ -531,6 +537,62 @@ char **store_db_all_paths(store_db_t *db)
 fail:
         for (size_t i = 0; i < count; i++) free(all[i]);
         free(all);
+        return NULL;
+}
+
+char **store_db_get_refs(store_db_t *db, const char *path)
+{
+        if (!db || !path) return NULL;
+
+        static const char *REFS_SQL =
+                "SELECT vp2.path FROM refs r "
+                "JOIN valid_paths vp1 ON r.referrer = vp1.id "
+                "JOIN valid_paths vp2 ON r.reference = vp2.id "
+                "WHERE vp1.path = ?1 ORDER BY vp2.path;";
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db->db, REFS_SQL, -1, &stmt, NULL) != SQLITE_OK)
+                return NULL;
+
+        size_t cap = 8, count = 0;
+        char **refs = malloc(cap * sizeof(char *));
+        if (!refs) { sqlite3_finalize(stmt); return NULL; }
+
+        sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *p = (const char *)sqlite3_column_text(stmt, 0);
+                if (!p) continue;
+                /* Strip /nix/store/ prefix - narinfo References: uses
+                 * basenames (e.g. "<hash>-<name>-<version>"). */
+                const char *base = strrchr(p, '/');
+                base = base ? base + 1 : p;
+
+                if (count == cap) {
+                        cap *= 2;
+                        char **nr = realloc(refs, cap * sizeof(char *));
+                        if (!nr) { sqlite3_finalize(stmt); goto fail; }
+                        refs = nr;
+                }
+                refs[count++] = strdup(base);
+        }
+        sqlite3_finalize(stmt);
+
+        if (count == 0) {
+                /* No refs - return a valid empty list (caller may treat
+                 * NULL as "unknown"; we want "known to have no refs"). */
+                refs[0] = NULL;
+                return refs;
+        }
+        if (count == cap) {
+                char **nr = realloc(refs, (cap + 1) * sizeof(char *));
+                if (!nr) goto fail;
+                refs = nr;
+        }
+        refs[count] = NULL;
+        return refs;
+
+fail:
+        for (size_t i = 0; i < count; i++) free(refs[i]);
+        free(refs);
         return NULL;
 }
 
