@@ -1316,6 +1316,8 @@ static int cmd_sync(void)
                 if (rc < 0) {
                         fprintf(stderr, "  sync failed: %s\n",
                                 alpm_strerror(alpm_errno(handle)));
+                        fprintf(stderr, "  This usually means the repo URLs in 2O9.nix are wrong.\n");
+                        fprintf(stderr, "  Edit ~/.config/2O9/2O9.nix and set real mirror URLs.\n");
                         alpm_release(handle);
                         free(eval_err);
                         return 1;
@@ -2337,9 +2339,9 @@ static int cmd_init(int scope)
         fprintf(f, "      ParallelDownloads = 5;\n");
         fprintf(f, "    };\n");
         fprintf(f, "    repos = {\n");
-        fprintf(f, "      core     = { server = \"https://mirror.example.com/core/os/x86_64\"; };\n");
-        fprintf(f, "      extra    = { server = \"https://mirror.example.com/extra/os/x86_64\"; };\n");
-        fprintf(f, "      multilib = { server = \"https://mirror.example.com/multilib/os/x86_64\"; };\n");
+        fprintf(f, "      core     = { server = \"https://geo.mirror.pkgbuild.com/core/os/x86_64\"; };\n");
+        fprintf(f, "      extra    = { server = \"https://geo.mirror.pkgbuild.com/extra/os/x86_64\"; };\n");
+        fprintf(f, "      multilib = { server = \"https://geo.mirror.pkgbuild.com/multilib/os/x86_64\"; };\n");
         fprintf(f, "    };\n");
         fprintf(f, "  };\n");
         fprintf(f, "\n");
