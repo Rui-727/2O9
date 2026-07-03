@@ -1603,15 +1603,14 @@ static int cmd_gc(void)
         }
 
         /* Step 2: Walk /nix/store/ and find unreferenced paths */
+        size_t removed = 0;
+
         DIR *store_dir = opendir("/nix/store");
         if (!store_dir) {
-                /* /nix/store doesn't exist yet - nothing to GC */
-                printf("209: /nix/store/ doesn't exist yet. Nothing to garbage collect.\n");
-                printf("     Run 209 apply first to install packages.\n");
-                gen_list_free(gens, gen_count);
-                gen_db_close(db);
-                return 1;
-        }
+                /* /nix/store doesn't exist yet - skip store GC but still
+                 * clean up old generations */
+                printf("  /nix/store/ doesn't exist yet. Skipping store GC.\n");
+        } else {
 
         /* Build a set of referenced store path basenames for quick lookup.
          * We compare just the directory name (e.g. "neovim-0.9.5") since
@@ -1641,7 +1640,6 @@ static int cmd_gc(void)
         }
 
         /* Walk /nix/store/ and collect unreferenced entries */
-        size_t removed = 0;
         /* freed_bytes would track space freed - TODO: add du -sk before rm */
         struct dirent *ent;
         while ((ent = readdir(store_dir)) != NULL) {
@@ -1681,13 +1679,7 @@ static int cmd_gc(void)
                 }
         }
         closedir(store_dir);
-
-        /* Cleanup */
-        for (size_t j = 0; j < ref_idx; j++)
-                free(ref_names[j]);
-        free(ref_names);
-        gen_list_free(gens, gen_count);
-        gen_db_close(db);
+        } /* end of else (store_dir exists) */
 
         if (removed > 0)
                 printf("  garbage-collected %zu store paths\n", removed);
@@ -1698,6 +1690,13 @@ static int cmd_gc(void)
          * Keep: the current generation and all pinned generations.
          * Remove: everything else. */
         int current_gen = gen_db_current(db);
+        if (current_gen <= 0) {
+                printf("  no current generation - skipping generation cleanup\n");
+                gen_list_free(gens, gen_count);
+                gen_db_close(db);
+                return 0;
+        }
+
         printf("\n  cleaning up old generations (keeping #%d + pinned)...\n", current_gen);
 
         int gens_removed = 0;
