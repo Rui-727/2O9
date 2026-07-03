@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
+#include <pwd.h>
 #include <curl/curl.h>
 
 #include "store/store.h"
@@ -75,6 +76,53 @@ static const char *get_db_root(char *buf, size_t bufsize)
                 else
                         strncpy(buf, "/var/lib/2O9", bufsize - 1);
         }
+        return buf;
+}
+
+/* ── Config home helper ────────────────────────────────────────────
+ * Returns the home directory to search for configs.
+ *
+ * When running as root via sudo, HOME might be /root. We check
+ * SUDO_USER to find the original user's home directory from
+ * /etc/passwd. This way `sudo 209 apply` finds the user's config
+ * at /home/sonoka/.config/2O9/2O9.nix instead of /root/.config/...
+ *
+ * Falls back to $HOME, then to getpwuid(getuid())->pw_dir. */
+static const char *get_config_home(char *buf, size_t bufsize)
+{
+        /* If not root, just use HOME */
+        if (getuid() != 0) {
+                char *home = getenv("HOME");
+                if (home) {
+                        strncpy(buf, home, bufsize - 1);
+                        buf[bufsize - 1] = '\0';
+                        return buf;
+                }
+        }
+
+        /* Root: check SUDO_USER first */
+        const char *sudo_user = getenv("SUDO_USER");
+        if (sudo_user && sudo_user[0]) {
+                /* Look up the user's home dir from /etc/passwd */
+                struct passwd *pw = getpwnam(sudo_user);
+                if (pw && pw->pw_dir) {
+                        strncpy(buf, pw->pw_dir, bufsize - 1);
+                        buf[bufsize - 1] = '\0';
+                        return buf;
+                }
+        }
+
+        /* Check HOME (might be preserved via --preserve-env) */
+        char *home = getenv("HOME");
+        if (home && strcmp(home, "/root") != 0) {
+                strncpy(buf, home, bufsize - 1);
+                buf[bufsize - 1] = '\0';
+                return buf;
+        }
+
+        /* Last resort: root's home */
+        strncpy(buf, "/root", bufsize - 1);
+        buf[bufsize - 1] = '\0';
         return buf;
 }
 
@@ -372,22 +420,21 @@ static int cmd_install(const char *pkg_name)
         } else {
                 /* Use lib2O9 to find the package in the repo sync DBs,
                  * download it, and extract to the store. */
-                char *home = getenv("HOME");
+                char config_home[PATH_MAX];
+                get_config_home(config_home, sizeof(config_home));
                 char user_config[PATH_MAX] = {0};
-                if (home)
-                        snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", home);
                 char user_home_config[PATH_MAX] = {0};
-                if (home)
-                        snprintf(user_home_config, sizeof(user_home_config), "%s/.config/2O9/home.nix", home);
+                snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", config_home);
+                snprintf(user_home_config, sizeof(user_home_config), "%s/.config/2O9/home.nix", config_home);
 
                 char *manifest_json = NULL;
                 char *eval_err = NULL;
                 struct stat st;
-                /* Check home.nix first (user scope), then 2O9.nix (user), then /etc/2O9/2O9.nix (system) */
-                if (user_home_config[0] && stat(user_home_config, &st) == 0)
-                        manifest_json = eval_nix_config(user_home_config, &eval_err);
-                if (!manifest_json && user_config[0] && stat(user_config, &st) == 0)
+                /* Check 2O9.nix, then home.nix, then system config */
+                if (stat(user_config, &st) == 0)
                         manifest_json = eval_nix_config(user_config, &eval_err);
+                if (!manifest_json && stat(user_home_config, &st) == 0)
+                        manifest_json = eval_nix_config(user_home_config, &eval_err);
                 if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
                         manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
 
@@ -823,16 +870,14 @@ static int cmd_apply(void)
 
         /* Step 1: Find config files. Check 2O9.nix (what 209 init creates),
          * home.nix (user scope), and /etc/2O9/2O9.nix (system scope).
-         * Per DESIGN.md §7, merge order is:
-         *   defaults -> home.nix -> 2O9.nix -> CLI flags
-         * Global wins on conflict. We evaluate both and merge. */
-        char *home = getenv("HOME");
+         * Uses get_config_home() so `sudo 209 apply` finds the original
+         * user's config via SUDO_USER, not root's. */
+        char config_home[PATH_MAX];
+        get_config_home(config_home, sizeof(config_home));
         char user_2O9[PATH_MAX] = {0};
         char user_home[PATH_MAX] = {0};
-        if (home) {
-                snprintf(user_2O9, sizeof(user_2O9), "%s/.config/2O9/2O9.nix", home);
-                snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", home);
-        }
+        snprintf(user_2O9, sizeof(user_2O9), "%s/.config/2O9/2O9.nix", config_home);
+        snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", config_home);
 
         /* Step 2: Evaluate each config that exists */
         char *user_json = NULL;
@@ -1180,20 +1225,19 @@ static int cmd_sync(void)
          * manifest, then two9_alpm_init_from_manifest() configures an
          * alpm_handle_t with the sync DBs registered. */
         char *manifest_json = NULL;
-        char *home = getenv("HOME");
+        char config_home[PATH_MAX];
+        get_config_home(config_home, sizeof(config_home));
         char user_2O9[PATH_MAX] = {0};
         char user_home[PATH_MAX] = {0};
-        if (home) {
-                snprintf(user_2O9, sizeof(user_2O9), "%s/.config/2O9/2O9.nix", home);
-                snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", home);
-        }
+        snprintf(user_2O9, sizeof(user_2O9), "%s/.config/2O9/2O9.nix", config_home);
+        snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", config_home);
 
         char *eval_err = NULL;
         struct stat st;
         /* Check 2O9.nix (what 209 init creates), then home.nix, then system config */
-        if (user_2O9[0] && stat(user_2O9, &st) == 0)
+        if (stat(user_2O9, &st) == 0)
                 manifest_json = eval_nix_config(user_2O9, &eval_err);
-        if (!manifest_json && user_home[0] && stat(user_home, &st) == 0)
+        if (!manifest_json && stat(user_home, &st) == 0)
                 manifest_json = eval_nix_config(user_home, &eval_err);
         if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
                 manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
@@ -3331,20 +3375,19 @@ static int cmd_upgrade(int use_sandbox)
         printf("%s=== Checking for upgrades ===%s\n\n", C_BOLD(), C_RESET());
 
         /* Try using lib2O9 to compare installed vs sync DBs */
-        char *home = getenv("HOME");
+        char config_home[PATH_MAX];
+        get_config_home(config_home, sizeof(config_home));
         char user_config[PATH_MAX] = {0};
-        if (home)
-                snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", home);
         char user_home[PATH_MAX] = {0};
-        if (home)
-                snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", home);
+        snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", config_home);
+        snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", config_home);
 
         char *manifest_json = NULL;
         char *eval_err = NULL;
         struct stat st;
-        if (user_config[0] && stat(user_config, &st) == 0)
+        if (stat(user_config, &st) == 0)
                 manifest_json = eval_nix_config(user_config, &eval_err);
-        if (!manifest_json && user_home[0] && stat(user_home, &st) == 0)
+        if (!manifest_json && stat(user_home, &st) == 0)
                 manifest_json = eval_nix_config(user_home, &eval_err);
         if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
                 manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
