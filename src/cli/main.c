@@ -1071,6 +1071,26 @@ static char *merge_manifests(const char *user_json, const char *global_json,
 
 /* ── Apply (declarative) ─────────────────────────────────────────── */
 
+/* Find store path on disk for a package name.
+ * Scans /nix/store/ for <pkg_name>-<version> directories. */
+static void find_store_path(const char *pkg_name, char *out, size_t out_sz)
+{
+        out[0] = '\0';
+        DIR *d = opendir("/nix/store");
+        if (!d) return;
+        struct dirent *de;
+        size_t nlen = strlen(pkg_name);
+        while ((de = readdir(d)) != NULL) {
+                if (de->d_name[0] == '.') continue;
+                if (strncmp(de->d_name, pkg_name, nlen) == 0 &&
+                    de->d_name[nlen] == '-') {
+                        snprintf(out, out_sz, "/nix/store/%s", de->d_name);
+                        break;
+                }
+        }
+        closedir(d);
+}
+
 static int cmd_apply(void)
 {
         /* The whole point of 2O9: evaluate the config, figure out what
@@ -1219,23 +1239,43 @@ static int cmd_apply(void)
                 printf("  no changes needed\n");
         }
 
-        /* Step 7: Build the generation package list from reconciler output.
-         * For each package, check if it has a real store path from the
-         * install (via the generation index). If not, use a placeholder. */
+        /* Step 7: Build the generation package list.
+         * For each package, look for the real store path on disk
+         * by scanning /nix/store/ for <name>-* directories. This is
+         * more reliable than the generation index (which may be stale
+         * from a previous broken apply). */
         gen_pkg_t *pkgs = NULL;
         gen_pkg_t **pkg_tail = &pkgs;
 
-        /* Get the current generation index to find real store paths */
         gen_index_t *idx = get_gen_index();
+
+        /* Helper: find store path on disk for a package name */
+        /* (defined as a lambda-like block - GCC supports nested functions) */
+        /* Actually, use a regular static function instead to be portable */
+
 
         /* Add all repo packages */
         for (pkg_name_t *p = txn->all_repo_pkgs; p; p = p->next) {
-                const char *version = "0.0.0";
-                const char *store_path = NULL;
-                const char *origin = "declarative";
+                char real_store[PATH_MAX] = {0};
+                find_store_path(p->name, real_store, sizeof(real_store));
 
-                /* Check if this package was just installed (in the index) */
-                if (idx) {
+                const char *version = "0.0.0";
+                const char *store_path = real_store[0] ? real_store : NULL;
+                const char *origin = "repo";
+
+                /* Try to get version from the store path */
+                if (store_path) {
+                        const char *base = strrchr(store_path, '/');
+                        if (base) {
+                                base++; /* skip / */
+                                /* Skip package name + dash to get version */
+                                base += strlen(p->name) + 1;
+                                if (*base) version = base;
+                        }
+                }
+
+                /* Fall back to index */
+                if (!store_path && idx) {
                         const gen_index_entry_t *e = gen_index_lookup(idx, p->name);
                         if (e) {
                                 version = e->version;
@@ -1244,6 +1284,7 @@ static int cmd_apply(void)
                         }
                 }
 
+                /* Last resort: construct expected path */
                 char fallback_store[PATH_MAX];
                 if (!store_path) {
                         snprintf(fallback_store, sizeof(fallback_store),
@@ -1259,11 +1300,23 @@ static int cmd_apply(void)
 
         /* Add all AUR packages */
         for (pkg_name_t *p = txn->all_aur_pkgs; p; p = p->next) {
+                char real_store[PATH_MAX] = {0};
+                find_store_path(p->name, real_store, sizeof(real_store));
+
                 const char *version = "0.0.0";
-                const char *store_path = NULL;
+                const char *store_path = real_store[0] ? real_store : NULL;
                 const char *origin = "aur";
 
-                if (idx) {
+                if (store_path) {
+                        const char *base = strrchr(store_path, '/');
+                        if (base) {
+                                base++;
+                                base += strlen(p->name) + 1;
+                                if (*base) version = base;
+                        }
+                }
+
+                if (!store_path && idx) {
                         const gen_index_entry_t *e = gen_index_lookup(idx, p->name);
                         if (e) {
                                 version = e->version;
@@ -1599,23 +1652,21 @@ static int cmd_gc(void)
                 return 1;
         }
 
-        /* Step 1: Collect all referenced store paths from all generations */
+        /* Step 1: Collect all referenced store paths from ALL generations
+         * (including old ones - don't delete what any generation references). */
         size_t gen_count = 0;
         gen_t **gens = gen_db_list(db, &gen_count);
-        /* current gen ID - not used directly in GC logic,
-         * all generations are scanned */
-        (void)gen_db_current(db);
+        int current_gen = gen_db_current(db);
 
         /* Count total referenced paths */
         size_t ref_count = 0;
         for (size_t i = 0; i < gen_count; i++) {
-                /* Read the manifest for each generation */
                 gen_pkg_t *pkgs = read_current_gen_packages(db_root, gens[i]->id);
                 while (pkgs) {
                         ref_count++;
                         pkgs = pkgs->next;
                 }
-                gen_pkg_list_free(pkgs); /* count only, then free immediately */
+                gen_pkg_list_free(pkgs);
         }
 
         /* Step 2: Walk /nix/store/ and find unreferenced paths */
@@ -1705,7 +1756,6 @@ static int cmd_gc(void)
         /* Also clean up old generation directories.
          * Keep: the current generation and all pinned generations.
          * Remove: everything else. */
-        int current_gen = gen_db_current(db);
         if (current_gen <= 0) {
                 printf("  no current generation - skipping generation cleanup\n");
                 gen_list_free(gens, gen_count);
