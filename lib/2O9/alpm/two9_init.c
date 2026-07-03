@@ -27,6 +27,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <pwd.h>
+#include <unistd.h>
 
 #include "alpm.h"
 #include "handle.h"
@@ -42,18 +44,37 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
 {
     if (!manifest_json) return NULL;
 
-    /* Determine DB path: if we're root, use the system DB at /var/lib/2O9.
-     * If we're a regular user, use ~/.local/state/2O9. */
+    /* Determine DB path. When running as root via sudo, resolve the
+     * original user's home via SUDO_USER so we use the same dbpath
+     * that 209 sync wrote to. This way apply (root) can read the
+     * sync DBs that sync (user) downloaded. */
     char dbpath[512];
+    const char *home_dir = NULL;
+    char home_buf[512];
+
     if (getuid() == 0) {
-        snprintf(dbpath, sizeof(dbpath), "/var/lib/2O9");
+        /* Root: check SUDO_USER first */
+        const char *sudo_user = getenv("SUDO_USER");
+        if (sudo_user && sudo_user[0]) {
+            struct passwd *pw = getpwnam(sudo_user);
+            if (pw && pw->pw_dir) {
+                home_dir = pw->pw_dir;
+            }
+        }
+        /* Check HOME (might be preserved via --preserve-env=HOME) */
+        if (!home_dir) {
+            const char *env_home = getenv("HOME");
+            if (env_home && strcmp(env_home, "/root") != 0)
+                home_dir = env_home;
+        }
     } else {
-        const char *home = getenv("HOME");
-        if (home)
-            snprintf(dbpath, sizeof(dbpath), "%s/.local/state/2O9", home);
-        else
-            snprintf(dbpath, sizeof(dbpath), "/var/lib/2O9");
+        home_dir = getenv("HOME");
     }
+
+    if (home_dir)
+        snprintf(dbpath, sizeof(dbpath), "%s/.local/state/2O9", home_dir);
+    else
+        snprintf(dbpath, sizeof(dbpath), "/var/lib/2O9");
 
     /* Create the DB directory if it doesn't exist */
     /* Walk the path creating each component */
@@ -77,17 +98,12 @@ alpm_handle_t *two9_alpm_init_from_manifest(const char *manifest_json)
         return NULL;
     }
 
-    /* Set cache dir: /var/cache/2O9/pkg for root, ~/.cache/2O9/pkg for users */
+    /* Set cache dir: same user logic as dbpath */
     char cache_dir[512];
-    if (getuid() == 0) {
+    if (home_dir)
+        snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/2O9/pkg", home_dir);
+    else
         snprintf(cache_dir, sizeof(cache_dir), "/var/cache/2O9/pkg");
-    } else {
-        const char *home = getenv("HOME");
-        if (home)
-            snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/2O9/pkg", home);
-        else
-            snprintf(cache_dir, sizeof(cache_dir), "/var/cache/2O9/pkg");
-    }
     alpm_list_t *cachedirs = alpm_list_add(NULL, strdup(cache_dir));
     alpm_option_set_cachedirs(handle, cachedirs);
 
