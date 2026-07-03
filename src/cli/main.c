@@ -121,25 +121,67 @@ static int cmd_generations(void)
         if (count == 0) {
                 printf("No generations yet.\n");
         } else {
-                printf("  ID  Packages  Pinned\n");
-                printf("  ──  ────────  ──────\n");
+                printf("  ID  Packages  Pinned  Changes\n");
+                printf("  ──  ────────  ──────  ───────\n");
                 for (size_t i = 0; i < count; i++) {
-                        /* Load package count from manifest */
-                        gen_pkg_t *gp = read_current_gen_packages(db_root, gens[i]->id);
+                        /* Read diff.json (tiny) for package count + change summary.
+                         * Falls back to reading manifest.json if no diff (old gens). */
                         size_t pc = 0;
-                        gen_pkg_t *gq = gp;
-                        while (gq) { pc++; gq = gq->next; }
-                        gen_pkg_list_free(gp);
+                        char changes[256] = "";
+                        char diff_path[PATH_MAX];
+                        snprintf(diff_path, sizeof(diff_path),
+                                 "%s/generations/%d/diff.json", db_root, gens[i]->id);
+                        FILE *df = fopen(diff_path, "r");
+                        if (df) {
+                                fseek(df, 0, SEEK_END);
+                                long dsize = ftell(df);
+                                fseek(df, 0, SEEK_SET);
+                                char *dbuf = malloc(dsize + 1);
+                                if (dbuf) {
+                                        size_t nread = fread(dbuf, 1, dsize, df);
+                                        dbuf[nread] = '\0';
+                                        cJSON *droot = cJSON_Parse(dbuf);
+                                        free(dbuf);
+                                        if (droot) {
+                                                cJSON *jtotal = cJSON_GetObjectItem(droot, "total");
+                                                if (cJSON_IsNumber(jtotal))
+                                                        pc = (size_t)jtotal->valueint;
+                                                /* Build change summary from added/removed/changed arrays */
+                                                cJSON *added = cJSON_GetObjectItem(droot, "added");
+                                                cJSON *removed = cJSON_GetObjectItem(droot, "removed");
+                                                cJSON *changed = cJSON_GetObjectItem(droot, "changed");
+                                                size_t add_n = cJSON_IsArray(added) ? cJSON_GetArraySize(added) : 0;
+                                                size_t rem_n = cJSON_IsArray(removed) ? cJSON_GetArraySize(removed) : 0;
+                                                size_t chg_n = cJSON_IsArray(changed) ? cJSON_GetArraySize(changed) : 0;
+                                                if (add_n || rem_n || chg_n) {
+                                                        snprintf(changes, sizeof(changes),
+                                                                 "+%zu -%zu ~%zu", add_n, rem_n, chg_n);
+                                                } else {
+                                                        strcpy(changes, "(no change)");
+                                                }
+                                                cJSON_Delete(droot);
+                                        }
+                                }
+                                fclose(df);
+                        } else {
+                                /* No diff.json — fall back to reading full manifest */
+                                gen_pkg_t *gp = read_current_gen_packages(db_root, gens[i]->id);
+                                gen_pkg_t *gq = gp;
+                                while (gq) { pc++; gq = gq->next; }
+                                gen_pkg_list_free(gp);
+                                strcpy(changes, "(no diff)");
+                        }
                         /* Check pinned status */
                         char pin_path[PATH_MAX];
                         snprintf(pin_path, sizeof(pin_path),
                                  "%s/generations/%d/.pinned", db_root, gens[i]->id);
                         struct stat pst;
                         int pinned = (stat(pin_path, &pst) == 0);
-                        printf("  %3d  %7zu  %s%s\n",
+                        printf("  %3d  %7zu  %-3s  %-16s%s\n",
                                gens[i]->id,
                                pc,
                                pinned ? "yes" : "no",
+                               changes,
                                gens[i]->id == current ? "  ← current" : "");
                 }
         }
@@ -932,7 +974,6 @@ static int cmd_sync(void)
                         fprintf(stderr, "  sync failed: %s\n",
                                 alpm_strerror(alpm_errno(handle)));
                         alpm_release(handle);
-                        free(manifest_json);
                         free(eval_err);
                         return 1;
                 }

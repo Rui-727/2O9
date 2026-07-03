@@ -19,6 +19,7 @@
 #include <limits.h>
 
 #include "gen.h"
+#include "cJSON.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
@@ -210,14 +211,147 @@ void gen_db_unlock(gen_db_t *db)
 
 /* ── Commit generation ───────────────────────────────────────────── */
 
+/* Write a diff.json alongside manifest.json — records only what changed
+ * from the parent generation. This makes `209 generations` instant
+ * (reads tiny diff files, not full manifests) and enables `209 apply
+ * --dry-run` to show the delta without recomputing.
+ *
+ * Format:
+ *   {"parent": 42, "total": 43, "added": [...], "removed": [...], "changed": [...]}
+ *
+ * For generation #1 (no parent), the diff is just the full package list
+ * marked as "added". */
+static int write_diff(gen_db_t *db, int id, int parent_id, gen_pkg_t *packages)
+{
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/generations/%d/diff.json", db->root, id);
+
+        FILE *f = fopen(path, "w");
+        if (!f) return -1;
+
+        /* Count total packages */
+        size_t total = 0;
+        for (gen_pkg_t *p = packages; p; p = p->next) total++;
+
+        /* Load parent packages for comparison */
+        gen_pkg_t *parent_pkgs = NULL;
+        if (parent_id > 0) {
+                char pdir[PATH_MAX];
+                snprintf(pdir, sizeof(pdir), "%s/generations/%d", db->root, parent_id);
+                /* Read parent manifest.json */
+                char ppath[PATH_MAX];
+                snprintf(ppath, sizeof(ppath), "%s/manifest.json", pdir);
+                FILE *pf = fopen(ppath, "r");
+                if (pf) {
+                        fseek(pf, 0, SEEK_END);
+                        long psize = ftell(pf);
+                        fseek(pf, 0, SEEK_SET);
+                        char *pbuf = malloc(psize + 1);
+                        if (pbuf) {
+                                size_t nread = fread(pbuf, 1, psize, pf);
+                                pbuf[nread] = '\0';
+                                cJSON *proot = cJSON_Parse(pbuf);
+                                free(pbuf);
+                                if (proot) {
+                                        cJSON *parr = cJSON_GetObjectItem(proot, "packages");
+                                        if (cJSON_IsArray(parr)) {
+                                                cJSON *item;
+                                                cJSON_ArrayForEach(item, parr) {
+                                                        cJSON *jn = cJSON_GetObjectItem(item, "name");
+                                                        cJSON *jv = cJSON_GetObjectItem(item, "version");
+                                                        if (cJSON_IsString(jn)) {
+                                                                gen_pkg_t *gp = gen_pkg_create(
+                                                                        jn->valuestring,
+                                                                        cJSON_IsString(jv) ? jv->valuestring : "?",
+                                                                        NULL, "repo");
+                                                                gp->next = parent_pkgs;
+                                                                parent_pkgs = gp;
+                                                        }
+                                                }
+                                        }
+                                        cJSON_Delete(proot);
+                                }
+                        }
+                        fclose(pf);
+                }
+        }
+
+        fprintf(f, "{\n");
+        fprintf(f, "  \"parent\": %d,\n", parent_id);
+        fprintf(f, "  \"total\": %zu,\n", total);
+        fprintf(f, "  \"added\": [");
+        int first = 1;
+        for (gen_pkg_t *p = packages; p; p = p->next) {
+                /* Check if in parent */
+                gen_pkg_t *pp = parent_pkgs;
+                int found = 0;
+                while (pp) {
+                        if (strcmp(pp->name, p->name) == 0) { found = 1; break; }
+                        pp = pp->next;
+                }
+                if (!found) {
+                        if (!first) fprintf(f, ", ");
+                        first = 0;
+                        fprintf(f, "{\"name\": \"%s\", \"version\": \"%s\"}", p->name, p->version);
+                }
+        }
+        fprintf(f, "],\n");
+
+        fprintf(f, "  \"removed\": [");
+        first = 1;
+        for (gen_pkg_t *pp = parent_pkgs; pp; pp = pp->next) {
+                gen_pkg_t *p = packages;
+                int found = 0;
+                while (p) {
+                        if (strcmp(p->name, pp->name) == 0) { found = 1; break; }
+                        p = p->next;
+                }
+                if (!found) {
+                        if (!first) fprintf(f, ", ");
+                        first = 0;
+                        fprintf(f, "{\"name\": \"%s\", \"version\": \"%s\"}", pp->name, pp->version);
+                }
+        }
+        fprintf(f, "],\n");
+
+        fprintf(f, "  \"changed\": [");
+        first = 1;
+        for (gen_pkg_t *p = packages; p; p = p->next) {
+                gen_pkg_t *pp = parent_pkgs;
+                while (pp) {
+                        if (strcmp(pp->name, p->name) == 0) {
+                                if (strcmp(pp->version, p->version) != 0) {
+                                        if (!first) fprintf(f, ", ");
+                                        first = 0;
+                                        fprintf(f, "{\"name\": \"%s\", \"old\": \"%s\", \"new\": \"%s\"}",
+                                                p->name, pp->version, p->version);
+                                }
+                                break;
+                        }
+                        pp = pp->next;
+                }
+        }
+        fprintf(f, "]\n");
+        fprintf(f, "}\n");
+        fclose(f);
+
+        /* Free parent packages */
+        gen_pkg_list_free(parent_pkgs);
+        return 0;
+}
+
 int gen_db_commit(gen_db_t *db, gen_pkg_t *packages)
 {
         /* Next ID = current + 1 (or 1 if no current) */
-        int next_id = gen_db_current(db) + 1;
+        int parent_id = gen_db_current(db);
+        int next_id = parent_id + 1;
 
-        /* Write the manifest */
+        /* Write the manifest (full snapshot — source of truth) */
         if (write_manifest(db, next_id, packages) < 0)
                 return -1;
+
+        /* Write the diff (delta from parent — for fast `209 generations`) */
+        write_diff(db, next_id, parent_id, packages);
 
         /* Repoint current symlink */
         char link_path[PATH_MAX];
