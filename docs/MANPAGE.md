@@ -35,7 +35,10 @@ Each maps to the equivalent 2O9 command.
 : Refresh repo databases. Same as `209 sync`.
 
 `209 -Su`
-: Upgrade all packages. Not yet implemented. Use `209 apply`.
+: Upgrade all packages. Evaluates `2O9.nix`, computes what's outdated
+  in the current generation, downloads new versions from configured
+  caches or the Arch mirror, extracts, commits a new generation.
+  Requires root (writes to `/nix/store/`).
 
 `209 -Ss` `<term>`
 : Search repos. Same as `209 <term> search`.

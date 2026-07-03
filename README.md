@@ -241,7 +241,7 @@ Both work; pick whichever feels right.
 |---|---|---|
 | `209 -S <pkg>...` | Install | `209 <pkg> install` |
 | `209 -Sy` | Refresh repo DBs | `209 sync` |
-| `209 -Su` | Upgrade all | `209 apply` (not yet wired) |
+| `209 -Su` | Upgrade all | `209 apply` |
 | `209 -Ss <term>` | Search repos | `209 <term> search` |
 | `209 -Si <pkg>` | Package info | `209 <pkg> info` |
 | `209 -R <pkg>...` | Remove | `209 <pkg> remove` |
@@ -398,23 +398,30 @@ What works and what's left.
   restriction flags, JSON trace output. Debag hybrid sandbox with
   seccomp fast path and ptrace slow path.
 
-- **Phase 5 (Polish): IN PROGRESS.** 9-step activation phase, `209 news`,
-  `209 init`, `209 doctor`, `209 wiki`, `209 fuzz`, `209 bundle`/
-  `import`, `209 diff`, `209 why`, `209 lock`, `209 -Su`. Pacman flags
-  (`-S`, `-R`, `-Q`, `-Qs`, `-Qi`, `-Ql`, `-Qm`). Color output. 10
-  integration tests. What's left: packaging, more tests.
+- **Phase 5 (Polish): DONE, except packaging.** Everything listed below
+  ships and runs. The 9-step activation phase is implemented in
+  `src/declarative/activation.c`. The convenience commands all work:
+  `209 init`, `209 news`, `209 doctor`, `209 wiki`, `209 fuzz`,
+  `209 bundle`, `209 import`, `209 diff`, `209 why`, `209 lock`,
+  `209 -Su`. Pacman flags (`-S`, `-R`, `-Q`, `-Qs`, `-Qi`, `-Ql`,
+  `-Qm`) all work. Color output is wired (bold package names, green
+  for success, red for errors, cyan for hints, dim for secondary
+  info). 10 integration tests in `test/` pass. The only thing left
+  is distro packaging (a `PKGBUILD` for self-hosting) and more test
+  coverage. Neither blocks usage.
 
 - **Roadmap phases 0 through 3 (transaction wiring, AUR isolation,
   content addressing, binary cache substitution): DONE.** See the
   commit history for `phase 0:`, `phase 1:`, `phase 2:`, `phase 3:`
-  commits. The store is now content-addressed, GC is closure-aware,
+  commits. The store is content-addressed, GC is closure-aware,
   AUR builds run in a chroot, and packages can be shared between
   machines via Ed25519-signed narinfos.
 
 - **Phase 4 (Declarative system): DEFERRED.** Whole-OS reconfigure
   (bootloader including grub, initrd, kernel, services as a DAG,
   users, PAM, NSS, profile hooks as derivations). Tracked in the
-  project TODO as future work.
+  project TODO as future work. 2O9 today is a package manager with
+  generations, not a NixOS competitor.
 
 ## License
 

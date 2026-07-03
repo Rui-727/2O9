@@ -5183,7 +5183,7 @@ int main(int argc, char *argv[])
          * transfers. Each flag maps to the equivalent SOV command.
          *
          *   -S <pkg>      install (209 <pkg> install)
-         *   -Su           upgrade all (not yet implemented)
+         *   -Su           upgrade all (209 -Su, calls cmd_upgrade)
          *   -Sy           refresh repo DBs (209 sync)
          *   -Ss <term>    search repos (209 <term> search)
          *   -Si <pkg>     package info (209 <pkg> info)

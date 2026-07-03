@@ -960,7 +960,7 @@ deferred.
 | **2 - paru to C port** | AUR RPC, clone, review, makepkg, chroot, PGP, into the store | DONE |
 | **3 - Declarative engine** | own C Nix evaluator, reconcile, transaction, generations | DONE |
 | **4 - Trakker + Debag** | ptrace sandbox, seccomp+ptrace hybrid sandbox, JSON trace | DONE |
-| **5 - Polish** | Unified CLI, hooks, user scope, docs, packaging | IN PROGRESS |
+| **5 - Polish** | Unified CLI, hooks, user scope, docs, packaging | DONE, except packaging |
 | **Roadmap phase 0** | Wire libalpm transaction, sig verification, atomic extraction | DONE |
 | **Roadmap phase 1** | Chroot AUR builds, PGP key import, MFlags pass-through | DONE |
 | **Roadmap phase 2** | Content-addressed store (NAR hashing), refs graph, hardlink dedup | DONE |
