@@ -21,7 +21,45 @@ The binary is `209` (numeric). The project name is `2O9` (letter O).
 
 ## COMMANDS
 
-### Zero-argument commands
+### Pacman-compatible flags
+
+2O9 supports pacman's common operation flags so muscle memory transfers.
+Each maps to the equivalent 2O9 command.
+
+`209 -S` `<pkg>` `[...]`
+: Install package(s). Same as `209 <pkg> install`.
+
+`209 -Sy`
+: Refresh repo databases. Same as `209 sync`.
+
+`209 -Su`
+: Upgrade all packages. Not yet implemented — use `209 apply`.
+
+`209 -Ss` `<term>`
+: Search repos. Same as `209 <term> search`.
+
+`209 -Si` `<pkg>`
+: Show package info. Same as `209 <pkg> info`.
+
+`209 -R` `<pkg>` `[...]`
+: Remove package(s). Same as `209 <pkg> remove`.
+
+`209 -Q`
+: List all installed packages (name + version, one per line).
+
+`209 -Qs` `<term>`
+: Search installed packages by substring.
+
+`209 -Qi` `<pkg>`
+: Show info for an installed package.
+
+`209 -Ql` `<pkg>`
+: List files in an installed package (from its store path).
+
+`209 -Qm`
+: List foreign (AUR) packages — installed packages with `origin: "aur"`.
+
+### 2O9 commands
 
 `209 apply`
 : Evaluate `2O9.nix`, reconcile against the current generation, commit
@@ -29,11 +67,12 @@ The binary is `209` (numeric). The project name is `2O9` (letter O).
 
 `209 generations`
 : List all generations. The current one is marked with `← current`.
+  Shows a change summary (`+N -N ~N`) per generation from the diff.
 
 `209 sync`
-: Download repo databases. When a `2O9.nix` config exists, uses lib2O9
-  (`alpm_db_update`). Otherwise falls back to direct libcurl download
-  of default Arch mirrors.
+: Download repo databases. Same as `-Sy`. When a `2O9.nix` config exists,
+  uses lib2O9 (`alpm_db_update`). Otherwise falls back to direct libcurl
+  download of default Arch mirrors.
 
 `209 gc`
 : Garbage-collect store paths not referenced by any generation.

@@ -140,31 +140,42 @@ First, create a config:
 Edit the config to list what you want, then apply it:
 
 ```sh
-209 sync                    # download repo databases
+209 -Sy                     # download repo databases (same as: 209 sync)
 sudo 209 apply              # make the system match your config
 ```
 
-Day-to-day use:
+Day-to-day use — pacman flags work too:
 
 ```sh
-# Install a package temporarily (not in the config — next apply removes it)
-209 neovim install
+209 -S neovim               # install (same as: 209 neovim install)
+209 -R htop                 # remove (same as: 209 htop remove)
+209 -Q                      # list all installed packages
+209 -Qs vim                 # search installed packages
+209 -Qi neovim              # show package info
+209 -Ql neovim              # list files in a package
+209 -Qm                     # list foreign (AUR) packages
+209 -Ss ffmpeg              # search repos
+```
 
-# Build something from the AUR
-209 yt-dlp aur build
+Build from the AUR:
 
-# Search installed packages, fall back to AUR if no local match
-209 ffmpeg search
+```sh
+209 yt-dlp aur build        # build from AUR (makepkg + store add)
+209 ffmpeg aur search       # search AUR
+209 ffmpeg aur review       # review PKGBUILD diff before building
+```
 
-# Read the news
-209 news
+Generations and rollback:
 
-# List generations and roll back
-209 generations
+```sh
+209 generations             # list all generations
 209 3 rollback              # go back to generation 3
-209 3 pin                   # protect it from garbage collection
+209 3 pin                   # protect it from GC
+```
 
-# Run a command in the sandbox (PATH-resolved)
+Trakker (sandbox — command resolved via $PATH):
+
+```sh
 209 trakker ls -la
 209 trakker --no-net -- curl https://example.com
 209 trakker --no-write --redirect-writes /tmp/trakker -- makepkg -f
@@ -234,10 +245,27 @@ is simple and correct: systemd starts exactly what is enabled.
 
 ## Commands
 
-The CLI uses **Subject-Object-Verb** order. `209 nginx install` reads as
-"nginx — install." The thing comes first, the action comes last. You already
-know what you're talking about before you say what to do with it. Subject-first
-is intent; verb-first is ceremony.
+2O9 supports two CLI styles. Pacman flags (`-S`, `-R`, `-Q`) for muscle
+memory, and 2O9's own Subject-Object-Verb order for the new stuff.
+Both work; pick whichever feels right.
+
+### Pacman-compatible flags
+
+| Flag | Meaning | 2O9 equivalent |
+|---|---|---|
+| `209 -S <pkg>...` | Install | `209 <pkg> install` |
+| `209 -Sy` | Refresh repo DBs | `209 sync` |
+| `209 -Su` | Upgrade all | `209 apply` (not yet wired) |
+| `209 -Ss <term>` | Search repos | `209 <term> search` |
+| `209 -Si <pkg>` | Package info | `209 <pkg> info` |
+| `209 -R <pkg>...` | Remove | `209 <pkg> remove` |
+| `209 -Q` | List all installed | — |
+| `209 -Qs <term>` | Search installed | `209 <term> search` |
+| `209 -Qi <pkg>` | Installed info | `209 <pkg> info` |
+| `209 -Ql <pkg>` | List files in package | — |
+| `209 -Qm` | List foreign (AUR) packages | — |
+
+### 2O9 commands
 
 | Command | Meaning | Origin |
 |---|---|---|

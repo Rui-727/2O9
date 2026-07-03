@@ -58,16 +58,29 @@ static int cmd_version(void)
 static int cmd_usage(void)
 {
         printf("Usage: 209 [options] <subject> <verb>\n");
-        printf("       209 [options] <command>\n\n");
+        printf("       209 [options] <command>\n");
+        printf("       209 [pacman flags] <args>\n\n");
         printf("Unified package manager: pacman + AUR + Nix store\n\n");
-        printf("Commands:\n");
+        printf("Pacman-compatible flags (muscle memory transfers):\n");
+        printf("  209 -S <pkg>...    Install package(s)\n");
+        printf("  209 -Sy            Refresh repo databases (same as: 209 sync)\n");
+        printf("  209 -Su            Upgrade all (not yet — use 209 apply)\n");
+        printf("  209 -Ss <term>     Search repos\n");
+        printf("  209 -Si <pkg>      Package info\n");
+        printf("  209 -R <pkg>...    Remove package(s)\n");
+        printf("  209 -Q             List all installed packages\n");
+        printf("  209 -Qs <term>     Search installed packages\n");
+        printf("  209 -Qi <pkg>      Installed package info\n");
+        printf("  209 -Ql <pkg>      List files in package\n");
+        printf("  209 -Qm            List foreign (AUR) packages\n\n");
+        printf("2O9 commands:\n");
         printf("  apply              Apply declarative config (2O9.nix)\n");
         printf("  generations        List generations\n");
-        printf("  sync               Sync repo databases\n");
+        printf("  sync               Sync repo databases (same as -Sy)\n");
         printf("  gc                 Garbage-collect unreferenced store paths\n");
         printf("  news               Show Arch Linux news\n");
         printf("  init [--system]    Create a starter 2O9.nix config\n\n");
-        printf("SOV patterns:\n");
+        printf("SOV patterns (2O9-native):\n");
         printf("  209 <pkg> install  Install package from repo\n");
         printf("  209 <pkg> remove   Remove package\n");
         printf("  209 <pkg> info     Show installed package info (falls back to AUR)\n");
@@ -2129,6 +2142,159 @@ int main(int argc, char *argv[])
 
         if (argc < 2) {
                 cmd_usage();
+                return 1;
+        }
+
+        /* ── Pacman-style flags ───────────────────────────────────────
+         * 2O9 supports pacman's common operation flags so muscle memory
+         * transfers. Each flag maps to the equivalent SOV command.
+         *
+         *   -S <pkg>      install (209 <pkg> install)
+         *   -Su           upgrade all (not yet implemented)
+         *   -Sy           refresh repo DBs (209 sync)
+         *   -Ss <term>    search repos (209 <term> search)
+         *   -Si <pkg>     package info (209 <pkg> info)
+         *   -R <pkg>      remove (209 <pkg> remove)
+         *   -Q            list all installed packages
+         *   -Qs <term>    search installed (209 <term> search)
+         *   -Qi <pkg>     installed package info (209 <pkg> info)
+         *   -Ql <pkg>     list files in package
+         *   -Qm           list foreign (AUR) packages
+         *
+         * The 2O9-specific commands (apply, generations, trakker, init,
+         * news) keep their own syntax. */
+        if (argv[1][0] == '-' && argv[1][1] != '\0') {
+                const char *op = argv[1];
+                /* Parse compound flags like -Ss, -Qi, -Sy */
+                char sub = op[2];  /* e.g. the 's' in -Ss */
+
+                /* -S family (sync) */
+                if (op[1] == 'S') {
+                        if (sub == 's') {
+                                /* -Ss <term> — search */
+                                if (argc < 3) {
+                                        fprintf(stderr, "209 -Ss: no search term\n");
+                                        return 1;
+                                }
+                                return cmd_search(argv[2]);
+                        }
+                        if (sub == 'i') {
+                                /* -Si <pkg> — info */
+                                if (argc < 3) {
+                                        fprintf(stderr, "209 -Si: no package name\n");
+                                        return 1;
+                                }
+                                return cmd_info(argv[2]);
+                        }
+                        if (sub == 'y') {
+                                /* -Sy — refresh repo DBs */
+                                return cmd_sync();
+                        }
+                        if (sub == 'u') {
+                                /* -Su — upgrade all (TODO) */
+                                fprintf(stderr, "209 -Su: upgrade not yet implemented\n");
+                                fprintf(stderr, "    use: 209 apply\n");
+                                return 1;
+                        }
+                        /* -S <pkg>... — install */
+                        if (sub == '\0') {
+                                if (argc < 3) {
+                                        fprintf(stderr, "209 -S: no package specified\n");
+                                        return 1;
+                                }
+                                for (int i = 2; i < argc; i++) {
+                                        int rc = cmd_install(argv[i]);
+                                        if (rc != 0) return rc;
+                                }
+                                return 0;
+                        }
+                }
+
+                /* -R family (remove) */
+                if (op[1] == 'R') {
+                        if (argc < 3) {
+                                fprintf(stderr, "209 -R: no package specified\n");
+                                return 1;
+                        }
+                        for (int i = 2; i < argc; i++) {
+                                int rc = cmd_remove(argv[i]);
+                                if (rc != 0) return rc;
+                        }
+                        return 0;
+                }
+
+                /* -Q family (query) */
+                if (op[1] == 'Q') {
+                        if (sub == 's') {
+                                /* -Qs <term> — search installed */
+                                if (argc < 3) {
+                                        fprintf(stderr, "209 -Qs: no search term\n");
+                                        return 1;
+                                }
+                                return cmd_search(argv[2]);
+                        }
+                        if (sub == 'i') {
+                                /* -Qi <pkg> — installed info */
+                                if (argc < 3) {
+                                        fprintf(stderr, "209 -Qi: no package name\n");
+                                        return 1;
+                                }
+                                return cmd_info(argv[2]);
+                        }
+                        if (sub == 'l') {
+                                /* -Ql <pkg> — list files in package */
+                                if (argc < 3) {
+                                        fprintf(stderr, "209 -Ql: no package name\n");
+                                        return 1;
+                                }
+                                /* Look up store_path from index, list its files */
+                                gen_index_t *idx = get_gen_index();
+                                if (idx) {
+                                        const gen_index_entry_t *e = gen_index_lookup(idx, argv[2]);
+                                        if (e && e->store_path) {
+                                                printf("%s is installed at %s\n", e->name, e->store_path);
+                                                /* List files via find */
+                                                char cmd[PATH_MAX + 32];
+                                                snprintf(cmd, sizeof(cmd), "find %s -type f 2>/dev/null | head -50", e->store_path);
+                                                return system(cmd) == 0 ? 0 : 1;
+                                        }
+                                }
+                                fprintf(stderr, "209: package '%s' not found\n", argv[2]);
+                                return 1;
+                        }
+                        if (sub == 'm') {
+                                /* -Qm — list foreign (AUR) packages */
+                                gen_index_t *idx = get_gen_index();
+                                if (!idx) {
+                                        fprintf(stderr, "209: no generation DB\n");
+                                        return 1;
+                                }
+                                for (size_t i = 0; i < idx->bucket_count; i++) {
+                                        for (gen_index_entry_t *e = idx->buckets[i]; e; e = e->next) {
+                                                if (e->origin && strcmp(e->origin, "aur") == 0)
+                                                        printf("%s %s\n", e->name, e->version);
+                                        }
+                                }
+                                return 0;
+                        }
+                        /* -Q — list all installed */
+                        if (sub == '\0') {
+                                gen_index_t *idx = get_gen_index();
+                                if (!idx) {
+                                        fprintf(stderr, "209: no generation DB\n");
+                                        return 1;
+                                }
+                                for (size_t i = 0; i < idx->bucket_count; i++) {
+                                        for (gen_index_entry_t *e = idx->buckets[i]; e; e = e->next) {
+                                                printf("%s %s\n", e->name, e->version);
+                                        }
+                                }
+                                return 0;
+                        }
+                }
+
+                fprintf(stderr, "209: unknown flag '%s'\n", op);
+                fprintf(stderr, "    try: 209 --help\n");
                 return 1;
         }
 
