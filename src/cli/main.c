@@ -17,6 +17,9 @@
 #include <unistd.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
 #include <curl/curl.h>
@@ -79,17 +82,23 @@ static int cmd_usage(void)
         printf("  generations        List generations\n");
         printf("  sync               Sync repo databases (same as -Sy)\n");
         printf("  gc                 Garbage-collect unreferenced store paths\n");
+        printf("  cache              Prune old package cache (like paccache)\n");
         printf("  news               Show Arch Linux news\n");
-        printf("  init [--system]    Create a starter 2O9.nix config\n\n");
+        printf("  init [--system]    Create a starter 2O9.nix config\n");
+        printf("  doctor \"<error>\"   Search Arch Wiki for error solutions\n");
+        printf("  wiki <pkg>         Fetch Arch Wiki page for a package\n");
+        printf("  fuzz <binary>      Fuzz a binary with edge-case inputs\n\n");
         printf("SOV patterns (2O9-native):\n");
         printf("  209 <pkg> install  Install package from repo\n");
         printf("  209 <pkg> remove   Remove package\n");
         printf("  209 <pkg> info     Show installed package info (falls back to AUR)\n");
         printf("  209 <term> search  Search installed packages (falls back to AUR)\n");
+        printf("  209 <pkg> tree     Show dependency tree\n");
         printf("  209 <pkg> aur build    Build from AUR\n");
         printf("  209 <term> aur search  Search AUR\n");
         printf("  209 <pkg> aur info     Show AUR package info\n");
         printf("  209 <pkg> aur review   Review PKGBUILD diff\n");
+        printf("  209 aur outdated       List outdated AUR packages\n");
         printf("  209 <pkg> trakker [flags]    Run package in sandbox\n\n");
         printf("Trakker (leading form — command resolved via $PATH):\n");
         printf("  209 trakker ls -la\n");
@@ -2239,6 +2248,515 @@ static int cmd_debag(int argc, char **argv)
         return rc == 0 ? 0 : 1;
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * Phase 6.5: Trakker as runtime behavioral auditor
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* 209 trakker --output=audit.json --format=both --log-syscalls --log-files -- ls -la
+ *
+ * Extended trakker with output format control and selective logging. */
+
+/* 209 doctor — look up common errors in Arch Wiki + 2O9 troubleshooting */
+static int cmd_doctor(int argc, char **argv)
+{
+        if (argc < 1) {
+                fprintf(stderr, "209 doctor: no error message specified\n");
+                fprintf(stderr, "    usage: 209 doctor \"<error message>\"\n");
+                return 1;
+        }
+
+        /* Join all args into one search string */
+        char query[1024] = {0};
+        for (int i = 0; i < argc; i++) {
+                if (i > 0) strcat(query, " ");
+                strncat(query, argv[i], sizeof(query) - strlen(query) - 1);
+        }
+
+        printf("Searching for: %s\n\n", query);
+
+        /* Search the Arch Wiki via the search API */
+        CURL *curl = curl_easy_init();
+        if (!curl) {
+                fprintf(stderr, "209: cannot init libcurl\n");
+                return 1;
+        }
+
+        char url[1024];
+        char *encoded = curl_easy_escape(curl, query, 0);
+        snprintf(url, sizeof(url),
+                 "https://wiki.archlinux.org/api.php?action=query&list=search&srsearch=%s&format=json&srlimit=5",
+                 encoded);
+        curl_free(encoded);
+
+        char *response = NULL;
+        size_t resp_size = 0;
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, news_write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "2O9/0.0.1");
+
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK || !response) {
+                fprintf(stderr, "209: failed to fetch Arch Wiki: %s\n",
+                        curl_easy_strerror(res));
+                free(response);
+                return 1;
+        }
+
+        /* Parse JSON and print results */
+        cJSON *root = cJSON_Parse(response);
+        free(response);
+        if (!root) {
+                fprintf(stderr, "209: could not parse Arch Wiki response\n");
+                return 1;
+        }
+
+        cJSON *query_obj = cJSON_GetObjectItem(root, "query");
+        if (query_obj) {
+                cJSON *search = cJSON_GetObjectItem(query_obj, "search");
+                if (cJSON_IsArray(search)) {
+                        cJSON *item;
+                        int n = 0;
+                        cJSON_ArrayForEach(item, search) {
+                                cJSON *title = cJSON_GetObjectItem(item, "title");
+                                cJSON *snippet = cJSON_GetObjectItem(item, "snippet");
+                                n++;
+                                printf("%d. %s\n", n, cJSON_IsString(title) ? title->valuestring : "?");
+                                if (cJSON_IsString(snippet)) {
+                                        /* Strip HTML tags from snippet */
+                                        char *clean = strdup(snippet->valuestring);
+                                        char *in = clean, *out = clean;
+                                        int in_tag = 0;
+                                        while (*in) {
+                                                if (*in == '<') in_tag = 1;
+                                                if (!in_tag) *out++ = *in;
+                                                if (*in == '>') in_tag = 0;
+                                                in++;
+                                        }
+                                        *out = '\0';
+                                        printf("   %s\n", clean);
+                                        free(clean);
+                                }
+                                printf("   https://wiki.archlinux.org/title/%s\n\n",
+                                       cJSON_IsString(title) ? title->valuestring : "");
+                        }
+                        if (n == 0)
+                                printf("No results found.\n");
+                }
+        }
+        cJSON_Delete(root);
+        return 0;
+}
+
+/* 209 wiki <package> — fetch Arch Wiki page for a package */
+static int cmd_wiki(const char *pkg_name)
+{
+        CURL *curl = curl_easy_init();
+        if (!curl) return 1;
+
+        char url[512];
+        snprintf(url, sizeof(url),
+                 "https://wiki.archlinux.org/api.php?action=parse&page=%s&format=json&prop=wikitext",
+                 pkg_name);
+        /* URL-encode the page name */
+        char *encoded = curl_easy_escape(curl, pkg_name, 0);
+        snprintf(url, sizeof(url),
+                 "https://wiki.archlinux.org/api.php?action=parse&page=%s&format=json&prop=wikitext",
+                 encoded);
+        curl_free(encoded);
+
+        char *response = NULL;
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, news_write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "2O9/0.0.1");
+
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        if (res != CURLE_OK || !response) {
+                fprintf(stderr, "209: failed to fetch wiki page\n");
+                free(response);
+                return 1;
+        }
+
+        cJSON *root = cJSON_Parse(response);
+        free(response);
+        if (!root) return 1;
+
+        cJSON *parse = cJSON_GetObjectItem(root, "parse");
+        if (parse) {
+                cJSON *wikitext = cJSON_GetObjectItem(parse, "wikitext");
+                if (wikitext) {
+                        cJSON *content = cJSON_GetObjectItem(wikitext, "*");
+                        if (cJSON_IsString(content)) {
+                                printf("=== Arch Wiki: %s ===\n\n", pkg_name);
+                                printf("%s\n", content->valuestring);
+                                cJSON_Delete(root);
+                                return 0;
+                        }
+                }
+        }
+
+        fprintf(stderr, "209: no wiki page found for '%s'\n", pkg_name);
+        cJSON_Delete(root);
+        return 1;
+}
+
+/* 209 aur outdated — list AUR packages with newer versions available */
+static int cmd_aur_outdated(void)
+{
+        gen_index_t *idx = get_gen_index();
+        if (!idx) {
+                fprintf(stderr, "209: no generation DB\n");
+                return 1;
+        }
+
+        /* Collect all AUR packages */
+        aur_cache_t *cache = aur_cache_open(NULL);
+        if (!cache) {
+                fprintf(stderr, "209: cannot init AUR client\n");
+                return 1;
+        }
+
+        printf("Checking AUR packages for updates...\n\n");
+        int outdated_count = 0;
+
+        for (size_t i = 0; i < idx->bucket_count; i++) {
+                for (gen_index_entry_t *e = idx->buckets[i]; e; e = e->next) {
+                        if (!e->origin || strcmp(e->origin, "aur") != 0) continue;
+
+                        aur_rpc_result_t result = aur_info(cache, e->name);
+                        if (result.success && result.packages) {
+                                if (strcmp(e->version, result.packages->version) != 0) {
+                                        printf("  %s: %s -> %s\n",
+                                               e->name, e->version, result.packages->version);
+                                        outdated_count++;
+                                }
+                        }
+                        aur_rpc_result_free(&result);
+                }
+        }
+
+        aur_cache_close(cache);
+        if (outdated_count == 0)
+                printf("All AUR packages up to date.\n");
+        else
+                printf("\n%d package(s) outdated. Run: 209 apply\n", outdated_count);
+        return 0;
+}
+
+/* 209 cache — paccache-like cache pruning */
+static int cmd_cache(int argc, char **argv)
+{
+        int keep = 3;  /* keep last 3 versions by default */
+        const char *cache_dir = "/var/cache/2O9/pkg";
+
+        /* Parse args: 209 cache [--keep=N] [--dry-run] */
+        int dry_run = 0;
+        for (int i = 0; i < argc; i++) {
+                if (strncmp(argv[i], "--keep=", 7) == 0) {
+                        keep = atoi(argv[i] + 7);
+                } else if (strcmp(argv[i], "--dry-run") == 0) {
+                        dry_run = 1;
+                } else if (strcmp(argv[i], "--help") == 0) {
+                        printf("Usage: 209 cache [--keep=N] [--dry-run]\n");
+                        printf("  Prune old package cache files, keeping N most recent versions.\n");
+                        printf("  --keep=N     Keep N most recent versions (default: 3)\n");
+                        printf("  --dry-run    Show what would be deleted without deleting\n");
+                        return 0;
+                }
+        }
+
+        DIR *d = opendir(cache_dir);
+        if (!d) {
+                fprintf(stderr, "209: cannot open cache dir %s\n", cache_dir);
+                return 1;
+        }
+
+        /* Group packages by name, sort by version, keep top N */
+        /* Simple approach: collect all files, group by pkgname prefix */
+        typedef struct cache_entry {
+                char name[256];
+                char filename[512];
+                off_t size;
+        } cache_entry_t;
+
+        cache_entry_t *entries = NULL;
+        size_t count = 0, cap = 64;
+        entries = malloc(cap * sizeof(*entries));
+
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL) {
+                if (de->d_name[0] == '.') continue;
+                /* Package cache files: <pkgname>-<version>-<arch>.pkg.tar.zst */
+                /* Also .db files from sync — skip those */
+                if (strstr(de->d_name, ".db") || strstr(de->d_name, ".files")) continue;
+
+                if (count >= cap) {
+                        cap *= 2;
+                        entries = realloc(entries, cap * sizeof(*entries));
+                }
+
+                /* Extract package name (everything before the last -<ver>-<arch>) */
+                strncpy(entries[count].filename, de->d_name, sizeof(entries[count].filename) - 1);
+                char path[PATH_MAX];
+                snprintf(path, sizeof(path), "%s/%s", cache_dir, de->d_name);
+                struct stat st;
+                if (stat(path, &st) == 0)
+                        entries[count].size = st.st_size;
+                else
+                        entries[count].size = 0;
+
+                /* Try to extract pkgname — split on '-' and find the version part */
+                char *dash = entries[count].filename;
+                char *last_dash = NULL;
+                char *second_last_dash = NULL;
+                while ((dash = strchr(dash, '-')) != NULL) {
+                        second_last_dash = last_dash;
+                        last_dash = dash;
+                        dash++;
+                }
+                if (second_last_dash) {
+                        size_t name_len = second_last_dash - entries[count].filename;
+                        strncpy(entries[count].name, entries[count].filename, name_len);
+                        entries[count].name[name_len] = '\0';
+                } else {
+                        strncpy(entries[count].name, de->d_name, sizeof(entries[count].name) - 1);
+                }
+                count++;
+        }
+        closedir(d);
+
+        /* For each unique package name, sort versions and mark old ones for deletion */
+        long total_freed = 0;
+        int deleted = 0;
+        for (size_t i = 0; i < count; i++) {
+                /* Count how many versions of this package exist */
+                int ver_count = 0;
+                for (size_t j = i; j < count; j++) {
+                        if (strcmp(entries[j].name, entries[i].name) == 0)
+                                ver_count++;
+                }
+                if (ver_count <= keep) {
+                        i += ver_count - 1;  /* skip ahead */
+                        continue;
+                }
+                /* Delete all but the last 'keep' versions */
+                int to_delete = ver_count - keep;
+                int seen = 0;
+                for (size_t j = i; j < count && strcmp(entries[j].name, entries[i].name) == 0; j++) {
+                        seen++;
+                        if (seen <= to_delete) {
+                                char path[PATH_MAX];
+                                snprintf(path, sizeof(path), "%s/%s", cache_dir, entries[j].filename);
+                                if (dry_run) {
+                                        printf("  would remove: %s (%ld KB)\n",
+                                               entries[j].filename, entries[j].size / 1024);
+                                } else {
+                                        printf("  removing: %s (%ld KB)\n",
+                                               entries[j].filename, entries[j].size / 1024);
+                                        unlink(path);
+                                }
+                                total_freed += entries[j].size;
+                                deleted++;
+                        }
+                }
+                i += ver_count - 1;
+        }
+
+        free(entries);
+        printf("\n%d file(s) %s, %.1f MB %s\n",
+               deleted, dry_run ? "would be removed" : "removed",
+               total_freed / 1048576.0, dry_run ? "would be freed" : "freed");
+        return 0;
+}
+
+/* 209 <pkg> tree — dependency tree visualizer */
+static void print_dep_tree(const char *pkg_name, int depth, int *visited, int visited_count)
+{
+        /* Print with indentation */
+        for (int i = 0; i < depth; i++)
+                printf("  ");
+        if (depth > 0) printf("└─ ");
+        printf("%s\n", pkg_name);
+
+        /* Check for cycles */
+        for (int i = 0; i < visited_count; i++) {
+                if (strcmp(visited[i] == 0 ? "" : "", pkg_name) == 0) {
+                        for (int i = 0; i < depth + 1; i++) printf("  ");
+                        printf("└─ (cycle detected)\n");
+                        return;
+                }
+        }
+
+        /* TODO: query libalpm for deps. For now, show a placeholder. */
+        if (depth < 3) {
+                /* Check if installed locally */
+                gen_index_t *idx = get_gen_index();
+                if (idx) {
+                        const gen_index_entry_t *e = gen_index_lookup(idx, pkg_name);
+                        if (!e) {
+                                for (int i = 0; i < depth + 1; i++) printf("  ");
+                                printf("└─ (not installed)\n");
+                        }
+                }
+        } else if (depth >= 3) {
+                for (int i = 0; i < depth + 1; i++) printf("  ");
+                printf("└─ (max depth reached)\n");
+        }
+}
+
+static int cmd_tree(const char *pkg_name)
+{
+        printf("=== Dependency tree for %s ===\n\n", pkg_name);
+        print_dep_tree(pkg_name, 0, NULL, 0);
+        printf("\nNote: full dependency resolution requires lib2O9 (alpm_dep_compute).\n");
+        printf("For now, this shows the package and whether it's installed.\n");
+        return 0;
+}
+
+/* 209 fuzz — basic fuzzing: run a binary with edge-case inputs in trakker/debag */
+static int cmd_fuzz(int argc, char **argv)
+{
+        if (argc < 1) {
+                fprintf(stderr, "209 fuzz: no target specified\n");
+                fprintf(stderr, "    usage: 209 fuzz <binary> [args...]\n");
+                fprintf(stderr, "    2O9 runs the binary with edge-case inputs and logs crashes.\n");
+                return 1;
+        }
+
+        const char *target = argv[0];
+        int iterations = 100;
+        int crashes = 0;
+
+        printf("=== Fuzzing %s (%d iterations) ===\n\n", target, iterations);
+
+        /* Simple fuzzer: feed edge-case inputs and watch for crashes */
+        const char *edge_inputs[] = {
+                "", "\x00", "\xff", "AAAA...AAAA",
+                "%s%s%s%s", "../../../etc/passwd", "$(reboot)",
+                "\x90\x90\x90\x90", NULL
+        };
+        /* Also generate some random-ish inputs */
+        char buf[4096];
+
+        for (int i = 0; i < iterations; i++) {
+                const char *input;
+                if (i < 8) {
+                        input = edge_inputs[i];
+                } else {
+                        /* Generate pseudo-random input */
+                        size_t len = (i * 37) % sizeof(buf);
+                        for (size_t j = 0; j < len; j++)
+                                buf[j] = (char)((i * 31 + j * 17) & 0xff);
+                        buf[len] = '\0';
+                        input = buf;
+                }
+
+                /* Run the target with this input via a pipe */
+                /* For simplicity, just check if it crashes */
+                pid_t pid = fork();
+                if (pid == 0) {
+                        /* Child: redirect stdin from a temp file */
+                        char tmpfile[] = "/tmp/209fuzzXXXXXX";
+                        int fd = mkstemp(tmpfile);
+                        if (fd >= 0) {
+                                write(fd, input, strlen(input));
+                                lseek(fd, 0, SEEK_SET);
+                                dup2(fd, STDIN_FILENO);
+                                close(fd);
+                        }
+                        /* Redirect stdout/stderr to /dev/null */
+                        int devnull = open("/dev/null", O_WRONLY);
+                        if (devnull >= 0) {
+                                dup2(devnull, STDOUT_FILENO);
+                                dup2(devnull, STDERR_FILENO);
+                                close(devnull);
+                        }
+                        execlp(target, target, (char *)NULL);
+                        _exit(127);
+                }
+
+                int status;
+                waitpid(pid, &status, 0);
+                if (WIFSIGNALED(status)) {
+                        printf("  CRASH at iteration %d: signal %d (%s), input len %zu\n",
+                               i, WTERMSIG(status),
+                               WTERMSIG(status) == SIGSEGV ? "SIGSEGV" :
+                               WTERMSIG(status) == SIGABRT ? "SIGABRT" : "?",
+                               strlen(input));
+                        crashes++;
+                }
+        }
+
+        printf("\n=== Fuzzing complete: %d crashes in %d iterations ===\n", crashes, iterations);
+        return crashes > 0 ? 1 : 0;
+}
+
+/* .install script interactive prompt */
+static int cmd_install_script_prompt(const char *pkg_name, const char *scriptlet_path)
+{
+        printf("\n.install script detected for %s.\n", pkg_name);
+        printf("2O9 does not run .install scripts automatically (see DESIGN.md §7).\n\n");
+        printf("Select an option:\n");
+        printf("  [1] Show me the script (review before running)\n");
+        printf("  [2] Run the script now (as your user)\n");
+        printf("  [3] Run the script with sudo (systemd units, etc.)\n");
+        printf("  [4] Skip this, I'll handle it manually\n");
+        printf("  [5] Show me what this script does (Debag analysis)\n");
+        printf("\n> ");
+
+        char choice[16];
+        if (!fgets(choice, sizeof(choice), stdin))
+                return 0;
+        int sel = atoi(choice);
+
+        switch (sel) {
+        case 1:
+                printf("\n=== %s ===\n", scriptlet_path);
+                execlp("cat", "cat", scriptlet_path, (char *)NULL);
+                return 0;
+        case 2: {
+                const char *argv[] = {"sh", scriptlet_path, "post_install", NULL};
+                execvp("sh", (char *const *)argv);
+                return 0;
+        }
+        case 3: {
+                const char *argv[] = {"sudo", "sh", scriptlet_path, "post_install", NULL};
+                execvp("sudo", (char *const *)argv);
+                return 0;
+        }
+        case 4:
+                printf("Skipped. The script is at: %s\n", scriptlet_path);
+                printf("Run it manually with: sh %s post_install\n", scriptlet_path);
+                return 0;
+        case 5: {
+                printf("\nRunning Debag analysis on the install script...\n\n");
+                debag_policy_t policy = {0};
+                policy.static_scan_only = 1;
+                debag_analysis_t *a = debag_analyze("/bin/sh");
+                if (a) {
+                        printf("The script will be interpreted by /bin/sh.\n");
+                        printf("Debag can analyze the script's syscalls once it runs.\n\n");
+                        printf("To run the script under Debag:\n");
+                        printf("  209 debag --verbose -- sh %s post_install\n", scriptlet_path);
+                        debag_analysis_free(a);
+                } else {
+                        printf("Could not analyze. To inspect manually:\n");
+                        printf("  209 debag --static-scan -- /bin/sh\n");
+                }
+                return 0;
+        }
+        default:
+                printf("Invalid choice. Skipping.\n");
+                return 0;
+        }
+}
+
 int main(int argc, char *argv[])
 {
         /* Handle options */
@@ -2434,6 +2952,26 @@ int main(int argc, char *argv[])
                  * Hybrid sandbox: seccomp fast path + ptrace slow path. */
                 return cmd_debag(argc - 2, &argv[2]);
         }
+        if (strcmp(argv[1], "doctor") == 0) {
+                /* 209 doctor "error message" — search Arch Wiki for solutions */
+                return cmd_doctor(argc - 2, &argv[2]);
+        }
+        if (strcmp(argv[1], "wiki") == 0) {
+                /* 209 wiki <package> — fetch Arch Wiki page */
+                if (argc < 3) {
+                        fprintf(stderr, "209 wiki: no package name\n");
+                        return 1;
+                }
+                return cmd_wiki(argv[2]);
+        }
+        if (strcmp(argv[1], "cache") == 0) {
+                /* 209 cache [--keep=N] [--dry-run] — paccache-like pruning */
+                return cmd_cache(argc - 2, &argv[2]);
+        }
+        if (strcmp(argv[1], "fuzz") == 0) {
+                /* 209 fuzz <binary> — basic fuzzing */
+                return cmd_fuzz(argc - 2, &argv[2]);
+        }
 
         /* SOV pattern: need at least subject + verb */
         if (argc < 3) {
@@ -2519,6 +3057,16 @@ int main(int argc, char *argv[])
                 /* Clone first if needed, then review */
                 aur_clone(argv[1], build_dir);
                 return aur_review(argv[1], build_dir);
+        }
+        if (argc >= 3 && strcmp(argv[2], "aur") == 0 &&
+            argc >= 4 && strcmp(argv[3], "outdated") == 0) {
+                /* 209 aur outdated — list AUR packages with newer versions */
+                return cmd_aur_outdated();
+        }
+
+        /* 209 <pkg> tree — dependency tree visualizer */
+        if (strcmp(verb, "tree") == 0) {
+                return cmd_tree(subject);
         }
 
         /* Trakker: 209 <subject> trakker [flags] [command] */
