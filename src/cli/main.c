@@ -1109,12 +1109,24 @@ static int sync_one_repo(CURL *curl, const char *repo_name, const char *server_u
                 snprintf(url, sizeof(url), "%s/%s.db", server_url, repo_name);
         }
 
-        /* Cache dir: /var/cache/2O9/pkg/<repo>.db */
-        snprintf(dest, sizeof(dest), "/var/cache/2O9/pkg/%s.db", repo_name);
+        /* Cache dir: ~/.cache/2O9/pkg/<repo>.db (user-writable) */
+        char *home = getenv("HOME");
+        if (home)
+                snprintf(dest, sizeof(dest), "%s/.cache/2O9/pkg/%s.db", home, repo_name);
+        else
+                snprintf(dest, sizeof(dest), "/var/cache/2O9/pkg/%s.db", repo_name);
 
-        /* Ensure cache dir exists */
-        (void)mkdir("/var/cache/2O9", 0755);
-        (void)mkdir("/var/cache/2O9/pkg", 0755);
+        /* Ensure cache dir exists (mkdir -p) */
+        char dir[PATH_MAX];
+        snprintf(dir, sizeof(dir), "%s", dest);
+        char *slash = strrchr(dir, '/');
+        if (slash) {
+                *slash = '\0';
+                for (char *p = dir + 1; *p; p++) {
+                        if (*p == '/') { *p = '\0'; mkdir(dir, 0755); *p = '/'; }
+                }
+                mkdir(dir, 0755);
+        }
 
         FILE *fp = fopen(dest, "wb");
         if (!fp) {
@@ -1163,19 +1175,22 @@ static int cmd_sync(void)
          * alpm_handle_t with the sync DBs registered. */
         char *manifest_json = NULL;
         char *home = getenv("HOME");
-        char user_config[PATH_MAX] = {0};
-        if (home)
-                snprintf(user_config, sizeof(user_config),
-                         "%s/.config/2O9/home.nix", home);
+        char user_2O9[PATH_MAX] = {0};
+        char user_home[PATH_MAX] = {0};
+        if (home) {
+                snprintf(user_2O9, sizeof(user_2O9), "%s/.config/2O9/2O9.nix", home);
+                snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", home);
+        }
 
         char *eval_err = NULL;
         struct stat st;
-        if (user_config[0] && stat(user_config, &st) == 0) {
-                manifest_json = eval_nix_config(user_config, &eval_err);
-        }
-        if (!manifest_json && stat(CONFIG_PATH, &st) == 0) {
+        /* Check 2O9.nix (what 209 init creates), then home.nix, then system config */
+        if (user_2O9[0] && stat(user_2O9, &st) == 0)
+                manifest_json = eval_nix_config(user_2O9, &eval_err);
+        if (!manifest_json && user_home[0] && stat(user_home, &st) == 0)
+                manifest_json = eval_nix_config(user_home, &eval_err);
+        if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
                 manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
-        }
 
         /* If we have a manifest, use the lib2O9 path */
         if (manifest_json) {
@@ -1209,15 +1224,14 @@ static int cmd_sync(void)
                 return 0;
         }
 
-        /* Fallback path: no 2O9.nix found, use hardcoded Arch defaults
-         * via direct libcurl. This is the pre-Phase-1 behavior. */
+        /* Fallback: no config found, use default Arch mirrors. */
         free(eval_err);
-        fprintf(stderr, "209: no 2O9.nix found - using default Arch mirrors\n");
+        fprintf(stderr, "209: no config found - using default Arch mirrors\n");
 
         const char *default_repos[][2] = {
-                {"core",     "https://mirror.archlinuxarm.org/x86_64/core"},
-                {"extra",    "https://mirror.archlinuxarm.org/x86_64/extra"},
-                {"multilib", "https://mirror.archlinuxarm.org/x86_64/multilib"},
+                {"core",     "https://geo.mirror.pkgbuild.com/core/os/x86_64"},
+                {"extra",    "https://geo.mirror.pkgbuild.com/extra/os/x86_64"},
+                {"multilib", "https://geo.mirror.pkgbuild.com/multilib/os/x86_64"},
                 {NULL, NULL}
         };
 
