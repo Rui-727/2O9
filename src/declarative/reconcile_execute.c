@@ -28,19 +28,55 @@ int reconcile_execute(reconcile_txn_t *txn)
 
     int rc = 0;
 
-    /* Step 1: Install repo packages via 209's own install path */
+    /* Step 1: Install repo packages via 209's own install path.
+     * If a package isn't found in the repo sync DBs, automatically
+     * fall back to building from the AUR. */
     if (txn->repo_install_count > 0) {
         printf("  installing %zu repo packages:", txn->repo_install_count);
         for (pkg_name_t *p = txn->repo_install; p; p = p->next)
             printf(" %s", p->name);
         printf("\n");
 
+        build_config_t config = {
+            .build_dir = "/tmp/2O9-build",
+            .no_confirm = 1,
+            .skip_review = 1,
+            .chroot = 0,
+            .sign = 0,
+        };
+
         for (pkg_name_t *p = txn->repo_install; p; p = p->next) {
             printf("    installing %s...\n", p->name);
             int ret = cmd_install(p->name);
             if (ret != 0) {
-                fprintf(stderr, "    failed to install %s\n", p->name);
-                rc = ret;
+                printf("    %s not in repos, trying AUR...\n", p->name);
+
+                /* Fall back to AUR build */
+                if (aur_clone(p->name, config.build_dir) != 0) {
+                    fprintf(stderr, "    failed to clone %s from AUR\n", p->name);
+                    rc = -1;
+                    continue;
+                }
+
+                build_result_t *result = aur_build(p->name, config.build_dir, &config);
+                if (!result || !result->success) {
+                    fprintf(stderr, "    failed to build %s: %s\n",
+                            p->name,
+                            (result && result->error_msg) ? result->error_msg
+                                                          : "unknown error");
+                    if (result) build_result_free(result);
+                    rc = -1;
+                    continue;
+                }
+
+                if (aur_install(result->pkg_path) != 0) {
+                    fprintf(stderr, "    failed to install %s from AUR\n", p->name);
+                    rc = -1;
+                } else {
+                    printf("    installed %s from AUR\n", p->name);
+                }
+
+                build_result_free(result);
             }
         }
     }
@@ -89,7 +125,11 @@ int reconcile_execute(reconcile_txn_t *txn)
         }
     }
 
-    /* Step 3: Remove packages no longer in the manifest */
+    /* Step 3: Remove packages no longer in the manifest.
+     * Note: cmd_remove commits its own generation. This is intentional -
+     * the remove creates a new generation without the package, and then
+     * cmd_apply will commit another generation with the desired state.
+     * If the install failed, the remove still cleans up old packages. */
     if (txn->pkg_remove_count > 0) {
         printf("  removing %zu packages:", txn->pkg_remove_count);
         for (pkg_name_t *p = txn->pkg_remove; p; p = p->next)

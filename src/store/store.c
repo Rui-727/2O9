@@ -38,27 +38,27 @@ extern char **environ;
 
 static int mkdirs(const char *path)
 {
-	char tmp[PATH_MAX];
-	char *p = NULL;
-	size_t len;
+        char tmp[PATH_MAX];
+        char *p = NULL;
+        size_t len;
 
-	snprintf(tmp, sizeof(tmp), "%s", path);
-	len = strlen(tmp);
-	if (len > 0 && tmp[len - 1] == '/')
-		tmp[len - 1] = '\0';
+        snprintf(tmp, sizeof(tmp), "%s", path);
+        len = strlen(tmp);
+        if (len > 0 && tmp[len - 1] == '/')
+                tmp[len - 1] = '\0';
 
-	for (p = tmp + 1; *p; p++) {
-		if (*p == '/') {
-			*p = '\0';
-			if (mkdir(tmp, 0755) < 0 && errno != EEXIST)
-				return -1;
-			*p = '/';
-		}
-	}
-	if (mkdir(tmp, 0755) < 0 && errno != EEXIST)
-		return -1;
+        for (p = tmp + 1; *p; p++) {
+                if (*p == '/') {
+                        *p = '\0';
+                        if (mkdir(tmp, 0755) < 0 && errno != EEXIST)
+                                return -1;
+                        *p = '/';
+                }
+        }
+        if (mkdir(tmp, 0755) < 0 && errno != EEXIST)
+                return -1;
 
-	return 0;
+        return 0;
 }
 
 /* Read .PKGINFO from a .pkg.tar.zst to extract pkgname and pkgver.
@@ -66,286 +66,340 @@ static int mkdirs(const char *path)
 static int read_pkginfo(const char *pkg_path, char *name_out, size_t name_sz,
                         char *ver_out, size_t ver_sz)
 {
-	int pipefd[2];
-	if (pipe(pipefd) < 0)
-		return -1;
+        int pipefd[2];
+        if (pipe(pipefd) < 0)
+                return -1;
 
-	pid_t pid;
-	/* tar -xf <pkg> --to-stdout .PKGINFO
-	 * Some packages have .PKGINFO at root, others at ./PKGINFO */
-	char *argv[] = {
-		"tar", "-xf", (char *)pkg_path,
-		"--to-stdout", ".PKGINFO",
-		NULL
-	};
+        pid_t pid;
+        /* tar -xf <pkg> --to-stdout .PKGINFO
+         * Some packages have .PKGINFO at root, others at ./PKGINFO */
+        char *argv[] = {
+                "tar", "-xf", (char *)pkg_path,
+                "--to-stdout", ".PKGINFO",
+                NULL
+        };
 
-	posix_spawn_file_actions_t actions;
-	posix_spawn_file_actions_init(&actions);
-	posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
-	posix_spawn_file_actions_addclose(&actions, pipefd[0]);
-	posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+        posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+        posix_spawn_file_actions_addclose(&actions, pipefd[1]);
 
-	int ret = posix_spawnp(&pid, "tar", &actions, NULL, argv, environ);
-	posix_spawn_file_actions_destroy(&actions);
+        int ret = posix_spawnp(&pid, "tar", &actions, NULL, argv, environ);
+        posix_spawn_file_actions_destroy(&actions);
 
-	if (ret != 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		return -1;
-	}
+        if (ret != 0) {
+                close(pipefd[0]);
+                close(pipefd[1]);
+                return -1;
+        }
 
-	close(pipefd[1]);
+        close(pipefd[1]);
 
-	/* Read the .PKGINFO content */
-	char buf[8192] = {0};
-	ssize_t total = 0;
-	ssize_t n;
-	while ((n = read(pipefd[0], buf + total, sizeof(buf) - total - 1)) > 0) {
-		total += n;
-		if (total >= (ssize_t)sizeof(buf) - 1)
-			break;
-	}
-	close(pipefd[0]);
+        /* Read the .PKGINFO content */
+        char buf[8192] = {0};
+        ssize_t total = 0;
+        ssize_t n;
+        while ((n = read(pipefd[0], buf + total, sizeof(buf) - total - 1)) > 0) {
+                total += n;
+                if (total >= (ssize_t)sizeof(buf) - 1)
+                        break;
+        }
+        close(pipefd[0]);
 
-	int status;
-	waitpid(pid, &status, 0);
+        int status;
+        waitpid(pid, &status, 0);
 
-	/* If that failed (some tar impls), try without leading dot */
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0) {
-		/* Try alternative: tar -xf <pkg> --to-stdout ./.PKGINFO */
-		char *argv2[] = {
-			"tar", "-xf", (char *)pkg_path,
-			"--to-stdout", "./.PKGINFO",
-			NULL
-		};
-		pipe(pipefd);
+        /* If that failed (some tar impls), try without leading dot */
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0) {
+                /* Try alternative: tar -xf <pkg> --to-stdout ./.PKGINFO */
+                char *argv2[] = {
+                        "tar", "-xf", (char *)pkg_path,
+                        "--to-stdout", "./.PKGINFO",
+                        NULL
+                };
+                pipe(pipefd);
 
-		posix_spawn_file_actions_init(&actions);
-		posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
-		posix_spawn_file_actions_addclose(&actions, pipefd[0]);
-		posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+                posix_spawn_file_actions_init(&actions);
+                posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+                posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+                posix_spawn_file_actions_addclose(&actions, pipefd[1]);
 
-		ret = posix_spawnp(&pid, "tar", &actions, NULL, argv2, environ);
-		posix_spawn_file_actions_destroy(&actions);
+                ret = posix_spawnp(&pid, "tar", &actions, NULL, argv2, environ);
+                posix_spawn_file_actions_destroy(&actions);
 
-		if (ret != 0) {
-			close(pipefd[0]);
-			close(pipefd[1]);
-			return -1;
-		}
+                if (ret != 0) {
+                        close(pipefd[0]);
+                        close(pipefd[1]);
+                        return -1;
+                }
 
-		close(pipefd[1]);
-		total = 0;
-		while ((n = read(pipefd[0], buf + total, sizeof(buf) - total - 1)) > 0) {
-			total += n;
-			if (total >= (ssize_t)sizeof(buf) - 1)
-				break;
-		}
-		close(pipefd[0]);
-		waitpid(pid, &status, 0);
+                close(pipefd[1]);
+                total = 0;
+                while ((n = read(pipefd[0], buf + total, sizeof(buf) - total - 1)) > 0) {
+                        total += n;
+                        if (total >= (ssize_t)sizeof(buf) - 1)
+                                break;
+                }
+                close(pipefd[0]);
+                waitpid(pid, &status, 0);
 
-		if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0)
-			return -1;
-	}
+                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0)
+                        return -1;
+        }
 
-	buf[total] = '\0';
+        buf[total] = '\0';
 
-	/* Parse pkgname and pkgver from .PKGINFO */
-	name_out[0] = '\0';
-	ver_out[0] = '\0';
+        /* Parse pkgname and pkgver from .PKGINFO */
+        name_out[0] = '\0';
+        ver_out[0] = '\0';
 
-	char *line = strtok(buf, "\n");
-	while (line) {
-		/* Skip leading whitespace */
-		while (*line && isspace((unsigned char)*line)) line++;
+        char *line = strtok(buf, "\n");
+        while (line) {
+                /* Skip leading whitespace */
+                while (*line && isspace((unsigned char)*line)) line++;
 
-		if (strncmp(line, "pkgname", 7) == 0 && line[7] == '=') {
-			char *val = line + 8;
-			while (*val && isspace((unsigned char)*val)) val++;
-			strncpy(name_out, val, name_sz - 1);
-			name_out[name_sz - 1] = '\0';
-			/* Trim trailing whitespace */
-			size_t l = strlen(name_out);
-			while (l > 0 && isspace((unsigned char)name_out[l-1]))
-				name_out[--l] = '\0';
-		} else if (strncmp(line, "pkgver", 6) == 0 && line[6] == '=') {
-			char *val = line + 7;
-			while (*val && isspace((unsigned char)*val)) val++;
-			strncpy(ver_out, val, ver_sz - 1);
-			ver_out[ver_sz - 1] = '\0';
-			size_t l = strlen(ver_out);
-			while (l > 0 && isspace((unsigned char)ver_out[l-1]))
-				ver_out[--l] = '\0';
-		}
-		line = strtok(NULL, "\n");
-	}
+                if (strncmp(line, "pkgname", 7) == 0 && line[7] == '=') {
+                        char *val = line + 8;
+                        while (*val && isspace((unsigned char)*val)) val++;
+                        strncpy(name_out, val, name_sz - 1);
+                        name_out[name_sz - 1] = '\0';
+                        /* Trim trailing whitespace */
+                        size_t l = strlen(name_out);
+                        while (l > 0 && isspace((unsigned char)name_out[l-1]))
+                                name_out[--l] = '\0';
+                } else if (strncmp(line, "pkgver", 6) == 0 && line[6] == '=') {
+                        char *val = line + 7;
+                        while (*val && isspace((unsigned char)*val)) val++;
+                        strncpy(ver_out, val, ver_sz - 1);
+                        ver_out[ver_sz - 1] = '\0';
+                        size_t l = strlen(ver_out);
+                        while (l > 0 && isspace((unsigned char)ver_out[l-1]))
+                                ver_out[--l] = '\0';
+                }
+                line = strtok(NULL, "\n");
+        }
 
-	if (name_out[0] == '\0' || ver_out[0] == '\0')
-		return -1;
+        if (name_out[0] == '\0' || ver_out[0] == '\0')
+                return -1;
 
-	return 0;
+        return 0;
 }
 
 /* ── nix-store --add backend ─────────────────────────────────────── */
 
 static int spawn_nix_store_add(const char *path, char **store_path_out)
 {
-	int pipefd[2];
-	if (pipe(pipefd) < 0)
-		return -1;
+        int pipefd[2];
+        if (pipe(pipefd) < 0)
+                return -1;
 
-	pid_t pid;
-	char *argv[] = { "nix-store", "--add", (char *)path, NULL };
+        pid_t pid;
+        char *argv[] = { "nix-store", "--add", (char *)path, NULL };
 
-	posix_spawn_file_actions_t actions;
-	posix_spawn_file_actions_init(&actions);
-	posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
-	posix_spawn_file_actions_addclose(&actions, pipefd[0]);
-	posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+        posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+        posix_spawn_file_actions_addclose(&actions, pipefd[1]);
 
-	int ret = posix_spawnp(&pid, "nix-store", &actions, NULL, argv, environ);
-	posix_spawn_file_actions_destroy(&actions);
+        int ret = posix_spawnp(&pid, "nix-store", &actions, NULL, argv, environ);
+        posix_spawn_file_actions_destroy(&actions);
 
-	if (ret != 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		return -1;
-	}
+        if (ret != 0) {
+                close(pipefd[0]);
+                close(pipefd[1]);
+                return -1;
+        }
 
-	close(pipefd[1]);
+        close(pipefd[1]);
 
-	char buf[4096] = {0};
-	ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
-	close(pipefd[0]);
+        char buf[4096] = {0};
+        ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+        close(pipefd[0]);
 
-	int status;
-	waitpid(pid, &status, 0);
+        int status;
+        waitpid(pid, &status, 0);
 
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-		return -1;
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+                return -1;
 
-	if (n <= 0)
-		return -1;
+        if (n <= 0)
+                return -1;
 
-	/* Trim trailing whitespace */
-	while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' '))
-		buf[--n] = '\0';
+        /* Trim trailing whitespace */
+        while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' '))
+                buf[--n] = '\0';
 
-	*store_path_out = strdup(buf);
-	return 0;
+        *store_path_out = strdup(buf);
+        return 0;
 }
 
 /* ── Direct extraction backend (tar subprocess) ──────────────────── */
 
 static int direct_extract(const char *pkg_path, char **store_path_out)
 {
-	/* Step 1: Read .PKGINFO to get pkgname + pkgver */
-	char pkg_name[256] = {0};
-	char pkg_ver[128] = {0};
+        /* Step 1: Read .PKGINFO to get pkgname + pkgver */
+        char pkg_name[256] = {0};
+        char pkg_ver[128] = {0};
 
-	if (read_pkginfo(pkg_path, pkg_name, sizeof(pkg_name),
-	                 pkg_ver, sizeof(pkg_ver)) < 0) {
-		return -1;
-	}
+        if (read_pkginfo(pkg_path, pkg_name, sizeof(pkg_name),
+                         pkg_ver, sizeof(pkg_ver)) < 0) {
+                return -1;
+        }
 
-	/* Step 2: Build the store path: /nix/store/<name>-<version> */
-	char store_path[PATH_MAX];
-	snprintf(store_path, sizeof(store_path), "/nix/store/%s-%s",
-	         pkg_name, pkg_ver);
+        /* Step 2: Build the store path: /nix/store/<name>-<version> */
+        char store_path[PATH_MAX];
+        snprintf(store_path, sizeof(store_path), "/nix/store/%s-%s",
+                 pkg_name, pkg_ver);
 
-	/* Idempotent: if path already exists and is a directory, skip extraction */
-	struct stat st;
-	if (stat(store_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-		*store_path_out = strdup(store_path);
-		return 0;
-	}
+        /* Idempotent: if path already exists and is a directory, skip extraction */
+        struct stat st;
+        if (stat(store_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+                *store_path_out = strdup(store_path);
+                return 0;
+        }
 
-	/* Step 3: Create the store directory */
-	if (mkdirs(store_path) < 0)
-		return -1;
+        /* Step 3: Create the store directory */
+        if (mkdirs(store_path) < 0)
+                return -1;
 
-	/* Step 4: Extract the archive into the store directory.
-	 * We extract to a staging temp dir first, then move, to ensure
-	 * atomicity. On failure, the store path is empty and we clean up.
-	 *
-	 * tar -xf <pkg> -C <store_path> --strip-components=1
-	 *   (strip-components=1 removes the top-level directory like "pkg-name/")
-	 * Actually, Arch .pkg.tar.zst don't have a top-level dir - files
-	 * are at . (bin/, etc/, usr/, .PKGINFO, .INSTALL, etc.)
-	 * So we extract directly. */
-	pid_t pid;
-	char *argv[] = {
-		"tar", "-xf", (char *)pkg_path,
-		"-C", store_path,
-		NULL
-	};
+        /* Step 4: Extract the archive into the store directory.
+         * Arch .pkg.tar.zst files are zstd-compressed tarballs.
+         * Try multiple methods:
+         *   a) tar -xf <pkg> -C <store_path>  (modern tar with zstd support)
+         *   b) tar --use-compress-program=zstd -xf <pkg> -C <store_path>
+         *   c) zstd -d <pkg> | tar xf - -C <store_path>  (pipeline)
+         */
+        int extract_ok = 0;
 
-	int ret = posix_spawnp(&pid, "tar", NULL, NULL, argv, environ);
-	if (ret != 0) {
-		rmdir(store_path);
-		return -1;
-	}
+        /* Method (a): modern tar with built-in zstd */
+        {
+                pid_t pid;
+                char *argv[] = {
+                        "tar", "-xf", (char *)pkg_path,
+                        "-C", store_path,
+                        NULL
+                };
+                posix_spawnp(&pid, "tar", NULL, NULL, argv, environ);
+                int status;
+                waitpid(pid, &status, 0);
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                        extract_ok = 1;
+                }
+        }
 
-	int status;
-	waitpid(pid, &status, 0);
+        /* Method (b): tar with explicit zstd decompressor */
+        if (!extract_ok) {
+                pid_t pid;
+                char *argv[] = {
+                        "tar", "--use-compress-program=zstd",
+                        "-xf", (char *)pkg_path,
+                        "-C", store_path,
+                        NULL
+                };
+                posix_spawnp(&pid, "tar", NULL, NULL, argv, environ);
+                int status;
+                waitpid(pid, &status, 0);
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                        extract_ok = 1;
+                }
+        }
 
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		/* Extraction failed - clean up */
-		rmdir(store_path);
-		return -1;
-	}
+        /* Method (c): zstd + tar pipeline */
+        if (!extract_ok) {
+                int pipefd[2];
+                if (pipe(pipefd) == 0) {
+                        pid_t zstd_pid = fork();
+                        if (zstd_pid == 0) {
+                                /* zstd child: decompress to pipe */
+                                close(pipefd[0]);
+                                dup2(pipefd[1], STDOUT_FILENO);
+                                close(pipefd[1]);
+                                execlp("zstd", "zstd", "-d", "-c", pkg_path, NULL);
+                                _exit(127);
+                        }
 
-	*store_path_out = strdup(store_path);
-	return 0;
+                        pid_t tar_pid = fork();
+                        if (tar_pid == 0) {
+                                /* tar child: extract from pipe */
+                                close(pipefd[1]);
+                                dup2(pipefd[0], STDIN_FILENO);
+                                close(pipefd[0]);
+                                execlp("tar", "tar", "xf", "-", "-C", store_path, NULL);
+                                _exit(127);
+                        }
+
+                        close(pipefd[0]);
+                        close(pipefd[1]);
+
+                        int zstd_status, tar_status;
+                        waitpid(zstd_pid, &zstd_status, 0);
+                        waitpid(tar_pid, &tar_status, 0);
+                        if (WIFEXITED(zstd_status) && WEXITSTATUS(zstd_status) == 0 &&
+                            WIFEXITED(tar_status) && WEXITSTATUS(tar_status) == 0) {
+                                extract_ok = 1;
+                        }
+                }
+        }
+
+        if (!extract_ok) {
+                /* All methods failed - clean up */
+                rmdir(store_path);
+                return -1;
+        }
+
+        *store_path_out = strdup(store_path);
+        return 0;
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
 store_add_result_t store_add(const char *pkg_path, store_backend_t backend)
 {
-	store_add_result_t result = {0};
-	char *store_path = NULL;
-	int rc;
+        store_add_result_t result = {0};
+        char *store_path = NULL;
+        int rc;
 
-	switch (backend) {
-	case STORE_BACKEND_NIX_STORE:
-		rc = spawn_nix_store_add(pkg_path, &store_path);
-		if (rc < 0) {
-			result.success = -1;
-			if (access("/usr/bin/nix-store", X_OK) != 0 &&
-			    access("/nix/var/nix/profiles/default/bin/nix-store", X_OK) != 0) {
-				result.error_msg = strdup("nix-store not found - install nix first");
-			} else {
-				result.error_msg = strdup("nix-store --add failed");
-			}
-			return result;
-		}
-		break;
-	case STORE_BACKEND_DIRECT:
-		rc = direct_extract(pkg_path, &store_path);
-		if (rc < 0) {
-			result.success = -1;
-			result.error_msg = strdup("direct extraction failed "
-			                          "(check that tar supports .tar.zst)");
-			return result;
-		}
-		break;
-	default:
-		result.success = -1;
-		result.error_msg = strdup("unknown store backend");
-		return result;
-	}
+        switch (backend) {
+        case STORE_BACKEND_NIX_STORE:
+                rc = spawn_nix_store_add(pkg_path, &store_path);
+                if (rc < 0) {
+                        result.success = -1;
+                        if (access("/usr/bin/nix-store", X_OK) != 0 &&
+                            access("/nix/var/nix/profiles/default/bin/nix-store", X_OK) != 0) {
+                                result.error_msg = strdup("nix-store not found - install nix first");
+                        } else {
+                                result.error_msg = strdup("nix-store --add failed");
+                        }
+                        return result;
+                }
+                break;
+        case STORE_BACKEND_DIRECT:
+                rc = direct_extract(pkg_path, &store_path);
+                if (rc < 0) {
+                        result.success = -1;
+                        result.error_msg = strdup("extraction failed - "
+                                                  "ensure tar and zstd are installed");
+                        return result;
+                }
+                break;
+        default:
+                result.success = -1;
+                result.error_msg = strdup("unknown store backend");
+                return result;
+        }
 
-	result.success = 0;
-	result.store_path = store_path;
-	return result;
+        result.success = 0;
+        result.store_path = store_path;
+        return result;
 }
 
 void store_add_result_free(store_add_result_t *r)
 {
-	if (!r) return;
-	free(r->store_path);
-	free(r->error_msg);
+        if (!r) return;
+        free(r->store_path);
+        free(r->error_msg);
 }
 
 /* ── Manifest: walk store directory and build entry list ─────────── */
@@ -353,13 +407,13 @@ void store_add_result_free(store_add_result_t *r)
 static store_entry_t *entry_new(const char *path, int is_dir,
                                 const char *symlink_target, int is_config)
 {
-	store_entry_t *e = calloc(1, sizeof(*e));
-	if (!e) return NULL;
-	e->path = strdup(path);
-	e->is_dir = is_dir;
-	e->is_config = is_config;
-	e->symlink = symlink_target ? strdup(symlink_target) : NULL;
-	return e;
+        store_entry_t *e = calloc(1, sizeof(*e));
+        if (!e) return NULL;
+        e->path = strdup(path);
+        e->is_dir = is_dir;
+        e->is_config = is_config;
+        e->symlink = symlink_target ? strdup(symlink_target) : NULL;
+        return e;
 }
 
 /* Recursively walk a directory, building the entry list.
@@ -367,117 +421,117 @@ static store_entry_t *entry_new(const char *path, int is_dir,
 static int walk_dir(const char *base, const char *prefix,
                     store_entry_t **tail, size_t *count)
 {
-	char full_path[PATH_MAX];
-	if (prefix[0])
-		snprintf(full_path, sizeof(full_path), "%s/%s", base, prefix);
-	else
-		snprintf(full_path, sizeof(full_path), "%s", base);
+        char full_path[PATH_MAX];
+        if (prefix[0])
+                snprintf(full_path, sizeof(full_path), "%s/%s", base, prefix);
+        else
+                snprintf(full_path, sizeof(full_path), "%s", base);
 
-	DIR *d = opendir(full_path);
-	if (!d) return -1;
+        DIR *d = opendir(full_path);
+        if (!d) return -1;
 
-	struct dirent *ent;
-	while ((ent = readdir(d)) != NULL) {
-		if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-			continue;
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+                if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                        continue;
 
-		char rel_path[PATH_MAX];
-		if (prefix[0])
-			snprintf(rel_path, sizeof(rel_path), "%s/%s", prefix, ent->d_name);
-		else
-			snprintf(rel_path, sizeof(rel_path), "%s", ent->d_name);
+                char rel_path[PATH_MAX];
+                if (prefix[0])
+                        snprintf(rel_path, sizeof(rel_path), "%s/%s", prefix, ent->d_name);
+                else
+                        snprintf(rel_path, sizeof(rel_path), "%s", ent->d_name);
 
-		char abs_path[PATH_MAX];
-		snprintf(abs_path, sizeof(abs_path), "%s/%s", base, rel_path);
+                char abs_path[PATH_MAX];
+                snprintf(abs_path, sizeof(abs_path), "%s/%s", base, rel_path);
 
-		struct stat st;
-		if (lstat(abs_path, &st) < 0)
-			continue;
+                struct stat st;
+                if (lstat(abs_path, &st) < 0)
+                        continue;
 
-		/* Classify: files under etc/ are config files */
-		int is_config = (strncmp(rel_path, "etc/", 4) == 0 ||
-		                 strncmp(rel_path, "usr/share/", 10) == 0);
+                /* Classify: files under etc/ are config files */
+                int is_config = (strncmp(rel_path, "etc/", 4) == 0 ||
+                                 strncmp(rel_path, "usr/share/", 10) == 0);
 
-		if (S_ISDIR(st.st_mode)) {
-			/* Add directory entry */
-			store_entry_t *e = entry_new(rel_path, 1, NULL, is_config);
-			if (e) {
-				*tail = e;
-				tail = &e->next;
-				(*count)++;
-			}
-			/* Recurse */
-			walk_dir(base, rel_path, tail, count);
-		} else if (S_ISLNK(st.st_mode)) {
-			/* Read symlink target */
-			char target[PATH_MAX];
-			ssize_t n = readlink(abs_path, target, sizeof(target) - 1);
-			if (n > 0) {
-				target[n] = '\0';
-				store_entry_t *e = entry_new(rel_path, 0, target, is_config);
-				if (e) {
-					*tail = e;
-					tail = &e->next;
-					(*count)++;
-				}
-			}
-		} else if (S_ISREG(st.st_mode)) {
-			/* Skip .PKGINFO, .INSTALL, .MTREE, .BUILDINFO - package metadata */
-			if (strcmp(ent->d_name, ".PKGINFO") == 0 ||
-			    strcmp(ent->d_name, ".INSTALL") == 0 ||
-			    strcmp(ent->d_name, ".MTREE") == 0 ||
-			    strcmp(ent->d_name, ".BUILDINFO") == 0)
-				continue;
+                if (S_ISDIR(st.st_mode)) {
+                        /* Add directory entry */
+                        store_entry_t *e = entry_new(rel_path, 1, NULL, is_config);
+                        if (e) {
+                                *tail = e;
+                                tail = &e->next;
+                                (*count)++;
+                        }
+                        /* Recurse */
+                        walk_dir(base, rel_path, tail, count);
+                } else if (S_ISLNK(st.st_mode)) {
+                        /* Read symlink target */
+                        char target[PATH_MAX];
+                        ssize_t n = readlink(abs_path, target, sizeof(target) - 1);
+                        if (n > 0) {
+                                target[n] = '\0';
+                                store_entry_t *e = entry_new(rel_path, 0, target, is_config);
+                                if (e) {
+                                        *tail = e;
+                                        tail = &e->next;
+                                        (*count)++;
+                                }
+                        }
+                } else if (S_ISREG(st.st_mode)) {
+                        /* Skip .PKGINFO, .INSTALL, .MTREE, .BUILDINFO - package metadata */
+                        if (strcmp(ent->d_name, ".PKGINFO") == 0 ||
+                            strcmp(ent->d_name, ".INSTALL") == 0 ||
+                            strcmp(ent->d_name, ".MTREE") == 0 ||
+                            strcmp(ent->d_name, ".BUILDINFO") == 0)
+                                continue;
 
-			store_entry_t *e = entry_new(rel_path, 0, NULL, is_config);
-			if (e) {
-				*tail = e;
-				tail = &e->next;
-				(*count)++;
-			}
-		}
-	}
+                        store_entry_t *e = entry_new(rel_path, 0, NULL, is_config);
+                        if (e) {
+                                *tail = e;
+                                tail = &e->next;
+                                (*count)++;
+                        }
+                }
+        }
 
-	closedir(d);
-	return 0;
+        closedir(d);
+        return 0;
 }
 
 store_manifest_t *store_manifest_create(const char *store_path,
                                         const char *pkg_name,
                                         const char *pkg_version)
 {
-	store_manifest_t *m = calloc(1, sizeof(*m));
-	if (!m) return NULL;
+        store_manifest_t *m = calloc(1, sizeof(*m));
+        if (!m) return NULL;
 
-	m->store_path = strdup(store_path);
-	m->pkg_name = strdup(pkg_name);
-	m->pkg_version = strdup(pkg_version);
+        m->store_path = strdup(store_path);
+        m->pkg_name = strdup(pkg_name);
+        m->pkg_version = strdup(pkg_version);
 
-	/* Walk the store directory and build the entry list */
-	store_entry_t *tail = NULL;
-	walk_dir(store_path, "", &tail, &m->entry_count);
-	m->entries = tail;
+        /* Walk the store directory and build the entry list */
+        store_entry_t *tail = NULL;
+        walk_dir(store_path, "", &tail, &m->entry_count);
+        m->entries = tail;
 
-	return m;
+        return m;
 }
 
 void store_entry_list_free(store_entry_t *e)
 {
-	while (e) {
-		store_entry_t *next = e->next;
-		free(e->path);
-		free(e->symlink);
-		free(e);
-		e = next;
-	}
+        while (e) {
+                store_entry_t *next = e->next;
+                free(e->path);
+                free(e->symlink);
+                free(e);
+                e = next;
+        }
 }
 
 void store_manifest_free(store_manifest_t *m)
 {
-	if (!m) return;
-	free(m->store_path);
-	free(m->pkg_name);
-	free(m->pkg_version);
-	store_entry_list_free(m->entries);
-	free(m);
+        if (!m) return;
+        free(m->store_path);
+        free(m->pkg_name);
+        free(m->pkg_version);
+        store_entry_list_free(m->entries);
+        free(m);
 }
