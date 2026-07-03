@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <limits.h>
 
 #include "reconcile.h"
 #include "cJSON.h"
@@ -262,12 +265,43 @@ reconcile_txn_t *reconcile(const char *desired_json, const char *db_root)
     /* ── Diff against current generation ──────────────────────────── */
     pkg_name_t *current_pkgs = read_current_packages(db_root);
 
-    /* Repo packages to install: in desired but not in current */
+    /* Repo packages to install: in desired but not in current.
+     * Also re-install if the package is in the current generation but
+     * its store path doesn't exist on disk (broken generation from
+     * a previous failed install). */
     pkg_name_t **install_tail = &txn->repo_install;
     for (pkg_name_t *p = desired_repo_head; p; p = p->next) {
         if (!pkg_name_list_contains(current_pkgs, p->name)) {
+            /* Not in current generation at all - needs install */
             install_tail = pkg_name_append(install_tail, p->name);
             txn->repo_install_count++;
+        } else {
+            /* In current generation - verify store path exists on disk.
+             * If /nix/store/ doesn't exist or the store path is missing,
+             * the previous install failed silently. Re-install. */
+            char store_check[PATH_MAX];
+            struct stat store_st;
+            snprintf(store_check, sizeof(store_check),
+                     "/nix/store/%s", p->name);
+            /* Check if any directory matching /nix/store/<name>-* exists */
+            DIR *store_dir = opendir("/nix/store");
+            int found_on_disk = 0;
+            if (store_dir) {
+                struct dirent *de;
+                while ((de = readdir(store_dir)) != NULL) {
+                    if (strncmp(de->d_name, p->name, strlen(p->name)) == 0 &&
+                        de->d_name[strlen(p->name)] == '-') {
+                        found_on_disk = 1;
+                        break;
+                    }
+                }
+                closedir(store_dir);
+            }
+            if (!found_on_disk) {
+                printf("  %s: in generation DB but not in /nix/store/ - re-installing\n", p->name);
+                install_tail = pkg_name_append(install_tail, p->name);
+                txn->repo_install_count++;
+            }
         }
     }
 
