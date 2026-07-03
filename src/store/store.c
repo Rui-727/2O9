@@ -218,15 +218,16 @@ static int direct_extract(const char *pkg_path, char **store_path_out)
                 return -1;
 
         /* Step 4: Extract the archive into the store directory.
-         * Arch .pkg.tar.zst files are zstd-compressed tarballs.
-         * Use system() so PATH is inherited properly (posix_spawnp
-         * doesn't always find tar when running under sudo). */
+         * Use system() so PATH is inherited properly under sudo. */
+        const char *debug = getenv("TWO09_DEBUG");
         char cmd[PATH_MAX * 3];
+
         snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s'", pkg_path, store_path);
+        if (debug) fprintf(stderr, "  [debug] extracting: %s\n", cmd);
         int ret = system(cmd);
 
         if (ret != 0) {
-                /* tar failed - try with explicit zstd */
+                if (debug) fprintf(stderr, "  [debug] tar failed (rc=%d), trying zstd...\n", ret);
                 snprintf(cmd, sizeof(cmd),
                          "tar --use-compress-program=zstd -xf '%s' -C '%s'",
                          pkg_path, store_path);
@@ -234,7 +235,7 @@ static int direct_extract(const char *pkg_path, char **store_path_out)
         }
 
         if (ret != 0) {
-                /* Last resort: zstd pipeline */
+                if (debug) fprintf(stderr, "  [debug] zstd tar failed (rc=%d), trying pipeline...\n", ret);
                 snprintf(cmd, sizeof(cmd),
                          "zstd -d -c '%s' | tar xf - -C '%s'",
                          pkg_path, store_path);
@@ -242,7 +243,7 @@ static int direct_extract(const char *pkg_path, char **store_path_out)
         }
 
         if (ret != 0) {
-                /* All methods failed - clean up */
+                if (debug) fprintf(stderr, "  [debug] all extraction methods failed\n");
                 rmdir(store_path);
                 return -1;
         }
