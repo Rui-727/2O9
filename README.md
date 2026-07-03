@@ -164,8 +164,10 @@ Day-to-day use:
 209 3 rollback              # go back to generation 3
 209 3 pin                   # protect it from garbage collection
 
-# Run an untrusted binary in the sandbox
-209 weird-binary trakker --no-net --redirect-writes /tmp/trakker
+# Run a command in the sandbox (PATH-resolved)
+209 trakker ls -la
+209 trakker --no-net -- curl https://example.com
+209 trakker --no-write --redirect-writes /tmp/trakker -- makepkg -f
 ```
 
 Testing the pipeline without a real /nix/store:
@@ -181,24 +183,27 @@ TWO09_PKG_PATH=/var/cache/pacman/pkg/neovim-0.10.0-1-x86_64.pkg.tar.zst \
 
 ## Architecture
 
-Six components, layered top-down. The unified CLI dispatches into either the
-declarative engine or the AUR helper; both produce transactions that flow
-through lib2O9 (the modified libalpm + the Nix evaluator) into the store
-adapter, which writes to `/nix/store` and updates the symlink farm. Trakker
-sits beside the CLI as an execution sandbox invoked on demand. The full
-component diagram is in [`DESIGN.md`](./DESIGN.md) §4.
+Six pieces, layered. The CLI dispatches into either the declarative
+engine or the AUR helper; both produce transactions that flow through
+lib2O9 (the modified libalpm + Nix evaluator) into the store adapter,
+which writes to `/nix/store` and rebuilds the symlink farm. Trakker
+sits beside all of it as an on-demand sandbox. The full diagram is in
+[`DESIGN.md`](./DESIGN.md) §4.
 
-1. **Unified CLI** — entrypoint. SOV dispatch: `209 <subject> <verb>`.
-2. **Declarative Engine** — turns `2O9.nix` into a transaction: evaluate,
-   reconcile against the current generation, produce an install/remove plan.
-3. **AUR Helper** — paru ported to C. RPC, PKGBUILD clone, review diff,
-   recursive dep resolution, makepkg orchestration, into the store.
-4. **Trakker** — ptrace-based execution sandbox and trace recorder.
-5. **lib2O9** — modified libalpm (solver reads from generation DB, install
-   backend dispatches to store adapter) plus our own C Nix evaluator. Built
-   into one static library.
-6. **Store Adapter** — puts packages in `/nix/store/`, then symlinks them
-   into `~/.local/bin`, `~/.local/lib`, and (for config files) `/etc/`.
+1. **CLI** — the entrypoint. SOV dispatch (`209 <subject> <verb>`) for
+   package ops, leading-form for trakker (`209 trakker ls -la`).
+2. **Declarative Engine** — turns `2O9.nix` into a transaction:
+   evaluate, reconcile against the current generation, produce an
+   install/remove plan.
+3. **AUR Helper** — paru ported to C. RPC, PKGBUILD clone, review
+   diff, recursive dep resolution, makepkg, into the store.
+4. **Trakker** — ptrace sandbox. Records what a command does, blocks
+   what you tell it to.
+5. **lib2O9** — modified libalpm (solver reads from the generation
+   DB, install backend dispatches to the store adapter) plus our own
+   C Nix evaluator. One static library.
+6. **Store Adapter** — puts packages in `/nix/store/`, then symlinks
+   them into `~/.local/bin`, `~/.local/lib`, and `/etc/`.
 
 ## Configuration
 
@@ -243,7 +248,7 @@ is intent; verb-first is ceremony.
 | `209 <pkg> aur build` | Build from AUR | paru |
 | `209 <term> aur search` | Search AUR | paru |
 | `209 <pkg> aur review` | Review PKGBUILD diff | paru |
-| `209 <subject> trakker [flags]` | Run command in sandbox, record trace | new |
+| `209 trakker [flags] [--] <cmd> [args...]` | Run a command in the sandbox (PATH-resolved) | new |
 | `209 apply` | Apply declarative config (`2O9.nix`) | new |
 | `209 <n> rollback` | Roll back to generation #n | new |
 | `209 <n> pin` | Pin a generation (protect from GC) | new |
@@ -261,11 +266,20 @@ last, applied to everything before it.
 
 ## Trakker — execution sandbox
 
-Trakker runs a command inside 2O9's sandbox, records everything it does, and
-optionally restricts what it is allowed to do. It uses ptrace to intercept
-syscalls. Recorded events: file I/O (read, write, create, delete), network
-connections, process forks/execs/exits, and mmap summaries. Output is a JSON
-trace log.
+Trakker runs a command inside the sandbox, records what it does, and
+optionally restricts it. The command is resolved via `$PATH`, so bare
+names work:
+
+```sh
+209 trakker ls -la
+209 trakker --no-net -- curl https://example.com
+209 trakker --no-write --redirect-writes /tmp/trakker -- makepkg -f
+```
+
+Use `--` to separate trakker's flags from the command's own args. It
+uses ptrace to intercept syscalls; recorded events include file I/O
+(read, write, create, delete), network connections, process
+forks/execs/exits, and mmap summaries. The trace comes out as JSON.
 
 Restriction flags:
 
@@ -275,10 +289,6 @@ Restriction flags:
 | `--no-write` | Block all file writes |
 | `--redirect-writes <dir>` | Redirect writes into `<dir>` instead of their real paths |
 | `--allow-net port=443` | Allow only the listed port(s) (repeatable) |
-
-```
-209 untrusted-thing trakker --no-net --redirect-writes /tmp/trakker --allow-net port=443
-```
 
 ## Status
 

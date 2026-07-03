@@ -35,7 +35,7 @@ Or run a single integration test directly:
 | `test_apply.sh` | Creates a fake 2O9.nix + store path, runs `209 apply`, verifies a generation is committed with the right packages in the manifest |
 | `test_rollback.sh` | Creates two fake generations, rolls back between them, verifies the `current` symlink points to the right one |
 | `test_nix_eval_e2e.sh` | Runs `209 apply` with a 2O9.nix that uses self-reference + conditional + let bindings; verifies evaluation succeeds |
-| `test_trakker.sh` | Runs `/bin/echo` in the sandbox with `--no-net`, runs `/bin/touch` with `--no-write` and verifies the write is blocked |
+| `test_trakker.sh` | Runs `echo` in the sandbox with `--no-net`, runs `touch` with `--no-write` and verifies the write is blocked |
 
 Tests are designed to run in a sandbox — they create their own temp
 directories and clean up after themselves. Some warnings are expected

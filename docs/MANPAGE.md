@@ -77,9 +77,16 @@ The binary is `209` (numeric). The project name is `2O9` (letter O).
 `209 <pkg> aur review`
 : Clone the PKGBUILD and show a diff for review before building.
 
-`209 <cmd> trakker` [`--no-net`] [`--no-write`] [`--redirect-writes` `<dir>`] [`--allow-net` `port=<port>`]
-: Run `<cmd>` inside the Trakker sandbox. Records file I/O, network
-  connections, and process activity as a JSON trace.
+`209 trakker` [`--no-net`] [`--no-write`] [`--redirect-writes` `<dir>`] [`--allow-net` `port=<port>`] [`--`] `<cmd>` `[args...]`
+: Run `<cmd>` inside the Trakker sandbox. The command is resolved via
+  `$PATH`, so bare names work (`209 trakker ls -la`). Records file I/O,
+  network connections, and process activity as a JSON trace. Use `--` to
+  separate trakker flags from the command's own flags.
+
+  Examples:
+  - `209 trakker ls -la`
+  - `209 trakker --no-net -- curl https://example.com`
+  - `209 trakker --no-write --redirect-writes /tmp/trakker -- makepkg -f`
 
 `209 <n> rollback`
 : Roll back to generation #n. Repoints the current-generation symlink

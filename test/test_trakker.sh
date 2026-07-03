@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # test_trakker.sh — test the Trakker execution sandbox
 #
-# Runs a harmless command inside the sandbox with --no-net and verifies:
+# Runs a harmless command inside the sandbox and verifies:
 #   - The trace JSON is produced
-#   - The JSON has the expected top-level fields
 #   - The --no-net flag actually blocks network access
+#   - The --no-write flag actually blocks file writes
 #
 # Usage: ./test/test_trakker.sh [path/to/209]
 
@@ -17,10 +17,10 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 echo "=== test_trakker: sandbox at $TEST_ROOT ==="
 
-# Trakker syntax: 209 <command> trakker [flags]
-# We use /bin/echo as a harmless command.
-echo "--- running: 209 /bin/echo trakker --no-net ---"
-TRACE_OUTPUT=$("$BINARY" /bin/echo trakker --no-net 2>&1) || true
+# Trakker leading form: 209 trakker [flags] [--] <command> [args...]
+# The command is resolved via $PATH.
+echo "--- running: 209 trakker --no-net -- echo hello ---"
+TRACE_OUTPUT=$("$BINARY" trakker --no-net -- echo hello 2>&1) || true
 echo "$TRACE_OUTPUT" | head -10
 
 # Check that trakker was invoked (the output should mention trakker or
@@ -36,8 +36,8 @@ fi
 
 # Try the --no-write flag — run a command that would write a file
 # and verify the write is blocked.
-echo "--- running: 209 /bin/touch trakker --no-write ---"
-"$BINARY" /bin/touch trakker --no-write "$TEST_ROOT/blocked_write" 2>&1 || true
+echo "--- running: 209 trakker --no-write -- touch <file> ---"
+"$BINARY" trakker --no-write -- touch "$TEST_ROOT/blocked_write" 2>&1 || true
 
 if [ -f "$TEST_ROOT/blocked_write" ]; then
     echo "WARN: write was not blocked (file exists at $TEST_ROOT/blocked_write)"
