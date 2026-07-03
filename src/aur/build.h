@@ -9,7 +9,7 @@
 
 #include "aur_rpc.h"
 
-/* Build configuration (from 2O9.nix + 2O9.conf + CLI flags).
+/* Build configuration (from 2O9.nix + extra.nix + CLI flags).
  *
  * Phase 1 additions: chroot AUR builds, PGP key import, MFlags pass-through.
  *

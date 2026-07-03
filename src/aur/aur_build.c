@@ -3,7 +3,7 @@
  * Implements: clone PKGBUILD → review → (PGP key import) → makepkg → install.
  * Uses git subprocess for clone/fetch (same approach as paru).
  * Phase 1: chroot builds via makechrootpkg + PGP key auto-import +
- *          MFlags pass-through from 2O9.conf.
+ *          MFlags pass-through from extra.nix.
  *
  * Part of Phase 2: paru → C port.
  */
@@ -309,7 +309,7 @@ build_result_t *aur_build(const char *pkg_name, const char *build_dir,
                 return r;
         }
 
-        /* ── Load 2O9.conf for runtime defaults ──────────────────────
+        /* ── Load extra.nix for runtime defaults ────────────────────
          *
          * Used as fallback when build_config_t doesn't set a field.
          * The CLI is expected to populate build_config_t from this,

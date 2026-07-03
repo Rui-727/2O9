@@ -4130,8 +4130,8 @@ static int cmd_cache_push(int argc, char **argv)
         two9_config_t *cfg = two9_config_load();
         if (!cfg) { free(store_path); return 1; }
         if (!cfg->substituters || !cfg->substituters[0]) {
-                fprintf(stderr, "209: no substituters configured in 2O9.conf\n");
-                fprintf(stderr, "    add a [substituters] section with URLs = ...\n");
+                fprintf(stderr, "209: no substituters configured in extra.nix\n");
+                fprintf(stderr, "    add a substituters.URLs entry\n");
                 two9_config_free(cfg);
                 free(store_path);
                 return 1;
@@ -4290,9 +4290,9 @@ static int cmd_keygen(int argc, char **argv)
         if (out != stdout) {
                 fclose(out);
                 fprintf(stderr, "wrote keypair to %s\n", out_path);
-                fprintf(stderr, "public key (add to 2O9.conf PublicKey =): %s\n", pub_b64);
+                fprintf(stderr, "public key (add to extra.nix substituters.PublicKey): %s\n", pub_b64);
         } else {
-                fprintf(stderr, "public key (add to 2O9.conf PublicKey =): %s\n", pub_b64);
+                fprintf(stderr, "public key (add to extra.nix substituters.PublicKey): %s\n", pub_b64);
         }
 
         /* Best-effort: scrub the secret from memory. */
