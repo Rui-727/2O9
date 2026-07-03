@@ -62,91 +62,44 @@ static int mkdirs(const char *path)
 }
 
 /* Read .PKGINFO from a .pkg.tar.zst to extract pkgname and pkgver.
- * Uses tar --to-stdout to extract just the .PKGINFO file. */
+ * Uses system("tar ... > tempfile") to avoid PATH issues with posix_spawnp
+ * under sudo. */
 static int read_pkginfo(const char *pkg_path, char *name_out, size_t name_sz,
                         char *ver_out, size_t ver_sz)
 {
-        int pipefd[2];
-        if (pipe(pipefd) < 0)
-                return -1;
+        /* Use a temp file to capture .PKGINFO output */
+        char tmpfile[] = "/tmp/2O9-pkginfo-XXXXXX";
+        int tmpfd = mkstemp(tmpfile);
+        if (tmpfd < 0) return -1;
 
-        pid_t pid;
-        /* tar -xf <pkg> --to-stdout .PKGINFO
-         * Some packages have .PKGINFO at root, others at ./PKGINFO */
-        char *argv[] = {
-                "tar", "-xf", (char *)pkg_path,
-                "--to-stdout", ".PKGINFO",
-                NULL
-        };
-
-        posix_spawn_file_actions_t actions;
-        posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
-        posix_spawn_file_actions_addclose(&actions, pipefd[0]);
-        posix_spawn_file_actions_addclose(&actions, pipefd[1]);
-
-        int ret = posix_spawnp(&pid, "tar", &actions, NULL, argv, environ);
-        posix_spawn_file_actions_destroy(&actions);
+        char cmd[PATH_MAX * 2];
+        snprintf(cmd, sizeof(cmd),
+                 "tar -xf '%s' --to-stdout .PKGINFO > '%s' 2>/dev/null",
+                 pkg_path, tmpfile);
+        int ret = system(cmd);
 
         if (ret != 0) {
-                close(pipefd[0]);
-                close(pipefd[1]);
+                /* Try with ./ prefix */
+                snprintf(cmd, sizeof(cmd),
+                         "tar -xf '%s' --to-stdout ./.PKGINFO > '%s' 2>/dev/null",
+                         pkg_path, tmpfile);
+                ret = system(cmd);
+        }
+
+        if (ret != 0) {
+                close(tmpfd);
+                unlink(tmpfile);
                 return -1;
         }
 
-        close(pipefd[1]);
-
-        /* Read the .PKGINFO content */
+        /* Read the temp file */
+        lseek(tmpfd, 0, SEEK_SET);
         char buf[8192] = {0};
-        ssize_t total = 0;
-        ssize_t n;
-        while ((n = read(pipefd[0], buf + total, sizeof(buf) - total - 1)) > 0) {
-                total += n;
-                if (total >= (ssize_t)sizeof(buf) - 1)
-                        break;
-        }
-        close(pipefd[0]);
+        ssize_t total = read(tmpfd, buf, sizeof(buf) - 1);
+        close(tmpfd);
+        unlink(tmpfile);
 
-        int status;
-        waitpid(pid, &status, 0);
-
-        /* If that failed (some tar impls), try without leading dot */
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0) {
-                /* Try alternative: tar -xf <pkg> --to-stdout ./.PKGINFO */
-                char *argv2[] = {
-                        "tar", "-xf", (char *)pkg_path,
-                        "--to-stdout", "./.PKGINFO",
-                        NULL
-                };
-                pipe(pipefd);
-
-                posix_spawn_file_actions_init(&actions);
-                posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
-                posix_spawn_file_actions_addclose(&actions, pipefd[0]);
-                posix_spawn_file_actions_addclose(&actions, pipefd[1]);
-
-                ret = posix_spawnp(&pid, "tar", &actions, NULL, argv2, environ);
-                posix_spawn_file_actions_destroy(&actions);
-
-                if (ret != 0) {
-                        close(pipefd[0]);
-                        close(pipefd[1]);
-                        return -1;
-                }
-
-                close(pipefd[1]);
-                total = 0;
-                while ((n = read(pipefd[0], buf + total, sizeof(buf) - total - 1)) > 0) {
-                        total += n;
-                        if (total >= (ssize_t)sizeof(buf) - 1)
-                                break;
-                }
-                close(pipefd[0]);
-                waitpid(pid, &status, 0);
-
-                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0)
-                        return -1;
-        }
+        if (total <= 0) return -1;
 
         buf[total] = '\0';
 
@@ -266,84 +219,29 @@ static int direct_extract(const char *pkg_path, char **store_path_out)
 
         /* Step 4: Extract the archive into the store directory.
          * Arch .pkg.tar.zst files are zstd-compressed tarballs.
-         * Try multiple methods:
-         *   a) tar -xf <pkg> -C <store_path>  (modern tar with zstd support)
-         *   b) tar --use-compress-program=zstd -xf <pkg> -C <store_path>
-         *   c) zstd -d <pkg> | tar xf - -C <store_path>  (pipeline)
-         */
-        int extract_ok = 0;
+         * Use system() so PATH is inherited properly (posix_spawnp
+         * doesn't always find tar when running under sudo). */
+        char cmd[PATH_MAX * 3];
+        snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s'", pkg_path, store_path);
+        int ret = system(cmd);
 
-        /* Method (a): modern tar with built-in zstd */
-        {
-                pid_t pid;
-                char *argv[] = {
-                        "tar", "-xf", (char *)pkg_path,
-                        "-C", store_path,
-                        NULL
-                };
-                posix_spawnp(&pid, "tar", NULL, NULL, argv, environ);
-                int status;
-                waitpid(pid, &status, 0);
-                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                        extract_ok = 1;
-                }
+        if (ret != 0) {
+                /* tar failed - try with explicit zstd */
+                snprintf(cmd, sizeof(cmd),
+                         "tar --use-compress-program=zstd -xf '%s' -C '%s'",
+                         pkg_path, store_path);
+                ret = system(cmd);
         }
 
-        /* Method (b): tar with explicit zstd decompressor */
-        if (!extract_ok) {
-                pid_t pid;
-                char *argv[] = {
-                        "tar", "--use-compress-program=zstd",
-                        "-xf", (char *)pkg_path,
-                        "-C", store_path,
-                        NULL
-                };
-                posix_spawnp(&pid, "tar", NULL, NULL, argv, environ);
-                int status;
-                waitpid(pid, &status, 0);
-                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                        extract_ok = 1;
-                }
+        if (ret != 0) {
+                /* Last resort: zstd pipeline */
+                snprintf(cmd, sizeof(cmd),
+                         "zstd -d -c '%s' | tar xf - -C '%s'",
+                         pkg_path, store_path);
+                ret = system(cmd);
         }
 
-        /* Method (c): zstd + tar pipeline */
-        if (!extract_ok) {
-                int pipefd[2];
-                if (pipe(pipefd) == 0) {
-                        pid_t zstd_pid = fork();
-                        if (zstd_pid == 0) {
-                                /* zstd child: decompress to pipe */
-                                close(pipefd[0]);
-                                dup2(pipefd[1], STDOUT_FILENO);
-                                close(pipefd[1]);
-                                execlp("zstd", "zstd", "-d", "-c", pkg_path, NULL);
-                                _exit(127);
-                        }
-
-                        pid_t tar_pid = fork();
-                        if (tar_pid == 0) {
-                                /* tar child: extract from pipe */
-                                close(pipefd[1]);
-                                dup2(pipefd[0], STDIN_FILENO);
-                                close(pipefd[0]);
-                                execlp("tar", "tar", "xf", "-", "-C", store_path, NULL);
-                                _exit(127);
-                        }
-
-                        close(pipefd[0]);
-                        close(pipefd[1]);
-
-                        int zstd_status, tar_status;
-                        waitpid(zstd_pid, &zstd_status, 0);
-                        waitpid(tar_pid, &tar_status, 0);
-                        if (WIFEXITED(zstd_status) && WEXITSTATUS(zstd_status) == 0 &&
-                            WIFEXITED(tar_status) && WEXITSTATUS(tar_status) == 0) {
-                                extract_ok = 1;
-                        }
-                }
-        }
-
-        if (!extract_ok) {
+        if (ret != 0) {
                 /* All methods failed - clean up */
                 rmdir(store_path);
                 return -1;
