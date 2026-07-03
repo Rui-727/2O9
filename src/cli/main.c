@@ -367,8 +367,13 @@ static gen_pkg_t *read_current_gen_packages(const char *db_root, int current_id)
 /* Forward declarations - defined later in the file */
 static char *eval_nix_config(const char *config_path, char **err_out);
 static size_t sync_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata);
+static gen_index_t *get_gen_index(void);
 
-static int cmd_install(const char *pkg_name)
+/* cmd_install and cmd_remove are non-static so reconcile_execute.c can call them */
+int cmd_install(const char *pkg_name);
+int cmd_remove(const char *pkg_name);
+
+int cmd_install(const char *pkg_name)
 {
         /* Imperative install: find the package in the repo sync DBs
          * (via lib2O9), download the .pkg.tar.zst, extract to /nix/store/,
@@ -983,37 +988,85 @@ static int cmd_apply(void)
         if (txn->repo_install_count + txn->aur_install_count +
             txn->pkg_remove_count + txn->svc_enable_count +
             txn->svc_disable_count > 0) {
+                /* Ensure /nix/store exists before installing */
+                mkdir("/nix", 0755);
+                mkdir("/nix/store", 0755);
+
                 int rc = reconcile_execute(txn);
                 if (rc != 0) {
                         fprintf(stderr, "209: transaction had errors (rc=%d)\n", rc);
-                        fprintf(stderr, "    committing partial generation anyway\n");
+                        fprintf(stderr, "    aborting - no generation committed\n");
+                        reconcile_free(txn);
+                        gen_db_close(db);
+                        free(json);
+                        return 1;
                 }
         } else {
                 printf("  no changes needed\n");
         }
 
-        /* Step 7: Build the generation package list from reconciler output */
+        /* Step 7: Build the generation package list from reconciler output.
+         * For each package, check if it has a real store path from the
+         * install (via the generation index). If not, use a placeholder. */
         gen_pkg_t *pkgs = NULL;
         gen_pkg_t **pkg_tail = &pkgs;
 
+        /* Get the current generation index to find real store paths */
+        gen_index_t *idx = get_gen_index();
+
         /* Add all repo packages */
         for (pkg_name_t *p = txn->all_repo_pkgs; p; p = p->next) {
-                char fake_store[PATH_MAX];
-                snprintf(fake_store, sizeof(fake_store),
-                         "/nix/store/%s-declarative", p->name);
+                const char *version = "0.0.0";
+                const char *store_path = NULL;
+                const char *origin = "declarative";
+
+                /* Check if this package was just installed (in the index) */
+                if (idx) {
+                        const gen_index_entry_t *e = gen_index_lookup(idx, p->name);
+                        if (e) {
+                                version = e->version;
+                                store_path = e->store_path;
+                                origin = e->origin;
+                        }
+                }
+
+                char fallback_store[PATH_MAX];
+                if (!store_path) {
+                        snprintf(fallback_store, sizeof(fallback_store),
+                                 "/nix/store/%s-%s", p->name, version);
+                        store_path = fallback_store;
+                }
+
                 gen_pkg_t *pkg = gen_pkg_create(
-                        p->name, "0.0.0", fake_store, "declarative");
+                        p->name, version, store_path, origin);
                 *pkg_tail = pkg;
                 pkg_tail = &pkg->next;
         }
 
         /* Add all AUR packages */
         for (pkg_name_t *p = txn->all_aur_pkgs; p; p = p->next) {
-                char fake_store[PATH_MAX];
-                snprintf(fake_store, sizeof(fake_store),
-                         "/nix/store/%s-aur", p->name);
+                const char *version = "0.0.0";
+                const char *store_path = NULL;
+                const char *origin = "aur";
+
+                if (idx) {
+                        const gen_index_entry_t *e = gen_index_lookup(idx, p->name);
+                        if (e) {
+                                version = e->version;
+                                store_path = e->store_path;
+                                origin = e->origin;
+                        }
+                }
+
+                char fallback_store[PATH_MAX];
+                if (!store_path) {
+                        snprintf(fallback_store, sizeof(fallback_store),
+                                 "/nix/store/%s-%s", p->name, version);
+                        store_path = fallback_store;
+                }
+
                 gen_pkg_t *pkg = gen_pkg_create(
-                        p->name, "0.0.0", fake_store, "aur-declarative");
+                        p->name, version, store_path, origin);
                 *pkg_tail = pkg;
                 pkg_tail = &pkg->next;
         }
@@ -1352,7 +1405,9 @@ static int cmd_gc(void)
         /* Step 2: Walk /nix/store/ and find unreferenced paths */
         DIR *store_dir = opendir("/nix/store");
         if (!store_dir) {
-                fprintf(stderr, "209: cannot open /nix/store/ - does it exist?\n");
+                /* /nix/store doesn't exist yet - nothing to GC */
+                printf("209: /nix/store/ doesn't exist yet. Nothing to garbage collect.\n");
+                printf("     Run 209 apply first to install packages.\n");
                 gen_list_free(gens, gen_count);
                 gen_db_close(db);
                 return 1;
@@ -1444,7 +1499,7 @@ static int cmd_gc(void)
 
 /* ── Remove ─────────────────────────────────────────────────────────── */
 
-static int cmd_remove(const char *pkg_name)
+int cmd_remove(const char *pkg_name)
 {
         /* Remove = create a new generation without the package, rebuild symlink farm.
          * Based on Nix's approach: never mutate a generation, always create a new one.
