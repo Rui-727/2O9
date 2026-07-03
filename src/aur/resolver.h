@@ -11,18 +11,18 @@
 
 /* A resolved build action */
 typedef struct resolve_action {
-	char *name;
-	char *version;
-	int is_aur;            /* 1 = AUR, 0 = repo */
-	char *pkgbase;         /* AUR base package name */
-	struct resolve_action *next;
+        char *name;
+        char *version;
+        int is_aur;            /* 1 = AUR, 0 = repo */
+        char *pkgbase;         /* AUR base package name */
+        struct resolve_action *next;
 } resolve_action_t;
 
 /* Full resolution result */
 typedef struct resolve_result {
-	resolve_action_t *install;   /* packages to install from repo */
-	resolve_action_t *build;     /* packages to build from AUR */
-	resolve_action_t *missing;   /* unresolved dependencies */
+        resolve_action_t *install;   /* packages to install from repo */
+        resolve_action_t *build;     /* packages to build from AUR */
+        resolve_action_t *missing;   /* unresolved dependencies */
 } resolve_result_t;
 
 /* Resolve dependencies for a list of targets.
@@ -30,6 +30,17 @@ typedef struct resolve_result {
  * Returns a plan: what to install from repos, what to build from AUR. */
 resolve_result_t *resolve_targets(aur_cache_t *cache,
                                   const char **targets, size_t count);
+
+/* Pre-build PGP key check.
+ *
+ * Reads validpgpkeys from .SRCINFO in clone_dir, finds any missing
+ * from the local gpg keyring, prompts the user to import via
+ * gpg --recv-keys. If the user declines, returns -1 (the build would
+ * fail at `makepkg --verifysource` anyway).
+ *
+ * Returns 0 on success (or no PGP keys required), -1 on user decline
+ * or error (gpg missing, recv-keys failed). */
+int aur_resolve_pgp_check(const char *clone_dir);
 
 /* Free a resolve result */
 void resolve_result_free(resolve_result_t *r);

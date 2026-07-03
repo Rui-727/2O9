@@ -25,6 +25,7 @@
 
 #include "resolver.h"
 #include "aur_rpc.h"
+#include "pgp.h"
 
 /* ── String set (simple linear, dedup) ────────────────────────────── */
 
@@ -487,4 +488,32 @@ void resolve_result_free(resolve_result_t *r)
         action_list_free(r->build);
         action_list_free(r->missing);
         free(r);
+}
+
+/* ── Pre-build PGP key check ────────────────────────────────────────
+ *
+ * Reads validpgpkeys from .SRCINFO in clone_dir, finds any missing
+ * from the local gpg keyring, and prompts the user to import via
+ * gpg --recv-keys. Returns 0 if all keys are present (or none are
+ * required), -1 on user decline or error.
+ *
+ * Called from aur_build() before the build step. Modeled on paru's
+ * src/keys.rs.
+ */
+int aur_resolve_pgp_check(const char *clone_dir)
+{
+        if (!clone_dir) return -1;
+
+        char **keys = pgp_read_valid_keys(clone_dir);
+        if (!keys) return 0;  /* no validpgpkeys declared */
+
+        char **missing = pgp_find_missing(keys);
+        pgp_free_list(keys);
+
+        if (!missing) return 0;  /* all keys already in keyring */
+
+        int rc = pgp_import_missing(missing);
+        pgp_free_list(missing);
+
+        return rc;
 }

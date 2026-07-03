@@ -9,7 +9,25 @@
 
 #include "aur_rpc.h"
 
-/* Build configuration (from 2O9.nix + CLI flags) */
+/* Build configuration (from 2O9.nix + 2O9.conf + CLI flags).
+ *
+ * Phase 1 additions: chroot AUR builds, PGP key import, MFlags pass-through.
+ *
+ * use_chroot (tri-state, applied by aur_build after consulting two9_config_t):
+ *   0  = unset/defer to two9_config_t.use_chroot (default 1 = on, like paru)
+ *   1  = force chroot on
+ *   -1 = force chroot off (--no-chroot)
+ *
+ * The CLI (src/cli/main.c) is expected to:
+ *   - call two9_config_load() at startup
+ *   - apply two9_config.mflags / git_flags / chroot_dir to this struct
+ *   - set use_chroot = -1 when --no-chroot is passed
+ *   - set use_chroot = 1 when --chroot is passed
+ *   - leave use_chroot = 0 (defer) otherwise
+ *
+ * Until main.c is updated to do this, aur_build() will consult
+ * two9_config_t itself as a fallback.
+ */
 typedef struct build_config {
         char *build_dir;       /* where to clone and build */
         char *makepkg_conf;    /* path to makepkg.conf (or NULL for default) */
@@ -19,9 +37,16 @@ typedef struct build_config {
         char *ldflags;         /* custom LDFLAGS from 2O9.nix */
         int no_confirm;        /* skip confirmation prompts */
         int skip_review;       /* skip PKGBUILD review */
-        int chroot;            /* build in chroot */
+        int chroot;            /* legacy field, set by main.c (0 = off) */
         int sign;              /* sign built packages */
         char *gpg_key;         /* GPG key for signing */
+
+        /* Phase 1: chroot, PGP, MFlags pass-through */
+        int use_chroot;        /* tri-state, see comment above */
+        char *chroot_dir;      /* NULL = /var/lib/2O9/chroot (from two9_config) */
+        char **mflags;         /* NULL-terminated extra makepkg flags;
+                                * NULL = use default "-feA" */
+        char **git_flags;      /* extra git clone flags (NULL-terminated) */
 } build_config_t;
 
 /* Build result */

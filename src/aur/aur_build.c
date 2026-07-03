@@ -1,8 +1,9 @@
 /* aur_build.c - AUR build pipeline implementation
  *
- * Implements: clone PKGBUILD → review → makepkg → install to store.
+ * Implements: clone PKGBUILD → review → (PGP key import) → makepkg → install.
  * Uses git subprocess for clone/fetch (same approach as paru).
- * Uses fork/exec for makepkg with CFLAGS injection.
+ * Phase 1: chroot builds via makechrootpkg + PGP key auto-import +
+ *          MFlags pass-through from 2O9.conf.
  *
  * Part of Phase 2: paru → C port.
  */
@@ -23,6 +24,10 @@ extern char **environ;
 
 #include "build.h"
 #include "aur_rpc.h"
+#include "chroot.h"
+#include "pgp.h"
+#include "config.h"
+#include "resolver.h"
 
 #define AUR_GIT_URL "https://aur.archlinux.org"
 
@@ -304,21 +309,107 @@ build_result_t *aur_build(const char *pkg_name, const char *build_dir,
                 return r;
         }
 
-        /* Build the makepkg command */
-        int argc_max = 32;
+        /* ── Load 2O9.conf for runtime defaults ──────────────────────
+         *
+         * Used as fallback when build_config_t doesn't set a field.
+         * The CLI is expected to populate build_config_t from this,
+         * but until main.c is updated, we load it here. */
+        two9_config_t *two9_cfg = two9_config_load();
+
+        /* ── PGP pre-build check ─────────────────────────────────────
+         *
+         * Read validpgpkeys from .SRCINFO, find any missing from the
+         * local keyring, prompt the user to import. If they decline,
+         * abort: makepkg --verifysource would fail anyway. */
+        if (aur_resolve_pgp_check(clone_dir) < 0) {
+                two9_config_free(two9_cfg);
+                build_result_t *r = calloc(1, sizeof(*r));
+                r->pkg_name = strdup(pkg_name);
+                r->success = 0;
+                r->error_msg = strdup("PGP key import declined or failed; "
+                                      "build would fail at makepkg --verifysource");
+                return r;
+        }
+
+        /* ── Decide chroot vs direct ─────────────────────────────────
+         *
+         * build_config_t.use_chroot is tri-state (see build.h):
+         *   0  = defer to two9_config_t.use_chroot (default 1)
+         *   1  = force on
+         *   -1 = force off (--no-chroot)
+         */
+        int use_chroot;
+        if (config && config->use_chroot > 0)
+                use_chroot = 1;
+        else if (config && config->use_chroot < 0)
+                use_chroot = 0;
+        else
+                use_chroot = two9_cfg->use_chroot;
+
+        /* Honor the legacy `chroot` field too (set by current main.c). */
+        if (config && config->chroot > 0)
+                use_chroot = 1;
+
+        const char *chroot_dir = (config && config->chroot_dir)
+                ? config->chroot_dir : two9_cfg->chroot_dir;
+
+        /* ── Chroot path ───────────────────────────────────────────── */
+        if (use_chroot) {
+                char *real_name = NULL, *real_version = NULL;
+                char *pkg_path = chroot_build(chroot_dir, clone_dir,
+                                              config ? config->makepkg_conf : NULL,
+                                              config ? config->no_confirm : 0,
+                                              &real_name, &real_version);
+                two9_config_free(two9_cfg);
+
+                if (!pkg_path) {
+                        build_result_t *r = calloc(1, sizeof(*r));
+                        r->pkg_name = strdup(pkg_name);
+                        r->success = 0;
+                        r->error_msg = strdup("chroot build failed");
+                        free(real_name);
+                        free(real_version);
+                        return r;
+                }
+
+                build_result_t *r = calloc(1, sizeof(*r));
+                r->pkg_name    = real_name ? real_name : strdup(pkg_name);
+                r->pkg_version = real_version ? real_version : strdup("unknown");
+                r->pkg_path    = pkg_path;
+                r->success     = 1;
+                r->error_msg   = NULL;
+
+                fprintf(stderr, "  built: %s (%s) → %s\n",
+                        r->pkg_name, r->pkg_version, r->pkg_path);
+                return r;
+        }
+
+        /* ── Direct path: fork + execvp makepkg ──────────────────────
+         *
+         * Build argv from config->mflags if set, otherwise fall back
+         * to the default "-feA". Then append --noconfirm and --config. */
+        char **mflags = (config && config->mflags) ? config->mflags
+                                                   : two9_cfg->mflags;
+        const char *makepkg_bin = two9_cfg->makepkg_bin;
+
+        /* Count mflags if provided */
+        size_t mflag_count = 0;
+        if (mflags)
+                while (mflags[mflag_count]) mflag_count++;
+
+        int argc_max = 16 + (int)mflag_count;
         char **argv = calloc(argc_max, sizeof(char *));
         int i = 0;
 
-        argv[i++] = "makepkg";
+        argv[i++] = (char *)makepkg_bin;
 
-        /* Flags:
-         *   -f - force rebuild (overwrite existing package)
-         *   -e - extract source files (don't use cached)
-         *   -A - ignore arch check
-         *   -s - install missing deps with pacman (for repo deps)
-         *   --noconfirm - skip prompts
-         */
-        argv[i++] = "-feA";
+        if (mflags) {
+                /* User-provided flags replace the default "-feA" */
+                for (size_t j = 0; j < mflag_count; j++)
+                        argv[i++] = mflags[j];
+        } else {
+                argv[i++] = "-feA";
+        }
 
         if (config && config->no_confirm)
                 argv[i++] = "--noconfirm";
@@ -359,11 +450,12 @@ build_result_t *aur_build(const char *pkg_name, const char *build_dir,
         }
 
         /* Change to clone dir and run makepkg */
-        fprintf(stderr, "  building %s...\n", pkg_name);
+        fprintf(stderr, "  building %s (direct)...\n", pkg_name);
 
         pid_t pid = fork();
         if (pid < 0) {
                 free(argv);
+                two9_config_free(two9_cfg);
                 build_result_t *r = calloc(1, sizeof(*r));
                 r->pkg_name = strdup(pkg_name);
                 r->success = 0;
@@ -386,6 +478,7 @@ build_result_t *aur_build(const char *pkg_name, const char *build_dir,
         }
 
         free(argv);
+        two9_config_free(two9_cfg);
 
         /* Parent: wait for makepkg */
         int status;
