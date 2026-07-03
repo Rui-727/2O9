@@ -2624,11 +2624,14 @@ static int cmd_tree(const char *pkg_name)
 /* 209 fuzz — basic fuzzing: run a binary with edge-case inputs in trakker/debag */
 static int cmd_fuzz(int argc, char **argv)
 {
-        if (argc < 1) {
-                fprintf(stderr, "209 fuzz: no target specified\n");
-                fprintf(stderr, "    usage: 209 fuzz <binary> [args...]\n");
-                fprintf(stderr, "    2O9 runs the binary with edge-case inputs and logs crashes.\n");
-                return 1;
+        if (argc < 1 || strcmp(argv[0], "--help") == 0) {
+                printf("Usage: 209 fuzz <binary> [args...]\n");
+                printf("  Fuzz a binary with edge-case inputs and log crashes.\n");
+                printf("  Feeds empty, null, format strings, path traversal, NOP sleds,\n");
+                printf("  and pseudo-random data via stdin. 100 iterations.\n\n");
+                printf("Options:\n");
+                printf("  --iterations=N  Number of iterations (default: 100)\n");
+                return 0;
         }
 
         const char *target = argv[0];
@@ -2980,13 +2983,16 @@ static int cmd_install_script_prompt(const char *pkg_name, const char *scriptlet
 int main(int argc, char *argv[])
 {
         /* Handle options */
-        for (int i = 1; i < argc; i++) {
-                if (strcmp(argv[i], "-V") == 0 ||
-                    strcmp(argv[i], "--version") == 0) {
+        /* Only check -V/-h as the FIRST argument (before any subcommand).
+         * If --help appears after a subcommand (e.g. `209 fuzz --help`),
+         * let the subcommand handler deal with it. */
+        if (argc >= 2) {
+                if (strcmp(argv[1], "-V") == 0 ||
+                    strcmp(argv[1], "--version") == 0) {
                         return cmd_version();
                 }
-                if (strcmp(argv[i], "-h") == 0 ||
-                    strcmp(argv[i], "--help") == 0) {
+                if (strcmp(argv[1], "-h") == 0 ||
+                    strcmp(argv[1], "--help") == 0) {
                         return cmd_usage();
                 }
         }
@@ -3290,15 +3296,18 @@ int main(int argc, char *argv[])
                 aur_clone(argv[1], build_dir);
                 return aur_review(argv[1], build_dir);
         }
-        if (argc >= 3 && strcmp(argv[2], "aur") == 0 &&
-            argc >= 4 && strcmp(argv[3], "outdated") == 0) {
-                /* 209 aur outdated — list AUR packages with newer versions */
+        /* 209 aur outdated — list AUR packages with newer versions */
+        if (strcmp(subject, "aur") == 0 && strcmp(verb, "outdated") == 0) {
                 return cmd_aur_outdated();
         }
 
         /* 209 <pkg> tree — dependency tree visualizer */
+        /* Also handle reversed: 209 tree <pkg> */
         if (strcmp(verb, "tree") == 0) {
                 return cmd_tree(subject);
+        }
+        if (strcmp(subject, "tree") == 0) {
+                return cmd_tree(verb);
         }
 
         /* Trakker: 209 <subject> trakker [flags] [command] */
