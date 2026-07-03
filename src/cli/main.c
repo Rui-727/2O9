@@ -386,6 +386,42 @@ static size_t sync_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata
 static gen_index_t *get_gen_index(void);
 static store_backend_t pick_backend(void);
 
+/* A single target produced by the libalpm transaction in cmd_install.
+ * The primary package (the one named on the command line) has is_primary=1;
+ * all auto-resolved dependencies have is_primary=0. Used to drive the
+ * generation-commit phase so deps are recorded alongside the primary. */
+typedef struct trans_target {
+        char *name;
+        char *version;
+        char *store_path;   /* /nix/store/<name>-<version>, owned by this struct */
+        int   is_primary;
+        struct trans_target *next;
+} trans_target_t;
+
+static trans_target_t *trans_target_new(const char *name, const char *version,
+                                        const char *store_path, int is_primary)
+{
+        trans_target_t *t = calloc(1, sizeof(*t));
+        if (!t) return NULL;
+        t->name = strdup(name);
+        t->version = strdup(version);
+        t->store_path = store_path ? strdup(store_path) : NULL;
+        t->is_primary = is_primary;
+        return t;
+}
+
+static void trans_target_list_free(trans_target_t *head)
+{
+        while (head) {
+                trans_target_t *next = head->next;
+                free(head->name);
+                free(head->version);
+                free(head->store_path);
+                free(head);
+                head = next;
+        }
+}
+
 /* cmd_install and cmd_remove are non-static so reconcile_execute.c can call them.
  * cmd_install_only: extracts to store but does NOT commit a generation.
  * Used by reconcile_execute so cmd_apply can do the single commit. */
@@ -559,12 +595,12 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
                 mkdir("/nix/store", 0755);
 
                 result = store_add_named(cache_path, pkg_name, version, pick_backend());
-		if (result.success != 0) {
-			fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
-			store_add_result_free(&result);
-			free(resolved_version);
-			return 1;
-		}
+                if (result.success != 0) {
+                        fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
+                        store_add_result_free(&result);
+                        free(resolved_version);
+                        return 1;
+                }
         }
 
         printf("  %sstore path:%s %s\n", C_DIM(), C_RESET(), result.store_path);
@@ -599,8 +635,17 @@ int cmd_install(const char *pkg_name)
                 snprintf(pkg_path, sizeof(pkg_path), "%s", env_path);
         }
 
-        store_add_result_t result;
+        store_add_result_t result = {0};
         char *resolved_version = NULL;
+
+        /* targets_head collects every package installed by this cmd_install
+         * call. For test_mode / TWO09_PKG_PATH branches this is a single
+         * entry (the primary); for the lib2O9 branch it includes the
+         * primary plus all auto-resolved deps pulled in by alpm_trans_prepare.
+         * The generation-commit phase walks this list to record every
+         * installed package. */
+        trans_target_t *targets_head = NULL;
+        trans_target_t **targets_tail = &targets_head;
 
         /* If TWO09_TEST_MODE is set, skip nix-store and use a fake store path. */
         const char *test_mode = getenv("TWO09_TEST_MODE");
@@ -612,6 +657,8 @@ int cmd_install(const char *pkg_name)
                 result.error_msg = NULL;
                 resolved_version = strdup("0.0.0");
                 printf("  [test mode] fake store path: %s\n", fake_store);
+                *targets_tail = trans_target_new(pkg_name, "0.0.0", fake_store, 1);
+                if (*targets_tail) targets_tail = &(*targets_tail)->next;
         } else if (pkg_path[0] != '\0') {
                 /* User provided a .pkg.tar.zst path directly */
                 result = store_add(pkg_path, pick_backend());
@@ -627,6 +674,9 @@ int cmd_install(const char *pkg_name)
                         }
                 }
                 resolved_version = strdup("unknown");
+                *targets_tail = trans_target_new(pkg_name, "unknown",
+                                                 result.store_path, 1);
+                if (*targets_tail) targets_tail = &(*targets_tail)->next;
         } else {
                 /* Use lib2O9 to find the package in the repo sync DBs,
                  * download it, and extract to the store. */
@@ -672,7 +722,6 @@ int cmd_install(const char *pkg_name)
 
                 /* Search sync DBs for the package */
                 alpm_pkg_t *pkg = NULL;
-                alpm_db_t *found_db = NULL;
                 alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);
 
                 if (!sync_dbs) {
@@ -695,7 +744,6 @@ int cmd_install(const char *pkg_name)
                                         db_name ? db_name : "?", pkg_count);
                         pkg = alpm_db_get_pkg(db, pkg_name);
                         if (pkg) {
-                                found_db = db;
                                 break;
                         }
                 }
@@ -714,7 +762,6 @@ int cmd_install(const char *pkg_name)
                 }
 
                 const char *version = alpm_pkg_get_version(pkg);
-                const char *filename = alpm_pkg_get_filename(pkg);
                 resolved_version = strdup(version);
 
                 printf("  %sfound%s %s%s%s %s%s%s\n",
@@ -722,86 +769,348 @@ int cmd_install(const char *pkg_name)
                        C_BOLD(), pkg_name, C_RESET(),
                        C_GREEN(), version, C_RESET());
 
-                /* Build the download URL from the DB's server + filename */
-                const char *server_url = NULL;
-                alpm_list_t *servers = alpm_db_get_servers(found_db);
-                if (servers)
-                        server_url = (const char *)servers->data;
-
-                if (!server_url || !filename) {
-                        fprintf(stderr, "209: cannot determine download URL for %s\n", pkg_name);
+                /* ── Phase 0: Wire up the libalpm transaction ─────────
+                 *
+                 * This is a PARTIAL wiring. We init+add+prepare the
+                 * transaction to revive the solver (dependency resolution,
+                 * file-conflict detection, cycle detection, architecture
+                 * checks) but we do NOT call alpm_trans_commit(). The
+                 * commit callback contract is wired to libalpm's own
+                 * extraction path (which extracts to <root>/usr, /etc,
+                 * etc.), and 2O9 extracts to /nix/store/<name>-<ver>/
+                 * instead. Bridging that requires overriding
+                 * _alpm_sync_commit / commit_single_pkg's extraction
+                 * step, which is a later-phase task.
+                 *
+                 * Instead, after prepare succeeds, we walk the prepared
+                 * trans->add list (which contains the primary package
+                 * plus all auto-resolved deps, topologically sorted) and
+                 * run our existing download + store_add_named flow for
+                 * each target. This gets us dep resolution and conflict
+                 * detection without rewriting the install backend. Full
+                 * transaction commit (with hooks, scriptlets, diskspace
+                 * check) comes in a later phase. See worklog Task
+                 * ID: phase-0.
+                 *
+                 * ALPM_TRANS_FLAG_NOLOCK: 2O9 takes its own flock on the
+                 * generation DB (gen_db_lock below), so we don't need
+                 * libalpm's separate db.lck. */
+                if (alpm_trans_init(handle, ALPM_TRANS_FLAG_NOLOCK) != 0) {
+                        fprintf(stderr, "209: alpm_trans_init failed: %s\n",
+                                alpm_strerror(alpm_errno(handle)));
                         alpm_release(handle);
                         free(resolved_version);
                         return 1;
                 }
 
-                /* Download the package to the cache dir */
-                char url[PATH_MAX * 2];
-                char cache_path[PATH_MAX];
-                snprintf(url, sizeof(url), "%s/%s", server_url, filename);
-                snprintf(cache_path, sizeof(cache_path), "/var/cache/2O9/pkg/%s", filename);
+                if (alpm_add_pkg(handle, pkg) != 0) {
+                        fprintf(stderr, "209: alpm_add_pkg failed for %s: %s\n",
+                                pkg_name, alpm_strerror(alpm_errno(handle)));
+                        alpm_trans_release(handle);
+                        alpm_release(handle);
+                        free(resolved_version);
+                        return 1;
+                }
 
-                /* Ensure cache dir exists */
+                /* alpm_trans_prepare runs the solver: it pulls in deps
+                 * from the sync DBs, detects unresolvable deps, file
+                 * conflicts, and dependency cycles. On failure data is
+                 * populated with alpm_depmissing_t* entries (we just
+                 * free the list - the error string from pm_errno has
+                 * the human-readable summary). */
+                alpm_list_t *prepare_data = NULL;
+                if (alpm_trans_prepare(handle, &prepare_data) != 0) {
+                        fprintf(stderr, "209: dependency resolution failed: %s\n",
+                                alpm_strerror(alpm_errno(handle)));
+                        if (prepare_data) alpm_list_free(prepare_data);
+                        alpm_trans_release(handle);
+                        alpm_release(handle);
+                        free(resolved_version);
+                        return 1;
+                }
+                if (prepare_data) alpm_list_free(prepare_data);
+
+                /* Get the configured package siglevel. two9_init.c set
+                 * remote_file_siglevel from the manifest's SigLevel
+                 * string. We use this both to decide whether to fetch
+                 * .sig files and to pass to alpm_pkg_load() for the
+                 * actual gpgme verification. */
+                int pkg_siglevel = alpm_option_get_remote_file_siglevel(handle);
+                int sig_required = (pkg_siglevel & ALPM_SIG_PACKAGE) &&
+                                   !(pkg_siglevel & ALPM_SIG_PACKAGE_OPTIONAL);
+
+                /* Walk the prepared transaction's add-target list. The
+                 * solver has reordered this list topologically (deps
+                 * before dependents), so iterating in order installs
+                 * dependencies before the packages that need them. */
+                alpm_list_t *add_list = alpm_trans_get_add(handle);
+                if (!add_list) {
+                        fprintf(stderr, "209: transaction has no targets after prepare\n");
+                        alpm_trans_release(handle);
+                        alpm_release(handle);
+                        free(resolved_version);
+                        return 1;
+                }
+
+                /* Ensure cache dir exists (shared across all targets). */
                 mkdir("/var/cache/2O9", 0755);
                 mkdir("/var/cache/2O9/pkg", 0755);
+                /* Ensure /nix/store/.tmp exists for atomic extraction. */
+                mkdir("/nix", 0755);
+                mkdir("/nix/store", 0755);
 
-                printf("  %sdownloading%s %s...\n", C_DIM(), C_RESET(), filename);
+                int primary_done = 0;
+                int trans_failed = 0;
 
-                CURL *curl = curl_easy_init();
-                if (!curl) {
-                        fprintf(stderr, "209: cannot init libcurl\n");
-                        alpm_release(handle);
-                        free(resolved_version);
-                        return 1;
+                for (alpm_list_t *i = add_list; i; i = alpm_list_next(i)) {
+                        alpm_pkg_t *tpkg = (alpm_pkg_t *)i->data;
+                        const char *tname = alpm_pkg_get_name(tpkg);
+                        const char *tver = alpm_pkg_get_version(tpkg);
+                        const char *tfile = alpm_pkg_get_filename(tpkg);
+                        alpm_db_t *tdb = alpm_pkg_get_db(tpkg);
+
+                        if (!tfile || !tdb) {
+                                fprintf(stderr, "209: cannot determine download info for %s\n",
+                                        tname ? tname : "?");
+                                trans_failed = 1;
+                                break;
+                        }
+
+                        const char *server_url = NULL;
+                        alpm_list_t *servers = alpm_db_get_servers(tdb);
+                        if (servers) server_url = (const char *)servers->data;
+                        if (!server_url) {
+                                fprintf(stderr, "209: no server URL for %s\n", tname);
+                                trans_failed = 1;
+                                break;
+                        }
+
+                        int is_primary = (strcmp(tname, pkg_name) == 0);
+
+                        if (is_primary) {
+                                printf("  %sinstalling%s %s%s%s %s%s%s\n",
+                                       C_BOLD(), C_RESET(),
+                                       C_BOLD(), tname, C_RESET(),
+                                       C_GREEN(), tver, C_RESET());
+                        } else {
+                                printf("  %sdep%s        %s%s%s %s%s%s\n",
+                                       C_DIM(), C_RESET(),
+                                       C_BOLD(), tname, C_RESET(),
+                                       C_GREEN(), tver, C_RESET());
+                        }
+
+                        /* Build URL + cache path for this target. */
+                        char turl[PATH_MAX * 2];
+                        char tcache[PATH_MAX];
+                        snprintf(turl, sizeof(turl), "%s/%s", server_url, tfile);
+                        snprintf(tcache, sizeof(tcache), "/var/cache/2O9/pkg/%s", tfile);
+
+                        /* Download the .pkg.tar.zst (skip if already cached). */
+                        struct stat cache_st;
+                        if (stat(tcache, &cache_st) != 0) {
+                                printf("  %sdownloading%s %s...\n",
+                                       C_DIM(), C_RESET(), tfile);
+
+                                FILE *fp = fopen(tcache, "wb");
+                                if (!fp) {
+                                        snprintf(tcache, sizeof(tcache),
+                                                 "/tmp/2O9-%s", tfile);
+                                        fp = fopen(tcache, "wb");
+                                }
+                                if (!fp) {
+                                        fprintf(stderr, "209: cannot write to cache dir\n");
+                                        trans_failed = 1;
+                                        break;
+                                }
+
+                                CURL *curl = curl_easy_init();
+                                if (!curl) {
+                                        fclose(fp);
+                                        fprintf(stderr, "209: cannot init libcurl\n");
+                                        trans_failed = 1;
+                                        break;
+                                }
+                                curl_easy_setopt(curl, CURLOPT_URL, turl);
+                                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sync_write_cb);
+                                curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+                                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+                                curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+                                curl_easy_setopt(curl, CURLOPT_USERAGENT, "2O9/0.0.1");
+                                CURLcode res = curl_easy_perform(curl);
+                                long http_code = 0;
+                                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+                                curl_easy_cleanup(curl);
+                                fclose(fp);
+
+                                if (res != CURLE_OK || http_code != 200) {
+                                        fprintf(stderr, "209: download failed for %s: %s (HTTP %ld)\n",
+                                                tfile, curl_easy_strerror(res), http_code);
+                                        unlink(tcache);
+                                        trans_failed = 1;
+                                        break;
+                                }
+                        } else {
+                                if (debug)
+                                        fprintf(stderr, "  [debug] using cached %s\n", tcache);
+                        }
+
+                        /* ── Signature fetch + verification ──────────
+                         * If SigLevel includes ALPM_SIG_PACKAGE, fetch
+                         * <filename>.sig alongside the package. If the
+                         * sig is required (!ALPM_SIG_PACKAGE_OPTIONAL)
+                         * and the fetch fails, refuse to install. Then
+                         * call alpm_pkg_load() with the siglevel - it
+                         * reads <tcache>.sig and runs gpgme verification
+                         * internally via _alpm_check_pgp_helper(). */
+                        if (pkg_siglevel & ALPM_SIG_PACKAGE) {
+                                char sig_path[PATH_MAX];
+                                snprintf(sig_path, sizeof(sig_path),
+                                         "%s.sig", tcache);
+                                struct stat sig_st;
+                                int have_sig = 0;
+                                if (stat(sig_path, &sig_st) == 0) {
+                                        have_sig = 1;
+                                } else {
+                                        /* Try to download the .sig. */
+                                        char sig_url[PATH_MAX * 2];
+                                        snprintf(sig_url, sizeof(sig_url),
+                                                 "%s.sig", turl);
+                                        CURL *curl = curl_easy_init();
+                                        if (curl) {
+                                                FILE *fp = fopen(sig_path, "wb");
+                                                if (fp) {
+                                                        curl_easy_setopt(curl, CURLOPT_URL, sig_url);
+                                                        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sync_write_cb);
+                                                        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+                                                        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+                                                        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+                                                        curl_easy_setopt(curl, CURLOPT_USERAGENT, "2O9/0.0.1");
+                                                        CURLcode res = curl_easy_perform(curl);
+                                                        long http_code = 0;
+                                                        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+                                                        curl_easy_cleanup(curl);
+                                                        fclose(fp);
+                                                        if (res == CURLE_OK && http_code == 200) {
+                                                                have_sig = 1;
+                                                        } else {
+                                                                unlink(sig_path);
+                                                                if (sig_required) {
+                                                                        fprintf(stderr, "209: required signature "
+                                                                                "missing for %s (HTTP %ld)\n",
+                                                                                tfile, http_code);
+                                                                        trans_failed = 1;
+                                                                        break;
+                                                                }
+                                                                /* Optional sig missing: alpm_pkg_load
+                                                                 * below will skip verification. */
+                                                        }
+                                                } else {
+                                                        curl_easy_cleanup(curl);
+                                                        if (sig_required) {
+                                                                fprintf(stderr, "209: cannot write sig file %s\n",
+                                                                        sig_path);
+                                                                trans_failed = 1;
+                                                                break;
+                                                        }
+                                                }
+                                        } else if (sig_required) {
+                                                fprintf(stderr, "209: cannot init libcurl for sig fetch\n");
+                                                trans_failed = 1;
+                                                break;
+                                        }
+                                }
+
+                                /* Verify the signature via alpm_pkg_load().
+                                 * This reads <tcache>.sig and calls
+                                 * _alpm_check_pgp_helper() (signing.c) which
+                                 * uses gpgme to verify against the trusted
+                                 * keyring. On failure pm_errno is set to
+                                 * ALPM_ERR_PKG_INVALID_SIG. */
+                                alpm_pkg_t *loaded = NULL;
+                                int rc = alpm_pkg_load(handle, tcache, 0,
+                                                       pkg_siglevel, &loaded);
+                                if (rc != 0) {
+                                        fprintf(stderr, "209: signature verification failed "
+                                                "for %s: %s\n",
+                                                tfile, alpm_strerror(alpm_errno(handle)));
+                                        if (have_sig) unlink(sig_path);
+                                        trans_failed = 1;
+                                        break;
+                                }
+                                if (loaded) alpm_pkg_free(loaded);
+                                if (have_sig || !sig_required) {
+                                        printf("  %sverified%s %s signature\n",
+                                               C_GREEN(), C_RESET(), tfile);
+                                }
+                        }
+
+                        printf("  %sdownloaded%s %s\n",
+                               C_GREEN(), C_RESET(), tfile);
+
+                        /* Extract to /nix/store/ via the store adapter.
+                         * direct_extract() is now atomic (extract to
+                         * /nix/store/.tmp/<n>-<v>.<pid>/ then rename). */
+                        store_add_result_t tresult = store_add_named(
+                                tcache, tname, tver, pick_backend());
+                        if (tresult.success != 0) {
+                                fprintf(stderr, "209: store add failed for %s: %s\n",
+                                        tname, tresult.error_msg ? tresult.error_msg : "?");
+                                store_add_result_free(&tresult);
+                                trans_failed = 1;
+                                break;
+                        }
+
+                        /* Record this target. The primary's result also
+                         * feeds the outer-scope `result`/`resolved_version`
+                         * so the rest of cmd_install (which expects a
+                         * single result) works unchanged. */
+                        trans_target_t *t = trans_target_new(
+                                tname, tver, tresult.store_path, is_primary);
+                        if (!t) {
+                                store_add_result_free(&tresult);
+                                trans_failed = 1;
+                                break;
+                        }
+                        *targets_tail = t;
+                        targets_tail = &t->next;
+
+                        if (is_primary) {
+                                primary_done = 1;
+                                result.success = 0;
+                                result.store_path = strdup(tresult.store_path);
+                                result.error_msg = NULL;
+                        }
+
+                        store_add_result_free(&tresult);
                 }
 
-                FILE *fp = fopen(cache_path, "wb");
-                if (!fp) {
-                        /* Fall back to /tmp */
-                        snprintf(cache_path, sizeof(cache_path), "/tmp/2O9-%s", filename);
-                        fp = fopen(cache_path, "wb");
-                }
-                if (!fp) {
-                        fprintf(stderr, "209: cannot write to cache dir\n");
-                        curl_easy_cleanup(curl);
-                        alpm_release(handle);
-                        free(resolved_version);
-                        return 1;
-                }
-
-                curl_easy_setopt(curl, CURLOPT_URL, url);
-                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sync_write_cb);
-                curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
-                curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-                curl_easy_setopt(curl, CURLOPT_USERAGENT, "2O9/0.0.1");
-
-                CURLcode res = curl_easy_perform(curl);
-                long http_code = 0;
-                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-                curl_easy_cleanup(curl);
-                fclose(fp);
-
-                if (res != CURLE_OK || http_code != 200) {
-                        fprintf(stderr, "209: download failed: %s (HTTP %ld)\n",
-                                curl_easy_strerror(res), http_code);
-                        unlink(cache_path);
-                        alpm_release(handle);
-                        free(resolved_version);
-                        return 1;
-                }
-
-                printf("  %sdownloaded%s %s\n", C_GREEN(), C_RESET(), filename);
+                /* Release the transaction. We did NOT call commit - the
+                 * comment above explains why. This frees trans->add and
+                 * trans->remove (the latter is empty for an install). */
+                alpm_trans_release(handle);
                 alpm_release(handle);
 
-                /* Extract the .pkg.tar.zst to /nix/store/ via the store adapter */
-                result = store_add_named(cache_path, pkg_name, version, pick_backend());
-		if (result.success != 0) {
-			fprintf(stderr, "209: store add failed: %s\n", result.error_msg);
-			store_add_result_free(&result);
-			free(resolved_version);
-			return 1;
-		}
+                if (trans_failed) {
+                        trans_target_list_free(targets_head);
+                        targets_head = NULL;
+                        free(resolved_version);
+                        resolved_version = NULL;
+                        return 1;
+                }
+
+                if (!primary_done) {
+                        fprintf(stderr, "209: primary package %s disappeared from transaction\n",
+                                pkg_name);
+                        trans_target_list_free(targets_head);
+                        targets_head = NULL;
+                        free(resolved_version);
+                        resolved_version = NULL;
+                        return 1;
+                }
+
+                /* If alpm_trans_prepare resolved zero deps, targets_head
+                 * has just the primary - which is fine. The generation
+                 * commit below walks targets_head and records each entry. */
         }
 
         printf("  %sstore path:%s %s\n", C_DIM(), C_RESET(), result.store_path);
@@ -823,40 +1132,50 @@ int cmd_install(const char *pkg_name)
                 return 1;
         }
 
-        /* Step 3: carry forward current generation's packages, add new one.
-         * If the package already exists in the current generation, replace it
-         * (upgrade/reinstall). Otherwise, append it. */
+        /* Step 3: carry forward current generation's packages, add new ones.
+         * For each target in targets_head (primary + auto-resolved deps),
+         * remove any existing entry in the carried-forward list (upgrade
+         * case) and append the freshly-installed entry. */
         int current = gen_db_current(db);
         gen_pkg_t *pkgs = read_current_gen_packages(db_root, current);
 
-        /* Remove existing entry for this package if present (upgrade) */
-        gen_pkg_t **pp = &pkgs;
-        int replaced = 0;
-        while (*pp) {
-                if (strcmp((*pp)->name, pkg_name) == 0) {
-                        gen_pkg_t *old = *pp;
-                        *pp = old->next;
-                        old->next = NULL;
-                        gen_pkg_list_free(old);
-                        replaced = 1;
-                        break;
+        for (trans_target_t *t = targets_head; t; t = t->next) {
+                /* Remove existing entry for this target if present (upgrade). */
+                gen_pkg_t **pp = &pkgs;
+                int replaced = 0;
+                while (*pp) {
+                        if (strcmp((*pp)->name, t->name) == 0) {
+                                gen_pkg_t *old = *pp;
+                                *pp = old->next;
+                                old->next = NULL;
+                                gen_pkg_list_free(old);
+                                replaced = 1;
+                                break;
+                        }
+                        pp = &(*pp)->next;
                 }
-                pp = &(*pp)->next;
+
+                /* Append the new package entry. Mark all targets as
+                 * "imperative" - they were pulled in by an imperative
+                 * `209 <pkg> install` command, not by 2O9.nix. The next
+                 * `209 apply` will flag any of them not in 2O9.nix for
+                 * removal (which is correct: deps of an imperatively
+                 * installed package should go away when the primary does). */
+                gen_pkg_t *new_pkg = gen_pkg_create(
+                        t->name, t->version, t->store_path, "imperative");
+                gen_pkg_t **tail = &pkgs;
+                while (*tail) tail = &(*tail)->next;
+                *tail = new_pkg;
+
+                if (t->is_primary) {
+                        if (replaced)
+                                printf("  upgraded %s in generation\n", t->name);
+                        else
+                                printf("  added %s to generation\n", t->name);
+                } else if (!replaced) {
+                        printf("  added %s (dependency) to generation\n", t->name);
+                }
         }
-
-        /* Append the new package */
-        gen_pkg_t *new_pkg = gen_pkg_create(pkg_name,
-                                            resolved_version ? resolved_version : "0.0.0",
-                                            result.store_path, "imperative");
-        /* Find tail */
-        gen_pkg_t **tail = &pkgs;
-        while (*tail) tail = &(*tail)->next;
-        *tail = new_pkg;
-
-        if (replaced)
-                printf("  upgraded %s in generation\n", pkg_name);
-        else
-                printf("  added %s to generation\n", pkg_name);
 
         /* Step 4: commit new generation */
         int new_id = gen_db_commit(db, pkgs);
@@ -888,6 +1207,7 @@ int cmd_install(const char *pkg_name)
         gen_db_unlock(db);
         gen_db_close(db);
         store_add_result_free(&result);
+        trans_target_list_free(targets_head);
         free(resolved_version);
         return 0;
 }
