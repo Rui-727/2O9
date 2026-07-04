@@ -72,6 +72,7 @@ static void cmd_info_strings(repl_t *r, int argc, char **argv);
 static void cmd_print_hex(repl_t *r, int argc, char **argv);
 static void cmd_print_hexw(repl_t *r, int argc, char **argv);
 static void cmd_print_hexq(repl_t *r, int argc, char **argv);
+static void cmd_print_hexr(repl_t *r, int argc, char **argv);
 static void cmd_print_string(repl_t *r, int argc, char **argv);
 static void cmd_seek(repl_t *r, int argc, char **argv);
 static void cmd_seek_undo(repl_t *r, int argc, char **argv);
@@ -101,6 +102,7 @@ static const struct {
     {"px",    "hex dump at <addr> <len>",              cmd_print_hex},
     {"pxw",   "hex dump as 32-bit LE words",           cmd_print_hexw},
     {"pxq",   "hex dump as 64-bit LE words",           cmd_print_hexq},
+    {"pxr",   "pointer-chase dump: 8-byte words with -> symbol",  cmd_print_hexr},
     {"ps",    "print string at <addr> <len>",          cmd_print_string},
     {"s",     "seek to <addr|section|symbol|entry0>",  cmd_seek},
     {"sh",    "show seek history",                     cmd_seek_history},
@@ -664,6 +666,104 @@ static void cmd_print_hexq(repl_t *r, int argc, char **argv)
         len = (size_t)v;
     }
     do_print_hex(r, addr, len, 8);
+}
+
+/* Find the closest defined symbol whose vaddr is <= value and whose
+ * range contains value. For symbols with a known size, containment is
+ * [vaddr, vaddr+size); for size==0 symbols, only an exact vaddr match
+ * counts (we can't confirm an in-range offset without a size). Returns
+ * the symbol name (borrowed from a->symbols) and writes the offset
+ * (value - vaddr) to *off_out. Returns NULL if no symbol contains
+ * value. Used by `pxr` to annotate 8-byte pointer values with the
+ * function/object they point to. Mirrors rizin's pxr resolve logic
+ * (librz/util/print.c:749, 863-883). */
+static const char *sym_containing(const debag_analysis_t *a,
+                                  uint64_t value, uint64_t *off_out)
+{
+    const debag_elf_symbol_t *best = NULL;
+    for (size_t i = 0; a->symbols && i < a->symbol_count; i++) {
+        const debag_elf_symbol_t *s = &a->symbols[i];
+        if (s->is_import) continue;
+        if (s->vaddr == 0 || !s->name) continue;
+        if (s->vaddr > value) continue;
+
+        if (s->size > 0) {
+            /* Known size: require containment. */
+            if (value < s->vaddr + s->size) {
+                /* Containment hit. Prefer this over a size==0 fallback. */
+                best = s;
+                break;
+            }
+            /* Otherwise keep scanning; another symbol may contain value. */
+            continue;
+        }
+
+        /* Unknown size: only an exact vaddr match counts. */
+        if (s->vaddr == value) {
+            best = s;
+            break;
+        }
+    }
+    if (!best) return NULL;
+    if (off_out) *off_out = value - best->vaddr;
+    return best->name;
+}
+
+/* `pxr <addr> <len>` -- pointer-chase hex dump. Like `pxq` (one 64-bit
+ * word per line) with two extras:
+ *   (1) all-zero words are suppressed entirely (different from the
+ *       sparse collapse in `px`/`pxw`/`pxq`, which collapses repeats;
+ *       `pxr` just hides zeros);
+ *   (2) each non-zero word is annotated `-> symname` if the word value
+ *       falls inside a defined symbol's [vaddr, vaddr+size) range, or
+ *       `-> symname+0xOFF` for an in-range non-exact match. Words that
+ *       don't fall in any symbol's range print `-> (no symbol)`.
+ * Default len = 128 (16 qwords). Mirrors rizin's pxr
+ * (librz/util/print.c:749, 863-883). */
+static void cmd_print_hexr(repl_t *r, int argc, char **argv)
+{
+    uint64_t addr = r->offset;
+    size_t len = 128;  /* 16 qwords */
+    if (argc >= 2) {
+        if (parse_uint(r, argv[1], &addr) < 0) return;
+    }
+    if (argc >= 3) {
+        uint64_t v;
+        if (parse_uint(r, argv[2], &v) < 0) return;
+        len = (size_t)v;
+    }
+    if (len == 0) len = 128;
+    if (len > 0x100000) {
+        fprintf(stderr, "debag: length too large (max 0x100000)\n");
+        return;
+    }
+
+    uint8_t *buf = malloc(len);
+    if (!buf) { perror("malloc"); return; }
+    read_at(r, addr, buf, len);
+
+    int aw = addr_width(r);
+    const char *addr_fmt = (aw == 18) ? "0x%016" PRIx64 : "0x%08"  PRIx64;
+
+    for (size_t i = 0; i + 8 <= len; i += 8) {
+        uint64_t word = 0;
+        for (int b = 0; b < 8; b++)
+            word |= (uint64_t)buf[i + b] << (8 * b);
+        if (word == 0) continue;  /* suppress all-zero words */
+
+        uint64_t off = 0;
+        const char *name = sym_containing(r->a, word, &off);
+        printf(addr_fmt, addr + i);
+        printf("  0x%016" PRIx64, word);
+        if (name && off == 0)
+            printf(" -> %s\n", name);
+        else if (name)
+            printf(" -> %s+0x%" PRIx64 "\n", name, off);
+        else
+            printf(" -> (no symbol)\n");
+    }
+
+    free(buf);
 }
 
 static void cmd_print_string(repl_t *r, int argc, char **argv)
