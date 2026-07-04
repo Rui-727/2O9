@@ -164,9 +164,9 @@ Each maps to the equivalent 2O9 command.
   | `ie` | List entry points (`entry0`) |
   | `iz` | List printable strings (>= 4 chars) in `.rodata` / `.data` |
   | `ii` | List imports (undefined dynamic symbols, with GOT slot addresses) |
-  | `px <addr> <len>` | Hex dump at virtual address |
-  | `pxw <addr> <len>` | Hex dump as 32-bit little-endian words |
-  | `pxq <addr> <len>` | Hex dump as 64-bit little-endian words |
+  | `px <addr> <len>` | Hex dump at virtual address (sparse-collapse: 3+ identical rows collapse to first, `...`, last) |
+  | `pxw <addr> <len>` | Hex dump as 32-bit little-endian words (sparse-collapse) |
+  | `pxq <addr> <len>` | Hex dump as 64-bit little-endian words (sparse-collapse) |
   | `ps <addr> <len>` | Print string at address |
   | `s <addr>` | Seek to address |
   | `s <section>` | Seek to section start (by name) |
@@ -203,6 +203,12 @@ Each maps to the equivalent 2O9 command.
   annotate `call <plt_entry>` instructions with `; -> 0xGOT (name)`
   by reading the PLT entry's `jmp [rip+disp32]` and looking up the
   GOT slot in the relocation table.
+
+  Sparse hex dump: `px`/`pxw`/`pxq` collapse runs of 3 or more
+  byte-identical rows (all-zero `.bss`, repeated fill patterns) into
+  the first row, a `...` line, and the last row (with its real
+  address). Two identical rows are printed verbatim; only 3+ trigger
+  the collapse. Mirrors rizin's `checkSparse` loop.
 
 `209 debag --dynamic-db --` `<cmd>` `[args...]`
 : Drop into an interactive gdb-style live debugger REPL on `<cmd>`.

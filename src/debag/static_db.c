@@ -265,6 +265,54 @@ static int parse_uint(repl_t *r, const char *s, uint64_t *out)
     return resolve_expr(r, s, out);
 }
 
+/* Print one 16-byte row of a hex dump in rizin's `px` style. `word_size`
+ * selects px (1), pxw (4), or pxq (8) layout. `row_len` is the number of
+ * valid bytes in `p` (may be < 16 for the final partial row); the rest
+ * is space-padded so columns line up. Extracted from print_hexdump so
+ * the sparse-collapse walker can emit a row at any address. */
+static void print_hexdump_row(uint64_t vaddr, const uint8_t *p, size_t row_len,
+                              int word_size, int words_per_row,
+                              const char *addr_fmt)
+{
+    printf(addr_fmt, vaddr);
+    if (word_size == 1) {
+        printf("  ");
+        for (size_t j = 0; j < 16; j++) {
+            if (j < row_len) printf("%02x", p[j]);
+            else             printf("  ");
+            /* extra space between byte pairs (after j=1,3,5,...,15) */
+            if (j & 1) printf(" ");
+        }
+        printf(" ");
+        for (size_t j = 0; j < 16; j++) {
+            if (j < row_len) {
+                uint8_t c = p[j];
+                putchar(isprint(c) ? c : '.');
+            } else {
+                putchar(' ');
+            }
+        }
+        printf("\n");
+    } else {
+        printf(" ");
+        for (int w = 0; w < words_per_row; w++) {
+            size_t off = (size_t)w * (size_t)word_size;
+            if (off >= row_len) {
+                /* pad short tail */
+                if (word_size == 4) printf("  0x00000000");
+                else                printf("    0x0000000000000000");
+                continue;
+            }
+            uint64_t v = 0;
+            for (int b = 0; b < word_size && off + b < row_len; b++)
+                v |= (uint64_t)p[off + b] << (8 * b);
+            if (word_size == 4) printf(" 0x%08" PRIx64, v);
+            else                printf("  0x%016" PRIx64, v);
+        }
+        printf("\n");
+    }
+}
+
 /* Print a hex dump in rizin's `px` style. Layout per row:
  *   0xADDR  b0 b1 b2 b3  b4 b5 b6 b7  b8 b9 ba bb  bc bd be bf  |ascii|
  * Address column is 18 chars on 64-bit binaries, 10 on 32-bit. Bytes
@@ -274,58 +322,76 @@ static int parse_uint(repl_t *r, const char *s, uint64_t *out)
  * `word_size` selects px (1), pxw (4), or pxq (8) layout. For word
  * modes the hex column is a sequence of `0x%08x ` / `0x%016llx ` words
  * read in native (little-endian) byte order — matches rizin's
- * rz_read_ble default for x86. */
+ * rz_read_ble default for x86.
+ *
+ * Sparse collapse: when 3+ consecutive rows are byte-identical (all
+ * zeros, or any repeated pattern), print the first row, print `...`,
+ * print the last row (with its real address so the user knows where
+ * they are). Mirrors rizin's checkSparse loop in rz_print_hexdump_str
+ * (librz/util/print.c:763-782). */
 static void print_hexdump(repl_t *r, uint64_t vaddr,
                           const uint8_t *buf, size_t n, int word_size)
 {
     int aw = addr_width(r);
     const char *addr_fmt = (aw == 18) ? "0x%016" PRIx64 : "0x%08"  PRIx64;
+    int words_per_row = (word_size == 1) ? 0 : 16 / word_size;
 
-    if (word_size == 1) {
-        /* Byte mode: 16 bytes per row, grouped in pairs. */
-        for (size_t i = 0; i < n; i += 16) {
-            printf(addr_fmt, vaddr + i);
-            printf("  ");
-            for (size_t j = 0; j < 16; j++) {
-                if (i + j < n) printf("%02x", buf[i + j]);
-                else            printf("  ");
-                /* extra space between byte pairs (after j=1,3,5,...,15) */
-                if (j & 1) printf(" ");
-            }
-            printf(" ");
-            for (size_t j = 0; j < 16; j++) {
-                if (i + j < n) {
-                    uint8_t c = buf[i + j];
-                    putchar(isprint(c) ? c : '.');
-                } else {
-                    putchar(' ');
-                }
-            }
-            printf("\n");
+    uint8_t prev[16];          /* bytes of the first row in the current run */
+    size_t prev_len = 0;       /* valid bytes in prev (last row may be short) */
+    uint64_t run_first_addr = 0;
+    uint64_t run_last_addr = 0;
+    int run = 0;               /* consecutive identical rows after the first */
+    int have_prev = 0;
+
+    for (size_t i = 0; i < n; i += 16) {
+        size_t row_len = (n - i < 16) ? (n - i) : 16;
+        const uint8_t *row = buf + i;
+
+        if (have_prev && row_len == prev_len &&
+            memcmp(row, prev, row_len) == 0) {
+            /* Extends the current run. */
+            run++;
+            run_last_addr = vaddr + i;
+            continue;
         }
-        return;
+
+        /* Flush the previous run. */
+        if (have_prev) {
+            print_hexdump_row(run_first_addr, prev, prev_len,
+                              word_size, words_per_row, addr_fmt);
+            if (run >= 2) {
+                /* 3+ identical rows: print "..." then the last row. */
+                printf("...\n");
+                print_hexdump_row(run_last_addr, prev, prev_len,
+                                  word_size, words_per_row, addr_fmt);
+            } else if (run == 1) {
+                /* 2 identical rows: print the second one too. */
+                print_hexdump_row(run_last_addr, prev, prev_len,
+                                  word_size, words_per_row, addr_fmt);
+            }
+        }
+
+        /* Start a new run with this row. */
+        memcpy(prev, row, row_len);
+        prev_len = row_len;
+        run_first_addr = vaddr + i;
+        run_last_addr = vaddr + i;
+        run = 0;
+        have_prev = 1;
     }
 
-    /* Word mode: pxw (4) or pxq (8). Words per row = 16 / word_size. */
-    int words_per_row = 16 / word_size;
-    for (size_t i = 0; i < n; i += 16) {
-        printf(addr_fmt, vaddr + i);
-        printf(" ");
-        for (int w = 0; w < words_per_row; w++) {
-            size_t off = i + (size_t)w * (size_t)word_size;
-            if (off >= n) {
-                /* pad short tail */
-                if (word_size == 4) printf("  0x00000000");
-                else                printf("    0x0000000000000000");
-                continue;
-            }
-            uint64_t v = 0;
-            for (int b = 0; b < word_size && off + b < n; b++)
-                v |= (uint64_t)buf[off + b] << (8 * b);
-            if (word_size == 4) printf(" 0x%08" PRIx64, v);
-            else                printf("  0x%016" PRIx64, v);
+    /* Flush the trailing run. */
+    if (have_prev) {
+        print_hexdump_row(run_first_addr, prev, prev_len,
+                          word_size, words_per_row, addr_fmt);
+        if (run >= 2) {
+            printf("...\n");
+            print_hexdump_row(run_last_addr, prev, prev_len,
+                              word_size, words_per_row, addr_fmt);
+        } else if (run == 1) {
+            print_hexdump_row(run_last_addr, prev, prev_len,
+                              word_size, words_per_row, addr_fmt);
         }
-        printf("\n");
     }
 }
 
