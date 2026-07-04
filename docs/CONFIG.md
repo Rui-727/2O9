@@ -272,8 +272,6 @@ binds `basePackages` and `desktopPackages` so the `packages` attribute
 can concatenate them plus conditionally add `openssh` based on
 `config.services.sshd.enable`, all without infinite recursion.
 
----
-
 # Part 2: `extra.nix`
 
 An optional Nix file for stuff that doesn't belong in the declarative

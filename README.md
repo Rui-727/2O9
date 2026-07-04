@@ -40,9 +40,9 @@ reboot, and systemd starts whatever's enabled. That's it.
 The repository is always an Arch Linux mirror, configured in `2O9.nix`
 under `pacman.repos`. No custom repos, no alternative sources for the
 binary packages themselves. We just put the files in `/nix/store/`
-instead of `/`. On top of that, you can configure one or more 2O9
-binary caches (HTTP or S3) to share built packages between machines
-without re-downloading from the mirror.
+instead of `/`. You can configure one or more 2O9 binary caches (HTTP
+or S3) to share built packages between machines without re-downloading
+from the mirror.
 
 ## Naming
 
@@ -336,7 +336,7 @@ modelled on gdb. Software breakpoints via the INT3 (0xCC) trick
 (`db <addr|sym>`), continue (`dc`), single-step (`ds`), step over a
 call (`dso`), inspect registers (`dr`), hex-dump memory (`px`), print
 strings (`ps`), walk the rbp chain for a backtrace (`bt`), resolve
-nearest symbol (`sym <addr>`), set **hardware watchpoints** via the
+nearest symbol (`sym <addr>`), set hardware watchpoints via the
 x86 debug registers (`watch <addr|sym> [len]`, `watchw`, `watchr`,
 `watcha`, `watchx <addr|sym>` for execute breakpoints, `watch-` to
 remove), and manage signal dispositions (`handle`). Hardware
@@ -346,7 +346,7 @@ reads a watched memory location, with zero runtime overhead
 lengths 1/2/4/8 bytes, write / read-write / execute modes; `watch x`
 works on a `volatile int x` (STT_OBJECT symbols are resolved by
 name). Signals that last stopped the child are forwarded on `dc`
-gated by a per-signal `stop`/`print`/`pass` table — SIGSEGV/SIGBUS/
+gated by a per-signal `stop`/`print`/`pass` table: SIGSEGV/SIGBUS/
 SIGFPE/SIGILL/SIGTRAP/SIGINT stop+print+pass by default, while
 SIGALRM/SIGCHLD/SIGUSR1/SIGUSR2/SIGIO/SIGURG/SIGWINCH/SIGPIPE pass
 through without breaking so timers and child reaping keep working.
@@ -378,12 +378,12 @@ records which store paths depend on which others. GC walks the closure
 of all generations' root paths and deletes only what's truly
 unreachable. Deps don't get reaped when their parent is still alive.
 
-On top of that, **hardlink dedup** (`209 optimise`) walks the store,
-SHA-256s every regular file, and hardlinks identical files into
+**Hardlink dedup** (`209 optimise`) walks the store, SHA-256s every
+regular file, and hardlinks identical files into
 `/nix/store/.links/<sha256>`. Two packages shipping the same 50 MB
 locale file cost 50 MB on disk instead of 100 MB.
 
-And **binary cache substitution**. Configure one or more cache URLs in
+**Binary cache substitution**. Configure one or more cache URLs in
 `~/.config/2O9/extra.nix`:
 
 ```nix

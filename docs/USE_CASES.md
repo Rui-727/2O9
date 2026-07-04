@@ -112,7 +112,7 @@ With 2O9, the workflow is: from a TTY or a recovery shell, log in,
 `209 generations`, find the ID of the last working generation, `sudo
 209 <N> rollback`, reboot. The whole thing takes 30 seconds. The old
 kernel and driver packages are still in `/nix/store/` because GC
-preserves the closure of every generation, not just the current one.
+preserves the closure of every generation.
 
 The setup is: before any risky upgrade, run `209 generations` to see
 the current ID, then `sudo 209 <N> pin` so GC cannot reap that
@@ -172,12 +172,12 @@ completely offline, this is the only safe way to install packages: the
 USB stick is a single trust root, signed by a key you control, and
 nothing on the air-gapped machine ever trusts the internet.
 
-The gotcha: the USB stick needs the full closure, not just the package
-you want. `209 cache push` does this for you (it walks the refs graph),
-but if you forget and only copy the top-level `.narinfo` and `.nar.xz`,
-the install will fail with "missing reference". Also, every package on
-the air-gapped machine needs to have been pushed first. There is no
-fallback to the mirror, because there is no mirror. Plan ahead.
+The gotcha: the USB stick needs the full closure. `209 cache push`
+does this for you (it walks the refs graph), but if you forget and
+only copy the top-level `.narinfo` and `.nar.xz`, the install will
+fail with "missing reference". Also, every package on the air-gapped
+machine needs to have been pushed first. There is no fallback to the
+mirror, because there is no mirror. Plan ahead.
 
 ## 6. CI build worker
 

@@ -1,8 +1,8 @@
 # Tutorial: Your first hour with 2O9
 
 This is a linear walkthrough from a fresh clone to a working 2O9-managed
-system. By the end you will have a config file, one Arch package installed,
-one AUR package built, a couple of generations to roll between, and a
+system. The end state is a config file, one Arch package installed, one
+AUR package built, a couple of generations to roll between, and a
 cleaned-up store. Each step assumes you finished the previous one.
 
 Commands are prefixed with `$` (run as your user) or `#` (run as root,
@@ -53,8 +53,8 @@ created: /home/you/.config/2O9/2O9.nix
 ```
 
 Open the file in your editor. The starter has `vim`, `curl`, `git`, `htop`
-listed under `packages`. Trim that down so we can watch 2O9 install exactly
-what we ask for. Replace the `packages` list with a single entry, `cpufetch`,
+listed under `packages`. Trim that down so 2O9 installs exactly one
+package. Replace the `packages` list with a single entry, `cpufetch`,
 which is small, builds fast, and was used during 2O9 testing. The top of the
 file should look like this:
 
@@ -167,7 +167,7 @@ lrwxrwxrwx 1 you you 65 Aug 1 12:00 /home/you/.local/bin/cpufetch -> /nix/store/
 
 ## 5. First rollback
 
-Now let's roll a generation back and forth. List what you have:
+Now roll a generation back and forth. List what you have:
 
 ```sh
 $ 209 generations
@@ -239,7 +239,7 @@ binaries on its next exec.
 
 ## 6. First AUR build
 
-So far we only used binary packages from the Arch repos. Now build one
+So far you have only used binary packages from the Arch repos. Now build one
 from the AUR. Add `yt-dlp` to `aur.packages`:
 
 ```nix
