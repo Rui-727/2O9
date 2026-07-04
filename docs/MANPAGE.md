@@ -171,6 +171,9 @@ Each maps to the equivalent 2O9 command.
   | `s <addr>` | Seek to address |
   | `s <section>` | Seek to section start (by name) |
   | `s entry0` | Seek to entry point |
+  | `sh` | Show seek history stack (oldest to newest, current marked) |
+  | `u` | Undo seek (pop seek history; prints `no seek history` if empty) |
+  | `U` | Redo seek (pop redo stack; prints `no seek redo history` if empty) |
   | `pd <n>` | Disassemble `<n>` instructions at current seek |
   | `pdd <addr> <n>` | Disassemble `<n>` instructions at `<addr>` |
   | `?` | Show command table |
@@ -180,6 +183,13 @@ Each maps to the equivalent 2O9 command.
   symbol name. Disassembly (`pd` / `pdd`) requires libcapstone; without
   it, those two commands print a hint and return. The prompt shows the
   current seek: `0x0000000000401000> `.
+
+  Seek history: every successful `s <addr>` (where `addr` differs from
+  the current seek) pushes the prior position onto a 32-entry history
+  stack. `u` pops and restores it; `U` re-applies a position popped by
+  `u`. Any new `s` clears the redo stack (rizin semantics). `sh` prints
+  the stack with `<= current` next to the live position and `(redo)`
+  next to positions available via `U`.
 
 `209 debag --dynamic-db --` `<cmd>` `[args...]`
 : Drop into an interactive gdb-style live debugger REPL on `<cmd>`.

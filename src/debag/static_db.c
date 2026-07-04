@@ -40,12 +40,25 @@
  * Mirrors rizin's RzCore in the parts we care about: an analysis
  * pointer (the parsed ELF), an fd for direct pread(), a single
  * `offset` cursor (the seek position), and a `quit` flag the `q`
- * handler sets to break the outer loop. */
+ * handler sets to break the outer loop.
+ *
+ * Seek history (rizin's `u`/`U`) is a pair of bounded stacks:
+ * `seek_hist` records every position we left via `s <addr>` (oldest
+ * to newest, capped at SEEK_HIST_MAX entries — older entries shift
+ * out), `redo_stack` records positions we left via `u` so `U` can
+ * re-apply them. Any new `s <addr>` clears `redo_stack`, matching
+ * rizin's rz_core_seek_undo semantics. */
+#define SEEK_HIST_MAX 32
+
 typedef struct {
     debag_analysis_t *a;
     int fd;
     uint64_t offset;        /* current seek, mirrors rizin's core->offset */
     int quit;
+    uint64_t seek_hist[SEEK_HIST_MAX];
+    size_t   seek_hist_count;
+    uint64_t redo_stack[SEEK_HIST_MAX];
+    size_t   redo_count;
 } repl_t;
 
 /* ── Forward declarations for the command table ─────────────────── */
@@ -61,6 +74,9 @@ static void cmd_print_hexw(repl_t *r, int argc, char **argv);
 static void cmd_print_hexq(repl_t *r, int argc, char **argv);
 static void cmd_print_string(repl_t *r, int argc, char **argv);
 static void cmd_seek(repl_t *r, int argc, char **argv);
+static void cmd_seek_undo(repl_t *r, int argc, char **argv);
+static void cmd_seek_redo(repl_t *r, int argc, char **argv);
+static void cmd_seek_history(repl_t *r, int argc, char **argv);
 static void cmd_print_disasm(repl_t *r, int argc, char **argv);
 static void cmd_print_disasm_at(repl_t *r, int argc, char **argv);
 static void cmd_help(repl_t *r, int argc, char **argv);
@@ -87,6 +103,9 @@ static const struct {
     {"pxq",   "hex dump as 64-bit LE words",           cmd_print_hexq},
     {"ps",    "print string at <addr> <len>",          cmd_print_string},
     {"s",     "seek to <addr|section|symbol|entry0>",  cmd_seek},
+    {"sh",    "show seek history",                     cmd_seek_history},
+    {"u",     "undo seek (pop seek history)",          cmd_seek_undo},
+    {"U",     "redo seek (pop redo stack)",            cmd_seek_redo},
     {"pd",    "disassemble <n> insns at current seek", cmd_print_disasm},
     {"pdd",   "disassemble <n> insns at <addr>",       cmd_print_disasm_at},
     {"?",     "show this help",                        cmd_help},
@@ -515,6 +534,32 @@ static void cmd_print_string(repl_t *r, int argc, char **argv)
     free(buf);
 }
 
+/* Push `v` onto the seek history stack. If the stack is full, the
+ * oldest entry (index 0) is dropped via a one-element memmove shift.
+ * Order is oldest-first, newest-last. */
+static void seek_hist_push(repl_t *r, uint64_t v)
+{
+    if (r->seek_hist_count == SEEK_HIST_MAX) {
+        memmove(r->seek_hist, r->seek_hist + 1,
+                (SEEK_HIST_MAX - 1) * sizeof(r->seek_hist[0]));
+        r->seek_hist[SEEK_HIST_MAX - 1] = v;
+    } else {
+        r->seek_hist[r->seek_hist_count++] = v;
+    }
+}
+
+/* Push `v` onto the redo stack (same bounded-stack semantics). */
+static void redo_stack_push(repl_t *r, uint64_t v)
+{
+    if (r->redo_count == SEEK_HIST_MAX) {
+        memmove(r->redo_stack, r->redo_stack + 1,
+                (SEEK_HIST_MAX - 1) * sizeof(r->redo_stack[0]));
+        r->redo_stack[SEEK_HIST_MAX - 1] = v;
+    } else {
+        r->redo_stack[r->redo_count++] = v;
+    }
+}
+
 static void cmd_seek(repl_t *r, int argc, char **argv)
 {
     if (argc < 2) {
@@ -524,7 +569,58 @@ static void cmd_seek(repl_t *r, int argc, char **argv)
     }
     uint64_t v;
     if (resolve_expr(r, argv[1], &v) < 0) return;
+    if (v == r->offset) return;   /* no-op seek: don't touch history */
+    seek_hist_push(r, r->offset);
+    r->redo_count = 0;            /* any new seek clears redo, rizin-style */
     r->offset = v;
+}
+
+/* `u`: undo seek. Pop the most recent entry from seek_hist, push the
+ * current position to redo_stack, restore the popped entry. Prints
+ * "no seek history" if the history is empty. */
+static void cmd_seek_undo(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (r->seek_hist_count == 0) {
+        fprintf(stderr, "no seek history\n");
+        return;
+    }
+    uint64_t prev = r->seek_hist[--r->seek_hist_count];
+    redo_stack_push(r, r->offset);
+    r->offset = prev;
+}
+
+/* `U`: redo seek. Pop the most recent entry from redo_stack, push
+ * the current position back to seek_hist, restore the popped entry.
+ * Prints "no seek redo history" if the redo stack is empty. */
+static void cmd_seek_redo(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (r->redo_count == 0) {
+        fprintf(stderr, "no seek redo history\n");
+        return;
+    }
+    uint64_t prev = r->redo_stack[--r->redo_count];
+    seek_hist_push(r, r->offset);
+    r->offset = prev;
+}
+
+/* `sh`: print the seek history stack (oldest to newest), then the
+ * current position. The current position is marked with `<=` so it's
+ * visually distinct from the historical entries. */
+static void cmd_seek_history(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (r->seek_hist_count == 0 && r->redo_count == 0) {
+        printf("(no seek history)\n");
+        return;
+    }
+    for (size_t i = 0; i < r->seek_hist_count; i++)
+        printf("  0x%016" PRIx64 "\n", r->seek_hist[i]);
+    printf("  0x%016" PRIx64 "  <= current\n", r->offset);
+    for (size_t i = 0; i < r->redo_count; i++)
+        printf("  0x%016" PRIx64 "  (redo)\n",
+               r->redo_stack[r->redo_count - 1 - i]);
 }
 
 #ifdef HAVE_CAPSTONE
