@@ -2176,6 +2176,32 @@ static int session_init(dyn_session_t *s, int argc, char **argv)
         /* Disable ASLR so addresses are reproducible (and so symbol
          * vaddrs + load_offset match between runs). */
         personality(ADDR_NO_RANDOMIZE);
+
+        /* Reset all signal dispositions to default so the child doesn't
+         * inherit ignored signals from 2O9 (e.g. SIGPIPE ignored by the
+         * shell, SIGINT set to SIG_IGN by a wrapper). Errors are ignored:
+         * SIGKILL/SIGSTOP can't be reset, and signal() returns SIG_ERR
+         * for those, which is harmless. Mirrors gdb's fork-inferior.c
+         * signal-reset loop (clean-room reimplementation; gdb is
+         * GPL-3.0, 2O9 is GPL-2.0-only). */
+        for (int sig = 1; sig < NSIG; sig++)
+            (void)signal(sig, SIG_DFL);
+
+        /* Close all file descriptors >= 3 so the child doesn't inherit
+         * 2O9's leaked fds (log files, the binary being analyzed, /proc
+         * fds, etc.). Only stdin/stdout/stderr (0/1/2) are kept. Uses
+         * close_range (Linux 5.9+ syscall, glibc 2.34+ wrapper) when
+         * available; falls back to a close() loop up to _SC_OPEN_MAX. */
+#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 34)
+        close_range(3U, ~0U, 0u);
+#else
+        {
+            long max_fd = sysconf(_SC_OPEN_MAX);
+            if (max_fd < 0 || max_fd > 65536) max_fd = 1024;
+            for (int fd = 3; fd < (int)max_fd; fd++) (void)close(fd);
+        }
+#endif
+
         execvp(argv[0], argv);
         perror("execvp");
         _exit(127);
