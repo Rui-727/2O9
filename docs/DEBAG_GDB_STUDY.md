@@ -33,6 +33,18 @@ on `main`:
    reimplementation from the description below; gdb is GPL-3.0, 2O9 is
    GPL-2.0-only, so no code was copied.
 
+3. **Don't delete `dso` temp bp on unrelated stops** (recommendation
+   #3, ~10 LOC). Commit `<pending>`. `cmd_dso`'s temp-breakpoint
+   cleanup now only fires when the child has exited or been killed; if
+   the step-over was interrupted by a different breakpoint, a signal
+   with `sig_stop` set, or any other stop not at `next_pc`, the temp bp
+   is left installed and the user is informed (`step-over interrupted
+   at 0x...; temp bp at 0x... remains`). A subsequent `dc` will hit the
+   temp bp, at which point `handle_sigtrap` auto-removes it as usual.
+   Mirrors gdb's step-resume breakpoint (`gdb/breakpoint.h:119`
+   `bp_step_resume`, used at `gdb/infrun.c:8013-8048`), which stays
+   installed across signal stops and is hit when the handler returns.
+
 ## What 2O9's --dynamic-db has today
 
 `src/debag/dynamic_db.c` is a 1460-line single-file live debugger REPL.

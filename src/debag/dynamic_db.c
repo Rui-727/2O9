@@ -960,21 +960,40 @@ static int cmd_dso(dyn_session_t *s, char *args)
         return -1;
     }
     /* If the stop was at our temp bp, handle_sigtrap auto-removes it
-     * (because temporary=1). If it was something else (real bp, signal,
-     * exit), we still want to clean up the temp bp — but only if it's
-     * still in memory and we didn't stop there. */
+     * (because temporary=1 clears bp->used on hit). If the child
+     * exited or was killed, clean up the slot since the temp bp has
+     * no further purpose. Otherwise the child stopped somewhere other
+     * than next_pc (a different breakpoint, a signal with sig_stop
+     * set, etc.) — LEAVE the temp bp installed so a later `dc` will
+     * hit it when the interrupting source is resolved. This mirrors
+     * gdb's step-resume breakpoint (gdb/breakpoint.h:119,
+     * bp_step_resume), which stays installed across signal stops and
+     * is hit when the handler returns (gdb/infrun.c:8013-8048). */
     int orig_alive = s->alive;
     handle_stop(s, status);
 
-    /* If the child stopped somewhere other than next_pc, our temp bp
-     * might still be in place. Remove it. */
     dyn_bp_t *tbp = bp_find(s, next_pc);
     if (tbp && tbp->used && tbp->temporary) {
-        if (tbp->inserted) {
-            mem_write_byte(s, tbp->addr, tbp->shadow);
-            tbp->inserted = 0;
+        if (!s->alive) {
+            /* Child is gone; just clear the slot. The mem_write_byte
+             * may fail on a dead child — that's fine, the slot is
+             * purely bookkeeping at this point. */
+            if (tbp->inserted) {
+                mem_write_byte(s, tbp->addr, tbp->shadow);
+                tbp->inserted = 0;
+            }
+            tbp->used = 0;
+        } else {
+            /* Step-over was interrupted at a different rip. Leave the
+             * temp bp installed; it'll be auto-removed by
+             * handle_sigtrap when next_pc is eventually hit (via `dc`
+             * or another `dso`), or the user can clear it with `db-`. */
+            refresh_regs(s);
+            printf("step-over interrupted at 0x%016llx; "
+                   "temp bp at 0x%016lx remains\n",
+                   (unsigned long long)s->regs.rip,
+                   (unsigned long)next_pc);
         }
-        tbp->used = 0;
     }
     if (orig_alive) refresh_regs(s);
     return 0;
