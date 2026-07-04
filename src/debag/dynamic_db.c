@@ -80,14 +80,40 @@
 
 /* ── Breakpoint table ────────────────────────────────────────────── */
 
+/* Comparison operators for breakpoint conditions. The condition
+ * evaluator only supports `reg OP value' (gdb's full expression
+ * evaluator is ~10000 lines, way out of scope; the study explicitly
+ * says "Conditions should accept reg OP value only"). */
+enum {
+    BP_OP_NONE = 0,
+    BP_OP_EQ,        /* == */
+    BP_OP_NE,        /* != */
+    BP_OP_LT,        /* <  (unsigned) */
+    BP_OP_LE,        /* <= (unsigned) */
+    BP_OP_GT,        /* >  (unsigned) */
+    BP_OP_GE,        /* >= (unsigned) */
+};
+
 typedef struct {
-    int        used;          /* slot is occupied */
-    int        enabled;       /* user toggle */
-    int        inserted;      /* 0xCC currently in target memory */
-    int        temporary;     /* auto-remove on hit (for step-over) */
-    uintptr_t  addr;          /* runtime address of the breakpoint */
-    uint8_t    shadow;        /* original byte saved before 0xCC write */
-    char       spec[128];     /* original user input for `db` (no args) */
+    int       has_cond;   /* 1 if a condition is attached */
+    char      reg[8];     /* register name, lowercase (rax, rdi, rip, ...) */
+    int       op;         /* one of BP_OP_* */
+    uint64_t  val;        /* value to compare the register against */
+} dyn_bp_cond_t;
+
+typedef struct {
+    int            used;          /* slot is occupied */
+    int            enabled;       /* user toggle */
+    int            inserted;      /* 0xCC currently in target memory */
+    int            temporary;     /* auto-remove on hit (for step-over) */
+    uintptr_t      addr;          /* runtime address of the breakpoint */
+    uint8_t        shadow;        /* original byte saved before 0xCC write */
+    char           spec[128];     /* original user input for `db` (no args) */
+    int            hit_count;     /* incremented each time the bp is hit */
+    int            ignore_count;  /* if > 0, decrement on each hit and
+                                   * auto-continue instead of stopping */
+    dyn_bp_cond_t  cond;          /* optional stop condition: only stop
+                                   * if `reg OP val' is true */
 } dyn_bp_t;
 
 /* ── Hardware watchpoints (DR0-DR7) ──────────────────────────────── */
@@ -564,6 +590,9 @@ static int bp_insert(dyn_session_t *s, uintptr_t addr,
     bp->temporary  = temporary;
     bp->addr       = addr;
     bp->shadow     = orig;
+    bp->hit_count  = 0;
+    bp->ignore_count = 0;
+    memset(&bp->cond, 0, sizeof(bp->cond));
     if (spec) {
         strncpy(bp->spec, spec, sizeof(bp->spec) - 1);
         bp->spec[sizeof(bp->spec) - 1] = '\0';
@@ -600,6 +629,20 @@ static int bp_remove(dyn_session_t *s, uintptr_t addr)
     return 0;
 }
 
+/* String form of a BP_OP_* constant, for `db' (list) and `cond' output. */
+static const char *bp_op_name(int op)
+{
+    switch (op) {
+        case BP_OP_EQ: return "==";
+        case BP_OP_NE: return "!=";
+        case BP_OP_LT: return "<";
+        case BP_OP_LE: return "<=";
+        case BP_OP_GT: return ">";
+        case BP_OP_GE: return ">=";
+        default:       return "?";
+    }
+}
+
 static void bp_list(dyn_session_t *s)
 {
     int any = 0;
@@ -607,11 +650,19 @@ static void bp_list(dyn_session_t *s)
         dyn_bp_t *bp = &s->bps[i];
         if (!bp->used) continue;
         any = 1;
-        printf("  %s 0x%016lx  %s%s\n",
+        printf("  [%d] %s 0x%016lx  hit=%d  ignore=%d",
+               i,
                bp->enabled ? "en" : "di",
                (unsigned long)bp->addr,
-               bp->spec[0] ? bp->spec : "",
-               bp->temporary ? "  (temp)" : "");
+               bp->hit_count,
+               bp->ignore_count);
+        if (bp->temporary) printf("  (temp)");
+        if (bp->cond.has_cond)
+            printf("  cond: %s %s 0x%llx",
+                   bp->cond.reg, bp_op_name(bp->cond.op),
+                   (unsigned long long)bp->cond.val);
+        if (bp->spec[0]) printf("  \"%s\"", bp->spec);
+        printf("\n");
     }
     if (!any) printf("  (no breakpoints)\n");
 }
@@ -964,6 +1015,65 @@ static int resume_step_over_bp(dyn_session_t *s)
     return 0;
 }
 
+/* Evaluate a breakpoint's condition against the current register
+ * snapshot. Returns 1 if the condition is true (or absent / can't be
+ * evaluated — fail-safe to "stop"), 0 if false. s->regs must be valid.
+ * Comparisons are unsigned 64-bit (pointers, counts, flags). */
+static int bp_cond_true(dyn_session_t *s, dyn_bp_t *bp)
+{
+    if (!bp->cond.has_cond) return 1;
+    uint64_t *regp = reg_lookup(&s->regs, bp->cond.reg);
+    if (!regp) {
+        /* Unknown register (shouldn't happen — set_cond validates).
+         * Fail safe: stop, so the user notices. */
+        return 1;
+    }
+    uint64_t rv = *regp;
+    switch (bp->cond.op) {
+        case BP_OP_EQ: return rv == bp->cond.val;
+        case BP_OP_NE: return rv != bp->cond.val;
+        case BP_OP_LT: return rv <  bp->cond.val;
+        case BP_OP_LE: return rv <= bp->cond.val;
+        case BP_OP_GT: return rv >  bp->cond.val;
+        case BP_OP_GE: return rv >= bp->cond.val;
+        default:       return 1;
+    }
+}
+
+/* Auto-continue the child after a non-stopping breakpoint hit (ignore
+ * count > 0, or condition false). Single-steps over the pending bp
+ * byte, resumes with PTRACE_CONT, waits for the next stop, and feeds
+ * it back through handle_stop. Returns whatever handle_stop returns
+ * (0 if the child is stopped at a real REPL-worthy stop, -1 if it
+ * exited). The caller (handle_sigtrap) returns this directly so the
+ * REPL either sees a fresh stop or sees the child has exited. */
+static int bp_auto_continue(dyn_session_t *s)
+{
+    s->last_sig = 0;
+    /* If we're on a hardware execute wp, set RF so the wp doesn't
+     * re-fire on the resume. (For dc/ds/dso this is done by the
+     * command handler; for auto-continue we have to do it here.) */
+    if (wp_set_rf_for_exec_resume(s) < 0) {
+        if (!s->alive) return 0;
+        return -1;
+    }
+    /* Step past the bp byte we just landed on, re-inserting the 0xCC. */
+    if (resume_step_over_bp(s) < 0) {
+        if (!s->alive) return 0;
+        return -1;
+    }
+    if (ptrace(PTRACE_CONT, s->pid, NULL, NULL) < 0) {
+        perror("ptrace CONT (auto-continue)");
+        return -1;
+    }
+    int status;
+    if (waitpid(s->pid, &status, 0) < 0) {
+        perror("waitpid");
+        return -1;
+    }
+    return handle_stop(s, status);
+}
+
 /* Decode a SIGTRAP stop. On x86-64, when the kernel reports SIGTRAP
  * for an INT3, rip points to the byte AFTER the 0xCC. We rewind rip
  * by 1, then look up the breakpoint. If found, restore the shadow
@@ -1031,11 +1141,39 @@ static int handle_sigtrap(dyn_session_t *s)
             bp->used = 0;
             s->pending_bp = 0;  /* it's already restored; no re-insert */
         } else {
+            bp->hit_count++;
+            /* Evaluate the condition (if any) first. A false condition
+             * auto-continues silently (gdb-style). A true condition
+             * (or no condition) falls through to the ignore_count check,
+             * which mirrors gdb: ignore_count is only decremented on
+             * condition-true hits. */
+            int cond_true = bp_cond_true(s, bp);
+            if (!cond_true) {
+                /* Silent auto-continue: bp is hit but condition is false,
+                 * so don't stop, don't print. Just step past the INT3
+                 * and resume. */
+                return bp_auto_continue(s);
+            }
+            if (bp->ignore_count > 0) {
+                bp->ignore_count--;
+                printf("breakpoint 0x%016llx hit (ignore count: "
+                       "%d remaining)\n",
+                       (unsigned long long)s->regs.rip,
+                       bp->ignore_count);
+                return bp_auto_continue(s);
+            }
+            /* Condition true and ignore_count exhausted: stop and
+             * report to the REPL. */
             printf("hit breakpoint at 0x%016llx",
                    (unsigned long long)s->regs.rip);
             uint64_t off;
             const char *name = sym_for_addr(s, (uintptr_t)s->regs.rip, &off);
             print_sym_name(s, name, off, /*always_off=*/0);
+            if (bp->cond.has_cond) {
+                printf("  [cond: %s %s 0x%llx]",
+                       bp->cond.reg, bp_op_name(bp->cond.op),
+                       (unsigned long long)bp->cond.val);
+            }
             printf("\n");
         }
     } else {
@@ -1255,10 +1393,56 @@ static int cmd_db(dyn_session_t *s, char *args)
     if (!tok) { bp_list(s); return 0; }
 
     uintptr_t addr;
-    if (parse_addr_or_reg(s, tok, &addr)) {
+    if (!parse_addr_or_reg(s, tok, &addr)) {
+        fprintf(stderr, "cannot resolve '%s' as address or symbol\n", tok);
+        return -1;
+    }
+
+    /* Sub-commands that mutate an existing breakpoint:
+     *   db <addr> ignore <N>  - set ignore count (auto-continue N hits)
+     *   db <addr> reset       - reset hit_count to 0
+     *   db <addr> hit         - print current hit count
+     * If no sub-command, fall through to bp_insert (set a new bp). */
+    char *sub = strtok(NULL, " \t");
+    if (!sub) {
         return bp_insert(s, addr, 0, tok);
     }
-    fprintf(stderr, "cannot resolve '%s' as address or symbol\n", tok);
+    dyn_bp_t *bp = bp_find(s, addr);
+    if (!bp) {
+        fprintf(stderr, "no breakpoint at 0x%lx (set one with 'db 0x%lx' first)\n",
+                (unsigned long)addr, (unsigned long)addr);
+        return -1;
+    }
+    if (strcasecmp(sub, "ignore") == 0) {
+        char *ntok = strtok(NULL, " \t");
+        if (!ntok) {
+            fprintf(stderr, "usage: db <addr> ignore <N>\n");
+            return -1;
+        }
+        char *end = NULL;
+        long n = strtol(ntok, &end, 0);
+        if (end == ntok || *end != '\0' || n < 0) {
+            fprintf(stderr, "invalid ignore count '%s' (must be >= 0)\n", ntok);
+            return -1;
+        }
+        bp->ignore_count = (int)n;
+        printf("breakpoint 0x%016lx ignore count set to %d\n",
+               (unsigned long)addr, bp->ignore_count);
+        return 0;
+    }
+    if (strcasecmp(sub, "reset") == 0) {
+        bp->hit_count = 0;
+        printf("breakpoint 0x%016lx hit count reset to 0\n",
+               (unsigned long)addr);
+        return 0;
+    }
+    if (strcasecmp(sub, "hit") == 0) {
+        printf("breakpoint 0x%016lx hit count: %d\n",
+               (unsigned long)addr, bp->hit_count);
+        return 0;
+    }
+    fprintf(stderr, "unknown db sub-command '%s' "
+            "(expected: ignore <N> | reset | hit)\n", sub);
     return -1;
 }
 
@@ -1936,6 +2120,112 @@ static int cmd_handle(dyn_session_t *s, char *args)
     return 0;
 }
 
+/* ── Breakpoint conditions ────────────────────────────────────────── */
+
+/* cond <addr>                  clear the condition on bp at <addr>
+ * cond <addr> <reg> <op> <val> attach a condition; only stop when
+ *                              <reg> <op> <val> is true (otherwise
+ *                              auto-continue silently).
+ *
+ * <reg> is one of rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15, rip.
+ * <op>  is one of == != < <= > >=.
+ * <val> is hex (0x...) or decimal; comparisons are unsigned 64-bit.
+ *
+ * This is a tiny register-comparison evaluator only, NOT a full
+ * expression evaluator (gdb's eval.c is ~10000 lines, explicitly out
+ * of scope per the gdb-study doc). */
+static int cmd_cond(dyn_session_t *s, char *args)
+{
+    if (!args || !*args) {
+        fprintf(stderr, "usage: cond <addr> [reg op value]\n");
+        fprintf(stderr, "  reg: rax rbx rcx rdx rsi rdi rbp rsp r8-r15 rip\n");
+        fprintf(stderr, "  op:  == != < <= > >=\n");
+        fprintf(stderr, "  value: hex (0x..) or decimal; comparison unsigned\n");
+        fprintf(stderr, "  cond <addr> with no expr clears the condition\n");
+        return -1;
+    }
+    char *tok = strtok(args, " \t");
+    if (!tok) {
+        fprintf(stderr, "usage: cond <addr> [reg op value]\n");
+        return -1;
+    }
+    uintptr_t addr;
+    if (!parse_addr_or_reg(s, tok, &addr)) {
+        fprintf(stderr, "cannot resolve '%s' as address or symbol\n", tok);
+        return -1;
+    }
+    dyn_bp_t *bp = bp_find(s, addr);
+    if (!bp) {
+        fprintf(stderr, "no breakpoint at 0x%lx (set one with 'db' first)\n",
+                (unsigned long)addr);
+        return -1;
+    }
+
+    /* No further tokens: clear the condition. */
+    char *reg = strtok(NULL, " \t");
+    if (!reg) {
+        if (!bp->cond.has_cond) {
+            printf("breakpoint 0x%016lx has no condition to clear\n",
+                   (unsigned long)addr);
+            return 0;
+        }
+        bp->cond.has_cond = 0;
+        printf("condition cleared on breakpoint 0x%016lx\n",
+               (unsigned long)addr);
+        return 0;
+    }
+
+    char *op = strtok(NULL, " \t");
+    char *valstr = strtok(NULL, " \t");
+    if (!op || !valstr) {
+        fprintf(stderr, "usage: cond <addr> <reg> <op> <value>\n");
+        return -1;
+    }
+
+    /* Validate register (must be in our reg_table). */
+    if (!reg_lookup(&s->regs, reg)) {
+        fprintf(stderr, "unknown register '%s' (expected rax rbx rcx rdx "
+                "rsi rdi rbp rsp r8-r15 rip)\n", reg);
+        return -1;
+    }
+
+    int op_code;
+    if      (strcmp(op, "==") == 0) op_code = BP_OP_EQ;
+    else if (strcmp(op, "!=") == 0) op_code = BP_OP_NE;
+    else if (strcmp(op, "<")  == 0) op_code = BP_OP_LT;
+    else if (strcmp(op, "<=") == 0) op_code = BP_OP_LE;
+    else if (strcmp(op, ">")  == 0) op_code = BP_OP_GT;
+    else if (strcmp(op, ">=") == 0) op_code = BP_OP_GE;
+    else {
+        fprintf(stderr, "unknown operator '%s' (expected == != < <= > >=)\n", op);
+        return -1;
+    }
+
+    /* Parse value: hex with 0x prefix, decimal otherwise. */
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v;
+    if (valstr[0] == '0' && (valstr[1] == 'x' || valstr[1] == 'X'))
+        v = strtoull(valstr + 2, &end, 16);
+    else
+        v = strtoull(valstr, &end, 10);
+    if (end == valstr || *end != '\0') {
+        fprintf(stderr, "cannot parse value '%s' (use 0x.. for hex or a "
+                "decimal integer)\n", valstr);
+        return -1;
+    }
+
+    bp->cond.has_cond = 1;
+    strncpy(bp->cond.reg, reg, sizeof(bp->cond.reg) - 1);
+    bp->cond.reg[sizeof(bp->cond.reg) - 1] = '\0';
+    bp->cond.op  = op_code;
+    bp->cond.val = (uint64_t)v;
+    printf("condition set on breakpoint 0x%016lx: %s %s 0x%llx\n",
+           (unsigned long)addr, bp->cond.reg, bp_op_name(op_code),
+           (unsigned long long)v);
+    return 0;
+}
+
 /* ── Hardware watchpoint commands ─────────────────────────────────── */
 
 /* Parse the common "<addr|sym> [<len>]" prefix used by watch/watchw/
@@ -2139,8 +2429,15 @@ static int cmd_help(dyn_session_t *s, char *args)
     printf("Commands:\n");
     printf("  db <addr>       set breakpoint at address\n");
     printf("  db <sym>        set breakpoint at symbol name\n");
-    printf("  db              list all breakpoints\n");
+    printf("  db              list all breakpoints (with hit/ignore counts)\n");
+    printf("  db <addr> ignore <N>  auto-continue the next N hits at <addr>\n");
+    printf("  db <addr> reset        reset hit count to 0 at <addr>\n");
+    printf("  db <addr> hit          print hit count at <addr>\n");
     printf("  db- <addr>      remove breakpoint\n");
+    printf("  cond <addr> <reg> <op> <val>  only stop at <addr> when reg OP val\n");
+    printf("  cond <addr>     clear the condition on breakpoint at <addr>\n");
+    printf("                  reg: rax rbx rcx rdx rsi rdi rbp rsp r8-r15 rip\n");
+    printf("                  op:  == != < <= > >=    val: hex (0x..) or dec\n");
     printf("  dc              continue execution\n");
     printf("  ds              single step (one instruction)\n");
     printf("  dso             step over (past a call instruction)\n");
@@ -2217,6 +2514,7 @@ static int dispatch(dyn_session_t *s, char *line)
     else if (strcmp(cmd, "sym") == 0) return cmd_sym(s, args);
     else if (strcmp(cmd, "info")== 0) return cmd_info(s, args);
     else if (strcmp(cmd, "handle")== 0) return cmd_handle(s, args);
+    else if (strcmp(cmd, "cond")== 0) return cmd_cond(s, args);
     else if (strcmp(cmd, "help")== 0) return cmd_help(s, args);
     else if (strcmp(cmd, "?")   == 0) return cmd_help(s, args);
     else if (strcmp(cmd, "q")   == 0) return 1;  /* signal: quit */
