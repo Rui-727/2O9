@@ -218,8 +218,18 @@ Each maps to the equivalent 2O9 command.
   | `bt` | Backtrace (rbp chain, max 64 frames) |
   | `sym <addr>` | Find nearest symbol at or before address |
   | `info` | Print process status (pid, state, rip, bp count) |
+  | `handle` | List signal dispositions (stop/print/pass per signal) |
+  | `handle <sig> <stop\|nostop> <print\|noprint> <pass\|nopass>` | Set signal disposition (e.g. `handle SIGINT nostop noprint pass` to let SIGINT through without breaking) |
   | `help` \| `?` | List commands |
   | `q` \| `quit` \| `exit` | Kill child and quit |
+
+  Signal handling: by default, fatal signals (SIGSEGV, SIGBUS, SIGFPE,
+  SIGILL, SIGTRAP, SIGINT) stop and print, and are forwarded to the
+  child on the next `dc`. Benign signals that programs typically handle
+  internally (SIGALRM, SIGCHLD, SIGUSR1, SIGUSR2, SIGIO, SIGURG,
+  SIGWINCH, SIGPIPE, SIGVTALRM, SIGPROF) pass through without stopping
+  so timers, child reaping, and window-resize handling are not
+  disrupted. Use `handle` to change any signal's disposition.
 
   Known limitations: frameless functions (compiled with
   `-fomit-frame-pointer`) break the rbp-chain backtrace walk; the walk

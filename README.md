@@ -330,9 +330,15 @@ stops it at the entry point, and drops you at a `(209-db)` prompt
 modelled on gdb. Software breakpoints via the INT3 (0xCC) trick
 (`db <addr|sym>`), continue (`dc`), single-step (`ds`), step over a
 call (`dso`), inspect registers (`dr`), hex-dump memory (`px`), print
-strings (`ps`), walk the rbp chain for a backtrace (`bt`), and resolve
-nearest symbol (`sym <addr>`). Empty line repeats the last command;
-`q` kills the child and quits. x86-64 only; single-threaded.
+strings (`ps`), walk the rbp chain for a backtrace (`bt`), resolve
+nearest symbol (`sym <addr>`), and manage signal dispositions
+(`handle`). Signals that last stopped the child are forwarded on `dc`
+gated by a per-signal `stop`/`print`/`pass` table — SIGSEGV/SIGBUS/
+SIGFPE/SIGILL/SIGTRAP/SIGINT stop+print+pass by default, while
+SIGALRM/SIGCHLD/SIGUSR1/SIGUSR2/SIGIO/SIGURG/SIGWINCH/SIGPIPE pass
+through without breaking so timers and child reaping keep working.
+Empty line repeats the last command; `q` kills the child and quits.
+x86-64 only; single-threaded.
 
 Restriction flags (both Trakker and Debag):
 

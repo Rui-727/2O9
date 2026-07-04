@@ -96,6 +96,16 @@ typedef struct {
     char                 last_cmd[LINE_MAX_LEN];
     struct user_regs_struct regs;         /* last-fetched register snapshot */
     int                  regs_valid;
+    /* Signal disposition tables, indexed by signal number (1..NSIG-1).
+     * Mirrors gdb's signal_stop/signal_print/signal_program model
+     * (gdb/infrun.c:332-334). Clean-room reimplementation; gdb is
+     * GPL-3.0, 2O9 is GPL-2.0-only.
+     *   sig_stop[sig]    = should debag stop and return to the REPL?
+     *   sig_print[sig]   = should debag print a one-line notification?
+     *   sig_program[sig] = should debag forward the signal to the child? */
+    unsigned char        sig_stop[NSIG];
+    unsigned char        sig_print[NSIG];
+    unsigned char        sig_program[NSIG];
 } dyn_session_t;
 
 /* ── Forward declarations ────────────────────────────────────────── */
@@ -109,6 +119,75 @@ static int  resume_step_over_bp(dyn_session_t *s);
 static ssize_t mem_read(dyn_session_t *s, uintptr_t addr,
                         void *buf, size_t len);
 static int     mem_write_byte(dyn_session_t *s, uintptr_t addr, uint8_t b);
+
+/* ── Signal disposition helpers ──────────────────────────────────── */
+
+/* Populate sig_stop/sig_print/sig_program with gdb's default
+ * dispositions. Most signals stop+print+pass; a small set of benign
+ * signals that programs typically handle internally (SIGALRM, SIGCHLD,
+ * SIGUSR1/2, SIGIO, SIGURG, SIGWINCH, SIGPIPE) pass through without
+ * stopping, so that debag doesn't break timers, child reaping, or
+ * window-resize handling by default. */
+static void sig_init_defaults(dyn_session_t *s)
+{
+    for (int i = 0; i < NSIG; i++) {
+        s->sig_stop[i]    = 1;
+        s->sig_print[i]   = 1;
+        s->sig_program[i] = 1;
+    }
+    /* Pass-through (nostop, noprint, pass) for benign signals. */
+    static const int pass_through[] = {
+        SIGALRM, SIGCHLD, SIGUSR1, SIGUSR2, SIGIO, SIGURG, SIGWINCH, SIGPIPE,
+        SIGVTALRM, SIGPROF, 0
+    };
+    for (const int *p = pass_through; *p; p++) {
+        if (*p > 0 && *p < NSIG) {
+            s->sig_stop[*p]    = 0;
+            s->sig_print[*p]   = 0;
+            /* sig_program stays 1 (pass). */
+        }
+    }
+}
+
+/* Return "SIGSEGV", "SIGINT", "SIGALRM", ... for a signal number.
+ * Uses a static buffer (REPL is single-threaded). Returns "?" for
+ * unknown signals. */
+static const char *sig_full_name(int sig)
+{
+    static char buf[32];
+    if (sig < 1 || sig >= NSIG) return "?";
+    const char *abbr = sigabbrev_np(sig);
+    if (!abbr) return "?";
+    snprintf(buf, sizeof(buf), "SIG%s", abbr);
+    return buf;
+}
+
+/* Parse a signal name. Accepts "SIGSEGV", "SEGV", or a decimal number
+ * like "11". Returns the signal number, or -1 on failure. */
+static int sig_from_name(const char *name)
+{
+    if (!name || !*name) return -1;
+
+    /* Numeric form. */
+    if (isdigit((unsigned char)name[0])) {
+        char *end = NULL;
+        long v = strtol(name, &end, 10);
+        if (*end == '\0' && v > 0 && v < NSIG) return (int)v;
+        return -1;
+    }
+
+    /* Strip an optional "SIG" prefix (case-insensitive). */
+    const char *n = name;
+    if (strncasecmp(n, "SIG", 3) == 0) n += 3;
+
+    /* Match against sigabbrev_np for every valid signal number. */
+    for (int sig = 1; sig < NSIG; sig++) {
+        const char *abbr = sigabbrev_np(sig);
+        if (abbr && strcasecmp(abbr, n) == 0)
+            return sig;
+    }
+    return -1;
+}
 
 /* ── Symbol lookup ───────────────────────────────────────────────── */
 
@@ -510,42 +589,78 @@ static int handle_sigtrap(dyn_session_t *s)
 }
 
 /* Top-level stop handler. Returns 0 if the child is still alive and
- * stopped (REPL can continue), -1 if it exited or was killed. */
+ * stopped (REPL can continue), -1 if it exited or was killed.
+ *
+ * For non-SIGTRAP signals, consults the sig_stop/sig_print/sig_program
+ * tables. If sig_stop[sig] is false, the signal is auto-continued
+ * (forwarded iff sig_program[sig]) without returning to the REPL —
+ * this lets timers, SIGCHLD, etc. run without bothering the user. */
 static int handle_stop(dyn_session_t *s, int status)
 {
-    if (WIFEXITED(status)) {
-        s->alive = 0;
-        s->exited_code = WEXITSTATUS(status);
-        printf("[child exited with code %d]\n", s->exited_code);
-        return -1;
-    }
-    if (WIFSIGNALED(status)) {
-        s->alive = 0;
-        s->signaled_sig = WTERMSIG(status);
-        printf("[child killed by signal %d (%s)]\n",
-               s->signaled_sig, strsignal(s->signaled_sig));
-        return -1;
-    }
-    if (!WIFSTOPPED(status)) {
-        fprintf(stderr, "[unexpected waitpid status 0x%x]\n", status);
-        return -1;
-    }
+    while (1) {
+        if (WIFEXITED(status)) {
+            s->alive = 0;
+            s->exited_code = WEXITSTATUS(status);
+            printf("[child exited with code %d]\n", s->exited_code);
+            return -1;
+        }
+        if (WIFSIGNALED(status)) {
+            s->alive = 0;
+            s->signaled_sig = WTERMSIG(status);
+            printf("[child killed by signal %d (%s)]\n",
+                   s->signaled_sig, strsignal(s->signaled_sig));
+            return -1;
+        }
+        if (!WIFSTOPPED(status)) {
+            fprintf(stderr, "[unexpected waitpid status 0x%x]\n", status);
+            return -1;
+        }
 
-    int sig = WSTOPSIG(status);
-    s->last_sig = sig;
+        int sig = WSTOPSIG(status);
+        s->last_sig = sig;
 
-    if (sig == SIGTRAP) {
-        return handle_sigtrap(s);
+        /* SIGTRAP is always a debugger event (breakpoint or single-step).
+         * Always stop here and let handle_sigtrap decide. */
+        if (sig == SIGTRAP) {
+            return handle_sigtrap(s);
+        }
+
+        /* Out-of-range signal: be conservative, stop and let the user
+         * inspect. */
+        if (sig < 1 || sig >= NSIG) {
+            refresh_regs(s);
+            printf("[child stopped by signal %d at 0x%016llx]\n",
+                   sig, (unsigned long long)s->regs.rip);
+            return 0;
+        }
+
+        /* Print a gdb-style notification? */
+        if (s->sig_print[sig]) {
+            printf("Program received signal %s, %s.\n",
+                   sig_full_name(sig), strsignal(sig));
+        }
+
+        /* Stop and return to the REPL? */
+        if (s->sig_stop[sig]) {
+            refresh_regs(s);
+            printf("[stopped at 0x%016llx]\n",
+                   (unsigned long long)s->regs.rip);
+            return 0;
+        }
+
+        /* Auto-continue: forward the signal iff sig_program says so. */
+        int deliver = s->sig_program[sig] ? sig : 0;
+        if (ptrace(PTRACE_CONT, s->pid, NULL,
+                   (void *)(intptr_t)deliver) < 0) {
+            perror("ptrace CONT (auto-continue)");
+            return -1;
+        }
+        if (waitpid(s->pid, &status, 0) < 0) {
+            perror("waitpid");
+            return -1;
+        }
+        /* Loop back to interpret the next stop. */
     }
-
-    /* Other signals (SIGSEGV, SIGINT, ...): report and leave the child
-     * stopped. The user can `dc` to forward the signal, or just inspect
-     * state. */
-    refresh_regs(s);
-    printf("[child stopped by signal %d (%s) at 0x%016llx]\n",
-           sig, strsignal(sig),
-           (unsigned long long)s->regs.rip);
-    return 0;
 }
 
 /* ── Mini x86-64 instruction decoder for `dso` ───────────────────── */
@@ -710,17 +825,21 @@ static int cmd_dc(dyn_session_t *s, char *args)
         if (!s->alive) return 0;
         return -1;
     }
-    /* Forward the signal that last stopped the child to it on continue.
-     * Without this, any program using SIGALRM/SIGCHLD/SIGUSR1/SIGUSR2/
-     * SIGIO for legitimate purposes is silently broken, and a SIGSEGV
-     * becomes an infinite re-fault loop (the kernel re-executes the
-     * faulting instruction, faults again, we swallow, repeat).
+    /* Forward the signal that last stopped the child to it on continue,
+     * gated by the sig_program disposition table. Without this, any
+     * program using SIGALRM/SIGCHLD/SIGUSR1/SIGUSR2/SIGIO for legitimate
+     * purposes is silently broken, and a SIGSEGV becomes an infinite
+     * re-fault loop (the kernel re-executes the faulting instruction,
+     * faults again, we swallow, repeat).
      *
      * s->last_sig is 0 after a breakpoint hit (handle_sigtrap clears
      * it) and after the initial execve stop (session_init never sets
-     * it), so those cases correctly forward nothing. Real signals
-     * (SIGSEGV, SIGALRM, ...) are forwarded. */
-    if (ptrace(PTRACE_CONT, s->pid, NULL, (void *)(intptr_t)s->last_sig) < 0) {
+     * it), so those cases correctly forward nothing. Real signals are
+     * forwarded iff the user hasn't set `handle <sig> nopass`. */
+    int deliver = 0;
+    if (s->last_sig > 0 && s->last_sig < NSIG && s->sig_program[s->last_sig])
+        deliver = s->last_sig;
+    if (ptrace(PTRACE_CONT, s->pid, NULL, (void *)(intptr_t)deliver) < 0) {
         perror("ptrace CONT");
         return -1;
     }
@@ -826,7 +945,12 @@ static int cmd_dso(dyn_session_t *s, char *args)
         return 0;
     }
 
-    if (ptrace(PTRACE_CONT, s->pid, NULL, NULL) < 0) {
+    /* Forward any pending signal (gated by sig_program) so that `dso`
+     * after a signal stop still delivers the signal to the child. */
+    int dso_deliver = 0;
+    if (s->last_sig > 0 && s->last_sig < NSIG && s->sig_program[s->last_sig])
+        dso_deliver = s->last_sig;
+    if (ptrace(PTRACE_CONT, s->pid, NULL, (void *)(intptr_t)dso_deliver) < 0) {
         perror("ptrace CONT");
         return -1;
     }
@@ -1165,6 +1289,68 @@ static int cmd_info(dyn_session_t *s, char *args)
     return 0;
 }
 
+/* Print one row of the signal disposition table. */
+static void sig_print_row(dyn_session_t *s, int sig)
+{
+    const char *a = sigabbrev_np(sig);
+    if (!a) a = "?";
+    printf("SIG%-10s %-5s %-5s %-5s %s\n",
+           a,
+           s->sig_stop[sig]    ? "Yes" : "No",
+           s->sig_print[sig]   ? "Yes" : "No",
+           s->sig_program[sig] ? "Yes" : "No",
+           strsignal(sig));
+}
+
+static int cmd_handle(dyn_session_t *s, char *args)
+{
+    /* `handle` with no args: print the full disposition table for the
+     * standard signals (1..31). Realtime signals (32+) are omitted for
+     * brevity; the user can still `handle 32 ...` to set them. */
+    if (!args || !*args) {
+        printf("Signal        Stop  Print Pass  Description\n");
+        for (int sig = 1; sig <= 31 && sig < NSIG; sig++) {
+            if (!sigabbrev_np(sig)) continue;
+            sig_print_row(s, sig);
+        }
+        return 0;
+    }
+
+    /* `handle <signal> <keywords...>`: set the disposition. */
+    char *tok = strtok(args, " \t");
+    if (!tok) return -1;
+    int sig = sig_from_name(tok);
+    if (sig < 0) {
+        fprintf(stderr, "unknown signal '%s' (try a name like SIGSEGV "
+                "or a number 1..%d)\n", tok, NSIG - 1);
+        return -1;
+    }
+
+    int set_stop = -1, set_print = -1, set_pass = -1;
+    char *kw;
+    while ((kw = strtok(NULL, " \t")) != NULL) {
+        if      (strcasecmp(kw, "stop")    == 0) set_stop  = 1;
+        else if (strcasecmp(kw, "nostop")  == 0) set_stop  = 0;
+        else if (strcasecmp(kw, "print")   == 0) set_print = 1;
+        else if (strcasecmp(kw, "noprint") == 0) set_print = 0;
+        else if (strcasecmp(kw, "pass")    == 0) set_pass  = 1;
+        else if (strcasecmp(kw, "nopass")  == 0) set_pass  = 0;
+        else {
+            fprintf(stderr, "unknown keyword '%s' (expected "
+                    "stop/nostop/print/noprint/pass/nopass)\n", kw);
+            return -1;
+        }
+    }
+    if (set_stop  >= 0) s->sig_stop[sig]    = (unsigned char)set_stop;
+    if (set_print >= 0) s->sig_print[sig]   = (unsigned char)set_print;
+    if (set_pass  >= 0) s->sig_program[sig] = (unsigned char)set_pass;
+
+    /* Echo the updated row. */
+    printf("Signal        Stop  Print Pass  Description\n");
+    sig_print_row(s, sig);
+    return 0;
+}
+
 static int cmd_help(dyn_session_t *s, char *args)
 {
     (void)s; (void)args;
@@ -1185,6 +1371,9 @@ static int cmd_help(dyn_session_t *s, char *args)
            MAX_FRAMES);
     printf("  sym <addr>      find nearest symbol at or before address\n");
     printf("  info            process status\n");
+    printf("  handle          list signal dispositions (stop/print/pass)\n");
+    printf("  handle <sig> <stop|nostop> <print|noprint> <pass|nopass>\n");
+    printf("                  set signal disposition (e.g. handle SIGINT nostop noprint pass)\n");
     printf("  help | ?        this help\n");
     printf("  q | quit | exit kill child and quit\n");
     printf("\nNumbers are hex by default (gdb convention).\n");
@@ -1224,6 +1413,7 @@ static int dispatch(dyn_session_t *s, char *line)
     else if (strcmp(cmd, "bt")  == 0) return cmd_bt(s, args);
     else if (strcmp(cmd, "sym") == 0) return cmd_sym(s, args);
     else if (strcmp(cmd, "info")== 0) return cmd_info(s, args);
+    else if (strcmp(cmd, "handle")== 0) return cmd_handle(s, args);
     else if (strcmp(cmd, "help")== 0) return cmd_help(s, args);
     else if (strcmp(cmd, "?")   == 0) return cmd_help(s, args);
     else if (strcmp(cmd, "q")   == 0) return 1;  /* signal: quit */
@@ -1287,6 +1477,7 @@ static int session_init(dyn_session_t *s, int argc, char **argv)
     memset(s, 0, sizeof(*s));
     s->mem_fd = -1;
     s->alive  = 1;
+    sig_init_defaults(s);
 
     /* Run static analysis on the binary (for symbol resolution). */
     s->analysis = debag_analyze(argv[0]);

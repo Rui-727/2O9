@@ -5,6 +5,34 @@ gdb (binutils-gdb `gdb/` tree, commit `1dcfefd` as cloned). All line
 numbers below are to that snapshot unless prefixed `2O9:` (which refers
 to `src/debag/dynamic_db.c` in this repo).
 
+## Ported
+
+Items from the "Recommended port priority" list below that have landed
+on `main`:
+
+1. **Forward signals on `dc`** (recommendation #1, the one-line fix).
+   Commit `d61e232`. `cmd_dc` now passes `(void *)(intptr_t)s->last_sig`
+   to `PTRACE_CONT` instead of `NULL`, so the signal that last stopped
+   the child is forwarded to it. `handle_sigtrap` clears `last_sig` to
+   0 after consuming a breakpoint or single-step trap so the synthetic
+   SIGTRAP is not forwarded. The initial execve stop leaves `last_sig`
+   at 0 (session_init never calls handle_stop), so the first `dc`
+   forwards nothing.
+
+2. **Signal disposition table + `handle` command** (recommendation #2,
+   ~80 LOC). Commit `THIS_COMMIT`. Three `unsigned char[NSIG]` arrays
+   (`sig_stop`, `sig_print`, `sig_program`) on `dyn_session_t`, with
+   gdb-style defaults: SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGINT
+   stop+print+pass; SIGALRM/SIGCHLD/SIGUSR1/SIGUSR2/SIGIO/SIGURG/
+   SIGWINCH/SIGPIPE/SIGVTALRM/SIGPROF pass through without stopping;
+   everything else stop+print+pass. `handle_stop` consults the tables
+   and auto-continues non-stop signals (forwarding per `sig_program`)
+   without returning to the REPL. `cmd_dc` and `cmd_dso`'s
+   PTRACE_CONT calls gate the forwarded signal on `sig_program`. New
+   `handle` command prints and edits the table. Clean-room
+   reimplementation from the description below; gdb is GPL-3.0, 2O9 is
+   GPL-2.0-only, so no code was copied.
+
 ## What 2O9's --dynamic-db has today
 
 `src/debag/dynamic_db.c` is a 1460-line single-file live debugger REPL.
