@@ -20,7 +20,7 @@ on `main`:
    forwards nothing.
 
 2. **Signal disposition table + `handle` command** (recommendation #2,
-   ~80 LOC). Commit `THIS_COMMIT`. Three `unsigned char[NSIG]` arrays
+   ~80 LOC). Commit `c5f0a38`. Three `unsigned char[NSIG]` arrays
    (`sig_stop`, `sig_print`, `sig_program`) on `dyn_session_t`, with
    gdb-style defaults: SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGINT
    stop+print+pass; SIGALRM/SIGCHLD/SIGUSR1/SIGUSR2/SIGIO/SIGURG/
