@@ -7,17 +7,12 @@
 
 ## DESCRIPTION
 
-**2O9** is a unified package manager for Arch Linux that puts files in
-`/nix/store/`. It combines three things into one tool:
-
-1. **pacman's engine** (libalpm), modified in-tree as part of lib2O9
-2. **paru's AUR workflow**, rewritten in C
-3. **A real `/nix/store`** with content-addressed paths, atomic
-   generations, and a references graph, driven by a declarative
-   Nix-syntax configuration (`2O9.nix`)
-
-Plus **Trakker** (ptrace sandbox) and **Debag** (seccomp + ptrace hybrid
-sandbox).
+2O9 is a package manager for Arch Linux that puts files in
+`/nix/store/`. It merges pacman's libalpm (modified in-tree as
+lib2O9), a C rewrite of paru's AUR workflow, and a real
+content-addressed `/nix/store` with declarative Nix-syntax
+configuration (`2O9.nix`). Two sandboxes are bundled: Trakker
+(ptrace) and Debag (seccomp + ptrace hybrid).
 
 The binary is `209` (numeric). The project name is `2O9` (letter O).
 
@@ -141,7 +136,6 @@ Each maps to the equivalent 2O9 command.
   Examples:
   - `209 trakker ls -la`
   - `209 trakker --no-net -- curl https://example.com`
-  - `209 trakker --no-write --redirect-writes /tmp/trakker -- makepkg -f`
 
 `209 debag` [`--static-scan`] [`--static-db`] [`--no-net`] [`--fast-mode`] [`--`] `<cmd>` `[args...]`
 : Run `<cmd>` inside the Debag hybrid sandbox. Uses seccomp-bpf for
@@ -197,11 +191,11 @@ Each maps to the equivalent 2O9 command.
 
   `$`-tokens (resolved before symbol names so a symbol named `s` or `e`
   can't shadow them):
-  - `$$` — current seek (the REPL's offset). `s $$` is a no-op; `px $$ 16`
+  - `$$`: current seek (the REPL's offset). `s $$` is a no-op; `px $$ 16`
     prints 16 bytes at the current seek.
-  - `$s` — binary size (file bytes, via `fstat`). `s $s` seeks to one
+  - `$s`: binary size (file bytes, via `fstat`). `s $s` seeks to one
     past the last byte.
-  - `$e` — entry point address. `axt $e` finds xrefs to the entry point;
+  - `$e`: entry point address. `axt $e` finds xrefs to the entry point;
     `pd $e` disassembles starting at the entry point (seek is unchanged).
 
   Seek history: every successful `s <addr>` (where `addr` differs from
@@ -220,8 +214,7 @@ Each maps to the equivalent 2O9 command.
   8-byte words at the current seek and annotates each non-zero word
   with `-> <symname>` if the value falls inside a defined symbol's
   `[vaddr, vaddr+size)` range, or `-> <symname>+0xN` for an in-range
-  non-exact match; all-zero words are suppressed. Useful for dumping
-  `.got.plt`, `.data.rel.ro`, and vtables.
+  non-exact match; all-zero words are suppressed.
 
   Disassembly annotations: `pd`/`pdd` annotate each instruction with
   a trailing `; ...` comment. Jump instructions (`jmp`, `je`, `jne`,
@@ -235,8 +228,8 @@ Each maps to the equivalent 2O9 command.
   or `; <symname>` (or `; <symname>+0xN`) for direct calls to a
   known symbol. Direct calls to unknown targets are not annotated.
   Indirect jumps/calls (e.g. `call qword ptr [rip + 0x...]`) are not
-  annotated. The simpler text-arrow form is used in place of rizin's
-  multi-line ASCII art reflines.
+  annotated. The simpler text-arrow form replaces rizin's multi-line
+  ASCII art reflines.
 
   Sparse hex dump: `px`/`pxw`/`pxq` collapse runs of 3 or more
   byte-identical rows (all-zero `.bss`, repeated fill patterns) into
@@ -353,9 +346,8 @@ Each maps to the equivalent 2O9 command.
   read-only memory where INT3 insertion would fail). The watched
   address can be unmapped; the watchpoint only fires when the CPU
   actually accesses it. Hardware watchpoints are per-process and not
-  inherited across fork (debag does not trace forks). This is
-  hardware-assisted: zero runtime overhead, exact instruction
-  pinpointing, the killer feature for memory-corruption debugging.
+  inherited across fork (debag does not trace forks). Hardware-assisted:
+  zero runtime overhead, exact instruction pinpointing.
 
   Signal handling: by default, fatal signals (SIGSEGV, SIGBUS, SIGFPE,
   SIGILL, SIGTRAP, SIGINT) stop and print, and are forwarded to the
@@ -421,8 +413,8 @@ Two config files, different jobs.
 `2O9.nix` is the declarative config. Nix syntax. Says what your system
 should look like. Two scopes:
 
-- **User:** `~/.config/2O9/home.nix`
-- **System:** `/etc/2O9/2O9.nix`
+- User: `~/.config/2O9/home.nix`
+- System: `/etc/2O9/2O9.nix`
 
 Both are evaluated and merged per `DESIGN.md` section 7: global wins on
 conflict, packages concatenate. See [`docs/CONFIG.md`](./CONFIG.md) for
