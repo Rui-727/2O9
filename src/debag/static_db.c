@@ -97,7 +97,7 @@ static const struct {
     {"is",    "list symbols",                          cmd_info_symbols},
     {"ie",    "list entry points",                     cmd_info_entry},
     {"iz",    "list strings in .rodata/.data",         cmd_info_strings},
-    {"ii",    "list imports",                          cmd_info_imports},
+    {"ii",    "list imports (with GOT slot addresses)",  cmd_info_imports},
     {"px",    "hex dump at <addr> <len>",              cmd_print_hex},
     {"pxw",   "hex dump as 32-bit LE words",           cmd_print_hexw},
     {"pxq",   "hex dump as 64-bit LE words",           cmd_print_hexq},
@@ -930,7 +930,7 @@ static void cmd_help(repl_t *r, int argc, char **argv)
     for (size_t i = 0; cmds[i].name; i++)
         printf("  %-4s  %s\n", cmds[i].name, cmds[i].summary);
     printf("\nNumbers: decimal or 0x-hex. Symbols resolve as entry0,\n");
-    printf("section name, or symbol name.\n");
+    printf("section name, symbol name, or import name (-> GOT slot).\n");
 }
 
 static void cmd_quit(repl_t *r, int argc, char **argv)
