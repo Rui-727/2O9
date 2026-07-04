@@ -162,6 +162,178 @@ static int find_syscall_for_sym(const char *sym, int *syscall_out, int *cat_out)
     return 0;
 }
 
+/* ── ELF pretty-printing helpers (shared by static_analysis + REPLs) ────
+ * Declared in debag.h. Implemented here so the static-db REPL can reuse
+ * them without re-rolling its own tables. */
+
+const char *debag_elf_section_type_name(uint32_t sh_type)
+{
+    switch (sh_type) {
+    case SHT_NULL:          return "NULL";
+    case SHT_PROGBITS:      return "PROGBITS";
+    case SHT_SYMTAB:        return "SYMTAB";
+    case SHT_STRTAB:        return "STRTAB";
+    case SHT_RELA:          return "RELA";
+    case SHT_HASH:          return "HASH";
+    case SHT_DYNAMIC:       return "DYNAMIC";
+    case SHT_NOTE:          return "NOTE";
+    case SHT_NOBITS:        return "NOBITS";
+    case SHT_REL:           return "REL";
+    case SHT_DYNSYM:        return "DYNSYM";
+    case SHT_INIT_ARRAY:    return "INIT_ARRAY";
+    case SHT_FINI_ARRAY:    return "FINI_ARRAY";
+#ifdef SHT_GNU_HASH
+    case SHT_GNU_HASH:      return "GNU_HASH";
+#endif
+#ifdef SHT_GNU_verdef
+    case SHT_GNU_verdef:    return "GNU_VERDEF";
+#endif
+#ifdef SHT_GNU_verneed
+    case SHT_GNU_verneed:   return "GNU_VERNEED";
+#endif
+#ifdef SHT_GNU_versym
+    case SHT_GNU_versym:    return "GNU_VERSYM";
+#endif
+    default:                return "OTHER";
+    }
+}
+
+/* Build a one-letter section flag string in the style of readelf.
+ * Caller provides a buffer of at least 10 bytes. */
+void debag_elf_section_flags_str(uint64_t flags, char *buf, size_t bufsz)
+{
+    size_t i = 0;
+    if (i < bufsz - 1 && (flags & SHF_WRITE))          buf[i++] = 'W';
+    if (i < bufsz - 1 && (flags & SHF_ALLOC))          buf[i++] = 'A';
+    if (i < bufsz - 1 && (flags & SHF_EXECINSTR))      buf[i++] = 'X';
+    if (i < bufsz - 1 && (flags & SHF_MERGE))          buf[i++] = 'M';
+    if (i < bufsz - 1 && (flags & SHF_STRINGS))        buf[i++] = 'S';
+    if (i < bufsz - 1 && (flags & SHF_INFO_LINK))      buf[i++] = 'I';
+    if (i < bufsz - 1 && (flags & SHF_LINK_ORDER))     buf[i++] = 'L';
+    if (i < bufsz - 1 && (flags & SHF_GROUP))          buf[i++] = 'G';
+    if (i < bufsz - 1 && (flags & SHF_TLS))            buf[i++] = 'T';
+    buf[i] = '\0';
+}
+
+const char *debag_elf_symbol_type_name(int st_type)
+{
+    switch (st_type) {
+    case STT_NOTYPE:  return "NOTYPE";
+    case STT_OBJECT:  return "OBJECT";
+    case STT_FUNC:    return "FUNC";
+    case STT_SECTION: return "SECTION";
+    case STT_FILE:    return "FILE";
+    case STT_COMMON:  return "COMMON";
+    case STT_TLS:     return "TLS";
+#ifdef STT_GNU_IFUNC
+    case STT_GNU_IFUNC: return "GNU_IFUNC";
+#endif
+    default:          return "?";
+    }
+}
+
+const char *debag_elf_symbol_bind_name(int st_bind)
+{
+    switch (st_bind) {
+    case STB_LOCAL:  return "LOCAL";
+    case STB_GLOBAL: return "GLOBAL";
+    case STB_WEAK:   return "WEAK";
+#ifdef STB_GNU_UNIQUE
+    case STB_GNU_UNIQUE: return "GNU_UNIQUE";
+#endif
+    default:         return "?";
+    }
+}
+
+const char *debag_elf_segment_type_name(uint32_t p_type)
+{
+    switch (p_type) {
+    case PT_NULL:    return "NULL";
+    case PT_LOAD:    return "LOAD";
+    case PT_DYNAMIC: return "DYNAMIC";
+    case PT_INTERP:  return "INTERP";
+    case PT_NOTE:    return "NOTE";
+    case PT_SHLIB:   return "SHLIB";
+    case PT_PHDR:    return "PHDR";
+    case PT_TLS:     return "TLS";
+#ifdef PT_GNU_EH_FRAME
+    case PT_GNU_EH_FRAME:  return "GNU_EH_FRAME";
+#endif
+#ifdef PT_GNU_STACK
+    case PT_GNU_STACK:     return "GNU_STACK";
+#endif
+#ifdef PT_GNU_RELRO
+    case PT_GNU_RELRO:     return "GNU_RELRO";
+#endif
+#ifdef PT_GNU_PROPERTY
+    case PT_GNU_PROPERTY:  return "GNU_PROPERTY";
+#endif
+    default:        return "OTHER";
+    }
+}
+
+/* Resolve e_machine to a short arch name. Used by debag_analyze() to
+ * populate analysis->arch_name, and by the static-db REPL to pick a
+ * Capstone cs_arch. */
+static const char *elf_machine_name(uint16_t e_machine)
+{
+    switch (e_machine) {
+    case EM_X86_64: return "x86-64";
+    case EM_386:    return "x86";
+    case EM_AARCH64: return "aarch64";
+    case EM_ARM:    return "arm";
+    case EM_RISCV:  return "riscv";
+    case EM_PPC64:  return "ppc64";
+    case EM_S390:   return "s390x";
+    default:        return "unknown";
+    }
+}
+
+static const char *elf_type_name(uint16_t e_type)
+{
+    switch (e_type) {
+    case ET_EXEC: return "EXEC";
+    case ET_DYN:  return "DYN";
+    case ET_CORE: return "CORE";
+    case ET_REL:  return "REL";
+    default:      return "?";
+    }
+}
+
+/* Add a symbol to the analysis's symbols array. Dedups on (name, vaddr)
+ * so .symtab + .dynsym merges don't double-count. */
+static void analysis_add_symbol(debag_analysis_t *a, const char *name,
+                                uint64_t vaddr, uint64_t size,
+                                int type, int bind, int is_import)
+{
+    if (!name || !name[0]) return;
+
+    /* Dedup: .dynsym often overlaps with .symtab. */
+    for (size_t i = 0; i < a->symbol_count; i++) {
+        if (a->symbols[i].vaddr == vaddr &&
+            a->symbols[i].name &&
+            strcmp(a->symbols[i].name, name) == 0)
+            return;
+    }
+
+    /* Grow the array in 16-entry slabs when we run out of room. */
+    size_t cap = (a->symbols == NULL) ? 0 :
+                 ((a->symbol_count + 15) & ~(size_t)15);
+    if (a->symbol_count + 1 > cap) {
+        cap = a->symbol_count + 16;
+        debag_elf_symbol_t *ns = realloc(a->symbols, cap * sizeof(*ns));
+        if (!ns) return;
+        a->symbols = ns;
+    }
+    debag_elf_symbol_t *s = &a->symbols[a->symbol_count++];
+    s->name = strdup(name);
+    s->vaddr = vaddr;
+    s->size = size;
+    s->type = type;
+    s->bind = bind;
+    s->is_import = is_import;
+}
+
 debag_analysis_t *debag_analyze(const char *binary_path)
 {
     if (!binary_path) return NULL;
@@ -188,16 +360,65 @@ debag_analysis_t *debag_analyze(const char *binary_path)
     debag_analysis_t *a = calloc(1, sizeof(*a));
     a->binary_path = strdup(binary_path);
 
-    /* Walk section headers to find .dynsym and .dynstr */
+    /* ELF metadata for the interactive REPLs */
+    a->entry_point = ehdr->e_entry;
+    a->bits = (ehdr->e_ident[EI_CLASS] == ELFCLASS64) ? 64 : 32;
+    a->is_big_endian = (ehdr->e_ident[EI_DATA] == ELFDATA2MSB) ? 1 : 0;
+    a->arch_name = strdup(elf_machine_name(ehdr->e_machine));
+    a->binary_type = strdup(elf_type_name(ehdr->e_type));
+
+    /* Build the section table descriptor array. Section names live in
+     * the .shstrtab section, indexed by ehdr->e_shstrndx. */
     Elf64_Shdr *shdrs = (Elf64_Shdr *)((char *)map + ehdr->e_shoff);
+    const char *shstrtab = NULL;
+    if (ehdr->e_shstrndx != SHN_UNDEF &&
+        ehdr->e_shstrndx < (unsigned)ehdr->e_shnum) {
+        Elf64_Shdr *shstr_sh = &shdrs[ehdr->e_shstrndx];
+        shstrtab = (const char *)map + shstr_sh->sh_offset;
+    }
+
+    if (ehdr->e_shnum > 0) {
+        a->sections = calloc(ehdr->e_shnum, sizeof(*a->sections));
+        if (a->sections) {
+            for (int i = 0; i < ehdr->e_shnum; i++) {
+                debag_elf_section_t *s = &a->sections[a->section_count++];
+                s->name  = strdup(shstrtab ? shstrtab + shdrs[i].sh_name : "");
+                s->vaddr = shdrs[i].sh_addr;
+                s->offset= shdrs[i].sh_offset;
+                s->size  = shdrs[i].sh_size;
+                s->type  = shdrs[i].sh_type;
+                s->flags = shdrs[i].sh_flags;
+            }
+        }
+    }
+
+    /* Build the program-header / segment descriptor array. */
+    if (ehdr->e_phnum > 0) {
+        Elf64_Phdr *phdrs = (Elf64_Phdr *)((char *)map + ehdr->e_phoff);
+        a->segments = calloc(ehdr->e_phnum, sizeof(*a->segments));
+        if (a->segments) {
+            for (int i = 0; i < ehdr->e_phnum; i++) {
+                debag_elf_segment_t *s = &a->segments[a->segment_count++];
+                s->type   = phdrs[i].p_type;
+                s->flags  = phdrs[i].p_flags;
+                s->vaddr  = phdrs[i].p_vaddr;
+                s->offset = phdrs[i].p_offset;
+                s->filesz = phdrs[i].p_filesz;
+                s->memsz  = phdrs[i].p_memsz;
+            }
+        }
+    }
+
+    /* Walk section headers to find .dynsym and .dynstr */
     Elf64_Shdr *dynsym_sh = NULL, *dynstr_sh = NULL;
     Elf64_Shdr *dynamic_sh = NULL;
+    Elf64_Shdr *symtab_sh = NULL, *strtab_sh = NULL;
 
     for (int i = 0; i < ehdr->e_shnum; i++) {
         if (shdrs[i].sh_type == SHT_DYNSYM)
             dynsym_sh = &shdrs[i];
-        else if (shdrs[i].sh_type == SHT_STRTAB && dynstr_sh && shdrs[i].sh_offset == dynsym_sh->sh_link == 0 ? 0 : 0)
-            ; /* will find dynstr via dynsym's sh_link */
+        else if (shdrs[i].sh_type == SHT_SYMTAB)
+            symtab_sh = &shdrs[i];
         else if (shdrs[i].sh_type == SHT_DYNAMIC)
             dynamic_sh = &shdrs[i];
     }
@@ -205,6 +426,49 @@ debag_analysis_t *debag_analyze(const char *binary_path)
     /* Find dynstr via dynsym's sh_link */
     if (dynsym_sh && dynsym_sh->sh_link < (unsigned)ehdr->e_shnum)
         dynstr_sh = &shdrs[dynsym_sh->sh_link];
+
+    /* Find strtab via symtab's sh_link (for the .symtab case) */
+    if (symtab_sh && symtab_sh->sh_link < (unsigned)ehdr->e_shnum)
+        strtab_sh = &shdrs[symtab_sh->sh_link];
+
+    /* Collect defined + imported symbols from .dynsym */
+    if (dynsym_sh && dynstr_sh) {
+        Elf64_Sym *syms = (Elf64_Sym *)((char *)map + dynsym_sh->sh_offset);
+        size_t sym_count = dynsym_sh->sh_size / sizeof(Elf64_Sym);
+        const char *strtab = (const char *)map + dynstr_sh->sh_offset;
+
+        for (size_t i = 0; i < sym_count; i++) {
+            const char *name = strtab + syms[i].st_name;
+            if (!name[0]) continue;
+            int is_import = (syms[i].st_shndx == SHN_UNDEF);
+            analysis_add_symbol(a, name,
+                                syms[i].st_value,
+                                syms[i].st_size,
+                                ELF64_ST_TYPE(syms[i].st_info),
+                                ELF64_ST_BIND(syms[i].st_info),
+                                is_import);
+        }
+    }
+
+    /* Also collect symbols from .symtab (often stripped from shipped
+     * binaries, but useful when present - e.g. local binaries). */
+    if (symtab_sh && strtab_sh) {
+        Elf64_Sym *syms = (Elf64_Sym *)((char *)map + symtab_sh->sh_offset);
+        size_t sym_count = symtab_sh->sh_size / sizeof(Elf64_Sym);
+        const char *strtab = (const char *)map + strtab_sh->sh_offset;
+
+        for (size_t i = 0; i < sym_count; i++) {
+            const char *name = strtab + syms[i].st_name;
+            if (!name[0]) continue;
+            int is_import = (syms[i].st_shndx == SHN_UNDEF);
+            analysis_add_symbol(a, name,
+                                syms[i].st_value,
+                                syms[i].st_size,
+                                ELF64_ST_TYPE(syms[i].st_info),
+                                ELF64_ST_BIND(syms[i].st_info),
+                                is_import);
+        }
+    }
 
     /* Walk dynamic symbols */
     int *allowed = NULL, *traced = NULL;
@@ -326,12 +590,25 @@ void debag_analysis_free(debag_analysis_t *a)
 {
     if (!a) return;
     free(a->binary_path);
+    free(a->arch_name);
+    free(a->binary_type);
     free(a->allowed_syscalls);
     free(a->traced_syscalls);
     if (a->libs) {
         for (size_t i = 0; i < a->lib_count; i++)
             free(a->libs[i]);
         free(a->libs);
+    }
+    if (a->sections) {
+        for (size_t i = 0; i < a->section_count; i++)
+            free(a->sections[i].name);
+        free(a->sections);
+    }
+    free(a->segments);
+    if (a->symbols) {
+        for (size_t i = 0; i < a->symbol_count; i++)
+            free(a->symbols[i].name);
+        free(a->symbols);
     }
     free(a);
 }
@@ -345,6 +622,14 @@ void debag_analysis_print(const debag_analysis_t *a, FILE *out)
 
     fprintf(out, "=== Debag Static Analysis ===\n");
     fprintf(out, "Binary:     %s\n", a->binary_path);
+    if (a->arch_name)
+        fprintf(out, "Arch:       %s (%d-bit, %s endian)\n",
+                a->arch_name, a->bits,
+                a->is_big_endian ? "big" : "little");
+    if (a->binary_type)
+        fprintf(out, "Type:       %s\n", a->binary_type);
+    if (a->entry_point || a->bits)
+        fprintf(out, "Entry:      0x%016llx\n", (unsigned long long)a->entry_point);
     fprintf(out, "Dynamic:    %s\n", a->is_dynamic ? "yes" : "no (static)");
     fprintf(out, "Network:    %s\n", a->has_network ? "yes" : "no");
     fprintf(out, "File write: %s\n", a->has_file_write ? "yes" : "no");

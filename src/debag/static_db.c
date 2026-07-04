@@ -1,0 +1,787 @@
+/* static_db.c - rizin-inspired read-only ELF REPL for Debag.
+ *
+ * `209 debag --static-db -- <binary>` drops into an interactive prompt
+ * modelled on rizin (librz/core). The design is deliberately small: a
+ * longest-prefix command dispatcher, a single `uint64_t seek` cursor,
+ * `pread()` straight off the binary's fd for every read. No block cache,
+ * no IO layer, no tree-sitter shell parser. One line in, one command out.
+ *
+ * The ELF data (sections, segments, symbols, entry point, arch, bits,
+ * endianness) is parsed once by debag_analyze() in static_analysis.c and
+ * handed to us as a `debag_analysis_t`. We only do read-only inspection
+ * here: list, hexdump, disassemble, seek. Disassembly is gated behind
+ * libcapstone (optional); without it `pd`/`pdd` print a hint and return.
+ *
+ * See /home/z/my-project/tool-results/rizin-research.md for the source
+ * study that informed this design.
+ */
+
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <inttypes.h>
+#include <sys/stat.h>
+#include <elf.h>
+
+#include "debag.h"
+
+#ifdef HAVE_CAPSTONE
+#include <capstone/capstone.h>
+#endif
+
+/* ── REPL state ───────────────────────────────────────────────────
+ *
+ * Mirrors rizin's RzCore in the parts we care about: an analysis
+ * pointer (the parsed ELF), an fd for direct pread(), a single
+ * `offset` cursor (the seek position), and a `quit` flag the `q`
+ * handler sets to break the outer loop. */
+typedef struct {
+    debag_analysis_t *a;
+    int fd;
+    uint64_t offset;        /* current seek, mirrors rizin's core->offset */
+    int quit;
+} repl_t;
+
+/* ── Forward declarations for the command table ─────────────────── */
+static void cmd_info(repl_t *r, int argc, char **argv);
+static void cmd_info_sections(repl_t *r, int argc, char **argv);
+static void cmd_info_segments(repl_t *r, int argc, char **argv);
+static void cmd_info_symbols(repl_t *r, int argc, char **argv);
+static void cmd_info_entry(repl_t *r, int argc, char **argv);
+static void cmd_info_imports(repl_t *r, int argc, char **argv);
+static void cmd_info_strings(repl_t *r, int argc, char **argv);
+static void cmd_print_hex(repl_t *r, int argc, char **argv);
+static void cmd_print_hexw(repl_t *r, int argc, char **argv);
+static void cmd_print_hexq(repl_t *r, int argc, char **argv);
+static void cmd_print_string(repl_t *r, int argc, char **argv);
+static void cmd_seek(repl_t *r, int argc, char **argv);
+static void cmd_print_disasm(repl_t *r, int argc, char **argv);
+static void cmd_print_disasm_at(repl_t *r, int argc, char **argv);
+static void cmd_help(repl_t *r, int argc, char **argv);
+static void cmd_quit(repl_t *r, int argc, char **argv);
+
+/* Command table. Sorted in dispatch order — the longest-prefix matcher
+ * walks this table once per attempt and prefers the longest match, so
+ * ordering doesn't matter for correctness, but keeping related commands
+ * grouped makes the help output read naturally. */
+static const struct {
+    const char *name;
+    const char *summary;
+    void (*fn)(repl_t *, int, char **);
+} cmds[] = {
+    {"i",     "print binary info",                     cmd_info},
+    {"iS",    "list sections",                         cmd_info_sections},
+    {"iSS",   "list segments / program headers",       cmd_info_segments},
+    {"is",    "list symbols",                          cmd_info_symbols},
+    {"ie",    "list entry points",                     cmd_info_entry},
+    {"iz",    "list strings in .rodata/.data",         cmd_info_strings},
+    {"ii",    "list imports",                          cmd_info_imports},
+    {"px",    "hex dump at <addr> <len>",              cmd_print_hex},
+    {"pxw",   "hex dump as 32-bit LE words",           cmd_print_hexw},
+    {"pxq",   "hex dump as 64-bit LE words",           cmd_print_hexq},
+    {"ps",    "print string at <addr> <len>",          cmd_print_string},
+    {"s",     "seek to <addr|section|symbol|entry0>",  cmd_seek},
+    {"pd",    "disassemble <n> insns at current seek", cmd_print_disasm},
+    {"pdd",   "disassemble <n> insns at <addr>",       cmd_print_disasm_at},
+    {"?",     "show this help",                        cmd_help},
+    {"q",     "quit",                                  cmd_quit},
+    {NULL, NULL, NULL}
+};
+
+/* ── Helpers ────────────────────────────────────────────────────── */
+
+/* Address column width. rizin uses 18 chars (`0x%016llx`) on 64-bit
+ * binaries and 10 chars (`0x%08llx`) on 32-bit, picked from
+ * asm.bits. We mirror that. */
+static int addr_width(const repl_t *r)
+{
+    return (r->a && r->a->bits == 64) ? 18 : 10;
+}
+
+/* ELF flag tests we need for the string-extraction pass. */
+#define SHF_ALLOC_X     (uint64_t)0x2
+#define SHF_EXECINSTR_X (uint64_t)0x4
+
+/* vaddr -> file offset. Mirrors rizin's `Elf_(rz_bin_elf_v2p)`: first
+ * scan sections for one that contains the vaddr, fall back to PT_LOAD
+ * segments, then give up. The section path is the common case for
+ * non-relocatable executables; the segment path covers stripped or
+ * unusual layouts. Returns (uint64_t)-1 on miss. */
+static uint64_t vaddr_to_offset(const repl_t *r, uint64_t vaddr)
+{
+    const debag_analysis_t *a = r->a;
+
+    /* Section path: SHF_ALLOC sections have a meaningful vaddr. */
+    for (size_t i = 0; a->sections && i < a->section_count; i++) {
+        const debag_elf_section_t *s = &a->sections[i];
+        if (!(s->flags & SHF_ALLOC_X)) continue;
+        if (vaddr >= s->vaddr && vaddr < s->vaddr + s->size)
+            return s->offset + (vaddr - s->vaddr);
+    }
+
+    /* Segment path: PT_LOAD. */
+    for (size_t i = 0; a->segments && i < a->segment_count; i++) {
+        const debag_elf_segment_t *seg = &a->segments[i];
+        if (seg->type != PT_LOAD) continue;
+        if (vaddr >= seg->vaddr && vaddr < seg->vaddr + seg->filesz)
+            return seg->offset + (vaddr - seg->vaddr);
+    }
+
+    return (uint64_t)-1;
+}
+
+/* Read `n` bytes starting at virtual address `vaddr`. Translates via
+ * vaddr_to_offset, then pread()s the bytes. Short reads (EOF or
+ * unmapped tail) get zero-padded — rizin does the same with its
+ * `io_unalloc_ch` character, except we always use 0x00. Returns the
+ * number of bytes actually read (may be less than n on EOF). */
+static ssize_t read_at(const repl_t *r, uint64_t vaddr, void *buf, size_t n)
+{
+    uint64_t off = vaddr_to_offset(r, vaddr);
+    if (off == (uint64_t)-1) {
+        memset(buf, 0, n);
+        return 0;
+    }
+
+    ssize_t got = pread(r->fd, buf, n, (off_t)off);
+    if (got < 0) {
+        memset(buf, 0, n);
+        return 0;
+    }
+    if ((size_t)got < n)
+        memset((char *)buf + got, 0, n - got);
+    return got;
+}
+
+/* Resolve a single token to a virtual address. Order matches rizin's
+ * num_callback (core.c:890-932): entry0 first, then section names,
+ * then symbol names, then hex/decimal numbers. Returns 0 on success
+ * and writes the address to *out; returns -1 and prints a diagnostic
+ * otherwise. */
+static int resolve_expr(repl_t *r, const char *s, uint64_t *out)
+{
+    if (!s || !*s) return -1;
+
+    /* entry0 -> e_entry (always defined for executables). */
+    if (strcmp(s, "entry0") == 0 || strcmp(s, "entry") == 0) {
+        *out = r->a->entry_point;
+        return 0;
+    }
+
+    /* Section name? Linear scan. */
+    for (size_t i = 0; r->a->sections && i < r->a->section_count; i++) {
+        if (r->a->sections[i].name &&
+            strcmp(r->a->sections[i].name, s) == 0) {
+            *out = r->a->sections[i].vaddr;
+            return 0;
+        }
+    }
+
+    /* Symbol name? Skip imports (vaddr == 0). */
+    for (size_t i = 0; r->a->symbols && i < r->a->symbol_count; i++) {
+        if (r->a->symbols[i].name &&
+            r->a->symbols[i].vaddr != 0 &&
+            strcmp(r->a->symbols[i].name, s) == 0) {
+            *out = r->a->symbols[i].vaddr;
+            return 0;
+        }
+    }
+
+    /* Hex / decimal number. */
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long long v = strtoull(s + 2, &end, 16);
+        if (errno == 0 && end && *end == '\0') { *out = v; return 0; }
+    } else if (isdigit((unsigned char)s[0])) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long long v = strtoull(s, &end, 10);
+        if (errno == 0 && end && *end == '\0') { *out = v; return 0; }
+    }
+
+    fprintf(stderr, "debag: unknown symbol '%s'\n", s);
+    return -1;
+}
+
+/* Parse a single numeric argument. Accepts `0x...` hex, decimal, or a
+ * symbol/section name. Returns 0 on success, -1 on miss. */
+static int parse_uint(repl_t *r, const char *s, uint64_t *out)
+{
+    return resolve_expr(r, s, out);
+}
+
+/* Print a hex dump in rizin's `px` style. Layout per row:
+ *   0xADDR  b0 b1 b2 b3  b4 b5 b6 b7  b8 b9 ba bb  bc bd be bf  |ascii|
+ * Address column is 18 chars on 64-bit binaries, 10 on 32-bit. Bytes
+ * are grouped in pairs with an extra space between pairs (mirrors
+ * rz_print_hexdump_str). Non-printable ASCII -> '.'.
+ *
+ * `word_size` selects px (1), pxw (4), or pxq (8) layout. For word
+ * modes the hex column is a sequence of `0x%08x ` / `0x%016llx ` words
+ * read in native (little-endian) byte order — matches rizin's
+ * rz_read_ble default for x86. */
+static void print_hexdump(repl_t *r, uint64_t vaddr,
+                          const uint8_t *buf, size_t n, int word_size)
+{
+    int aw = addr_width(r);
+    const char *addr_fmt = (aw == 18) ? "0x%016" PRIx64 : "0x%08"  PRIx64;
+
+    if (word_size == 1) {
+        /* Byte mode: 16 bytes per row, grouped in pairs. */
+        for (size_t i = 0; i < n; i += 16) {
+            printf(addr_fmt, vaddr + i);
+            printf("  ");
+            for (size_t j = 0; j < 16; j++) {
+                if (i + j < n) printf("%02x", buf[i + j]);
+                else            printf("  ");
+                /* extra space between byte pairs (after j=1,3,5,...,15) */
+                if (j & 1) printf(" ");
+            }
+            printf(" ");
+            for (size_t j = 0; j < 16; j++) {
+                if (i + j < n) {
+                    uint8_t c = buf[i + j];
+                    putchar(isprint(c) ? c : '.');
+                } else {
+                    putchar(' ');
+                }
+            }
+            printf("\n");
+        }
+        return;
+    }
+
+    /* Word mode: pxw (4) or pxq (8). Words per row = 16 / word_size. */
+    int words_per_row = 16 / word_size;
+    for (size_t i = 0; i < n; i += 16) {
+        printf(addr_fmt, vaddr + i);
+        printf(" ");
+        for (int w = 0; w < words_per_row; w++) {
+            size_t off = i + (size_t)w * (size_t)word_size;
+            if (off >= n) {
+                /* pad short tail */
+                if (word_size == 4) printf("  0x00000000");
+                else                printf("    0x0000000000000000");
+                continue;
+            }
+            uint64_t v = 0;
+            for (int b = 0; b < word_size && off + b < n; b++)
+                v |= (uint64_t)buf[off + b] << (8 * b);
+            if (word_size == 4) printf(" 0x%08" PRIx64, v);
+            else                printf("  0x%016" PRIx64, v);
+        }
+        printf("\n");
+    }
+}
+
+/* ── Command handlers ───────────────────────────────────────────── */
+
+static void cmd_info(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const debag_analysis_t *a = r->a;
+    printf("path:      %s\n", a->binary_path ? a->binary_path : "?");
+    printf("arch:      %s\n", a->arch_name ? a->arch_name : "?");
+    printf("bits:      %d\n", a->bits);
+    printf("endian:    %s\n", a->is_big_endian ? "big" : "little");
+    printf("type:      %s\n", a->binary_type ? a->binary_type : "?");
+    printf("entry:     0x%016" PRIx64 "\n", a->entry_point);
+    printf("sections:  %zu\n", a->section_count);
+    printf("segments:  %zu\n", a->segment_count);
+    printf("symbols:   %zu\n", a->symbol_count);
+}
+
+static void cmd_info_sections(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const debag_analysis_t *a = r->a;
+    printf("  #  %-20s %-18s %-12s %-10s %s\n",
+           "name", "vaddr", "size", "type", "flags");
+    for (size_t i = 0; a->sections && i < a->section_count; i++) {
+        const debag_elf_section_t *s = &a->sections[i];
+        char flags[16];
+        debag_elf_section_flags_str(s->flags, flags, sizeof(flags));
+        printf("%3zu  %-20.20s 0x%016" PRIx64 " %-12zu %-10s %s\n",
+               i,
+               s->name ? s->name : "",
+               s->vaddr,
+               s->size,
+               debag_elf_section_type_name(s->type),
+               flags);
+    }
+}
+
+static void cmd_info_segments(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const debag_analysis_t *a = r->a;
+    printf("%-12s %-18s %-12s %-12s %-12s %s\n",
+           "type", "vaddr", "offset", "filesz", "memsz", "flg");
+    for (size_t i = 0; a->segments && i < a->segment_count; i++) {
+        const debag_elf_segment_t *s = &a->segments[i];
+        char flg[4] = {0};
+        size_t k = 0;
+        if (k < 3 && (s->flags & PF_R)) flg[k++] = 'R';
+        if (k < 3 && (s->flags & PF_W)) flg[k++] = 'W';
+        if (k < 3 && (s->flags & PF_X)) flg[k++] = 'X';
+        printf("%-12s 0x%016" PRIx64 " 0x%010" PRIx64 " 0x%-10" PRIx64 " 0x%-10" PRIx64 " %s\n",
+               debag_elf_segment_type_name(s->type),
+               s->vaddr, s->offset, s->filesz, s->memsz, flg);
+    }
+}
+
+static void cmd_info_symbols(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const debag_analysis_t *a = r->a;
+    printf("%-40s %-18s %-10s %-8s %s\n",
+           "name", "vaddr", "size", "type", "bind");
+    for (size_t i = 0; a->symbols && i < a->symbol_count; i++) {
+        const debag_elf_symbol_t *s = &a->symbols[i];
+        if (s->is_import) continue;   /* imports belong to `ii` */
+        printf("%-40.40s 0x%016" PRIx64 " %-10zu %-8s %s\n",
+               s->name ? s->name : "",
+               s->vaddr, s->size,
+               debag_elf_symbol_type_name(s->type),
+               debag_elf_symbol_bind_name(s->bind));
+    }
+}
+
+static void cmd_info_imports(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const debag_analysis_t *a = r->a;
+    printf("%-40s %-8s %s\n", "name", "type", "bind");
+    for (size_t i = 0; a->symbols && i < a->symbol_count; i++) {
+        const debag_elf_symbol_t *s = &a->symbols[i];
+        if (!s->is_import) continue;
+        printf("%-40.40s %-8s %s\n",
+               s->name ? s->name : "",
+               debag_elf_symbol_type_name(s->type),
+               debag_elf_symbol_bind_name(s->bind));
+    }
+}
+
+static void cmd_info_entry(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const debag_analysis_t *a = r->a;
+    printf("entry0: 0x%016" PRIx64 "\n", a->entry_point);
+}
+
+/* List printable-ASCII runs of length >= 4 in SHF_ALLOC && !SHF_EXECINSTR
+ * sections (.rodata, .data, .data.rel.ro, etc.). Each run is printed
+ * as:  `vaddr  length  "string"` */
+static void cmd_info_strings(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const debag_analysis_t *a = r->a;
+
+    for (size_t i = 0; a->sections && i < a->section_count; i++) {
+        const debag_elf_section_t *s = &a->sections[i];
+        if (!(s->flags & SHF_ALLOC_X))  continue;
+        if (s->flags & SHF_EXECINSTR_X) continue;
+        if (s->type == SHT_NOBITS)      continue;   /* .bss has no file bytes */
+        if (s->size == 0)               continue;
+
+        uint8_t *buf = malloc(s->size);
+        if (!buf) continue;
+        ssize_t got = pread(r->fd, buf, s->size, (off_t)s->offset);
+        if (got <= 0) { free(buf); continue; }
+
+        size_t run_start = 0;
+        size_t run_len = 0;
+        for (size_t j = 0; j < (size_t)got; j++) {
+            uint8_t c = buf[j];
+            if (isprint(c) && c != 0) {
+                if (run_len == 0) run_start = j;
+                run_len++;
+            } else {
+                if (run_len >= 4) {
+                    printf("0x%016" PRIx64 "  %-4zu  %.*s\n",
+                           s->vaddr + run_start, run_len,
+                           (int)run_len, buf + run_start);
+                }
+                run_len = 0;
+            }
+        }
+        if (run_len >= 4) {
+            printf("0x%016" PRIx64 "  %-4zu  %.*s\n",
+                   s->vaddr + run_start, run_len,
+                   (int)run_len, buf + run_start);
+        }
+        free(buf);
+    }
+}
+
+/* `px <addr> <len>` (default len = 16). Reads len bytes via read_at()
+ * and prints a hex dump. */
+static void do_print_hex(repl_t *r, uint64_t addr, size_t len, int word_size)
+{
+    if (len == 0) len = 16;
+    if (len > 0x100000) {
+        fprintf(stderr, "debag: length too large (max 0x100000)\n");
+        return;
+    }
+    uint8_t *buf = malloc(len);
+    if (!buf) { perror("malloc"); return; }
+    read_at(r, addr, buf, len);
+    print_hexdump(r, addr, buf, len, word_size);
+    free(buf);
+}
+
+static void cmd_print_hex(repl_t *r, int argc, char **argv)
+{
+    /* px [addr] [len] -- with no args, dump 16 bytes at current seek. */
+    uint64_t addr = r->offset;
+    size_t len = 16;
+    if (argc >= 2) {
+        if (parse_uint(r, argv[1], &addr) < 0) return;
+    }
+    if (argc >= 3) {
+        uint64_t v;
+        if (parse_uint(r, argv[2], &v) < 0) return;
+        len = (size_t)v;
+    }
+    do_print_hex(r, addr, len, 1);
+}
+
+static void cmd_print_hexw(repl_t *r, int argc, char **argv)
+{
+    uint64_t addr = r->offset;
+    size_t len = 16;
+    if (argc >= 2) {
+        if (parse_uint(r, argv[1], &addr) < 0) return;
+    }
+    if (argc >= 3) {
+        uint64_t v;
+        if (parse_uint(r, argv[2], &v) < 0) return;
+        len = (size_t)v;
+    }
+    do_print_hex(r, addr, len, 4);
+}
+
+static void cmd_print_hexq(repl_t *r, int argc, char **argv)
+{
+    uint64_t addr = r->offset;
+    size_t len = 16;
+    if (argc >= 2) {
+        if (parse_uint(r, argv[1], &addr) < 0) return;
+    }
+    if (argc >= 3) {
+        uint64_t v;
+        if (parse_uint(r, argv[2], &v) < 0) return;
+        len = (size_t)v;
+    }
+    do_print_hex(r, addr, len, 8);
+}
+
+static void cmd_print_string(repl_t *r, int argc, char **argv)
+{
+    uint64_t addr = r->offset;
+    size_t len = 256;
+    if (argc >= 2) {
+        if (parse_uint(r, argv[1], &addr) < 0) return;
+    }
+    if (argc >= 3) {
+        uint64_t v;
+        if (parse_uint(r, argv[2], &v) < 0) return;
+        len = (size_t)v;
+    }
+    if (len > 0x100000) {
+        fprintf(stderr, "debag: length too large (max 0x100000)\n");
+        return;
+    }
+    uint8_t *buf = malloc(len);
+    if (!buf) { perror("malloc"); return; }
+    ssize_t got = read_at(r, addr, buf, len);
+    /* Print until NUL, EOF, or len. */
+    size_t i = 0;
+    while (i < (size_t)got && i < len && buf[i] != 0) {
+        if (isprint(buf[i]) || buf[i] == '\t' || buf[i] == '\n')
+            putchar(buf[i]);
+        else
+            putchar('.');
+        i++;
+    }
+    putchar('\n');
+    free(buf);
+}
+
+static void cmd_seek(repl_t *r, int argc, char **argv)
+{
+    if (argc < 2) {
+        /* bare `s`: print current seek (rizin prints in the same style). */
+        printf("0x%016" PRIx64 "\n", r->offset);
+        return;
+    }
+    uint64_t v;
+    if (resolve_expr(r, argv[1], &v) < 0) return;
+    r->offset = v;
+}
+
+#ifdef HAVE_CAPSTONE
+/* Pick Capstone arch/mode from the analysis. Returns 0 on success. */
+static int pick_capstone(const debag_analysis_t *a, cs_arch *arch, cs_mode *mode)
+{
+    *mode = CS_MODE_LITTLE_ENDIAN;
+    if (a->is_big_endian) *mode = CS_MODE_BIG_ENDIAN;
+
+    if (!a->arch_name) return -1;
+
+    if (strcmp(a->arch_name, "x86-64") == 0) {
+        *arch = CS_ARCH_X86;
+        *mode |= CS_MODE_64;
+        return 0;
+    }
+    if (strcmp(a->arch_name, "x86") == 0) {
+        *arch = CS_ARCH_X86;
+        *mode |= CS_MODE_32;
+        return 0;
+    }
+    if (strcmp(a->arch_name, "aarch64") == 0) {
+        *arch = CS_ARCH_ARM64;
+        return 0;
+    }
+    if (strcmp(a->arch_name, "arm") == 0) {
+        *arch = CS_ARCH_ARM;
+        *mode |= CS_MODE_32;
+        return 0;
+    }
+#ifdef CS_ARCH_RISCV
+    if (strcmp(a->arch_name, "riscv") == 0) {
+        *arch = CS_ARCH_RISCV;
+        *mode |= (a->bits == 64) ? CS_MODE_RISCV64 : CS_MODE_RISCV32;
+        return 0;
+    }
+#endif
+    if (strcmp(a->arch_name, "ppc64") == 0) {
+        *arch = CS_ARCH_PPC;
+        *mode |= CS_MODE_64;
+        return 0;
+    }
+    if (strcmp(a->arch_name, "s390x") == 0) {
+        *arch = CS_ARCH_SYSZ;
+        return 0;
+    }
+    return -1;
+}
+
+/* Disassemble up to `count` instructions starting at vaddr `addr`.
+ * Format mirrors rizin's compact `pdi` output:
+ *   0xADDR  <hex bytes>  mnemonic operands
+ * Bytes are concatenated (no separator), right-justified to a 16-wide
+ * column so the asm column lines up. */
+static void do_disasm(repl_t *r, uint64_t addr, size_t count)
+{
+    if (count == 0) count = 16;
+    if (count > 4096) count = 4096;
+
+    cs_arch arch;
+    cs_mode mode;
+    if (pick_capstone(r->a, &arch, &mode) < 0) {
+        fprintf(stderr,
+                "debag: unsupported arch '%s' for disassembly\n",
+                r->a->arch_name ? r->a->arch_name : "?");
+        return;
+    }
+
+    csh handle;
+    if (cs_open(arch, mode, &handle) != CS_ERR_OK) {
+        fprintf(stderr, "debag: cs_open failed\n");
+        return;
+    }
+
+    /* Capstone may need a slightly larger buffer than count * 15 (max
+     * x86 insn length). Read generously and stop when we've decoded
+     * `count` instructions. */
+    size_t bufsz = count * 16 + 64;
+    uint8_t *buf = malloc(bufsz);
+    if (!buf) { cs_close(&handle); return; }
+    read_at(r, addr, buf, bufsz);
+
+    cs_insn *insns = NULL;
+    size_t n = cs_disasm(handle, buf, bufsz, addr, count, &insns);
+    if (n == 0) {
+        fprintf(stderr, "debag: no instructions decoded at 0x%" PRIx64 "\n",
+                addr);
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            printf("0x%016" PRIx64 "  ", insns[i].address);
+            char hex[64] = "";
+            size_t hl = 0;
+            for (size_t j = 0; j < insns[i].size && hl < sizeof(hex) - 2; j++)
+                hl += (size_t)snprintf(hex + hl, sizeof(hex) - hl,
+                                       "%02x", insns[i].bytes[j]);
+            printf("%-16s %s %s\n",
+                   hex, insns[i].mnemonic, insns[i].op_str);
+        }
+        cs_free(insns, n);
+    }
+    free(buf);
+    cs_close(&handle);
+}
+#else
+static void do_disasm(repl_t *r, uint64_t addr, size_t count)
+{
+    (void)r; (void)addr; (void)count;
+    fprintf(stderr,
+            "debag: disassembly requires capstone "
+            "(install libcapstone-dev)\n");
+}
+#endif
+
+static void cmd_print_disasm(repl_t *r, int argc, char **argv)
+{
+    size_t count = 16;
+    if (argc >= 2) {
+        uint64_t v;
+        if (parse_uint(r, argv[1], &v) < 0) return;
+        count = (size_t)v;
+    }
+    do_disasm(r, r->offset, count);
+}
+
+static void cmd_print_disasm_at(repl_t *r, int argc, char **argv)
+{
+    if (argc < 3) {
+        fprintf(stderr, "usage: pdd <addr> <n>\n");
+        return;
+    }
+    uint64_t addr;
+    if (parse_uint(r, argv[1], &addr) < 0) return;
+    uint64_t v;
+    if (parse_uint(r, argv[2], &v) < 0) return;
+    do_disasm(r, addr, (size_t)v);
+}
+
+static void cmd_help(repl_t *r, int argc, char **argv)
+{
+    (void)r; (void)argc; (void)argv;
+    printf("Commands (longest-prefix match):\n");
+    for (size_t i = 0; cmds[i].name; i++)
+        printf("  %-4s  %s\n", cmds[i].name, cmds[i].summary);
+    printf("\nNumbers: decimal or 0x-hex. Symbols resolve as entry0,\n");
+    printf("section name, or symbol name.\n");
+}
+
+static void cmd_quit(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    r->quit = 1;
+}
+
+/* ── Tokenizer + dispatcher ───────────────────────────────────────
+ *
+ * We don't need rizin's tree-sitter rzshell parser. A simple
+ * whitespace tokenizer is enough: the first token is the command name
+ * (matched by longest-prefix), the rest are argv[] (each token parsed
+ * by the handler). */
+static int dispatch_line(repl_t *r, char *line)
+{
+    /* Strip trailing newline / whitespace. */
+    char *end = line + strlen(line);
+    while (end > line && isspace((unsigned char)end[-1])) *--end = '\0';
+
+    /* Skip leading whitespace. */
+    char *s = line;
+    while (*s && isspace((unsigned char)*s)) s++;
+    if (*s == '\0') return 0;   /* empty line, re-prompt */
+
+    /* Tokenize on whitespace. */
+    char *argv[16];
+    int argc = 0;
+    char *tok = strtok(s, " \t");
+    while (tok && argc < 15) {
+        argv[argc++] = tok;
+        tok = strtok(NULL, " \t");
+    }
+    argv[argc] = NULL;
+
+    /* Aliases: quit / exit -> q. */
+    if (strcmp(argv[0], "quit") == 0 || strcmp(argv[0], "exit") == 0) {
+        r->quit = 1;
+        return 0;
+    }
+    if (strcmp(argv[0], "help") == 0) {
+        cmd_help(r, argc, argv);
+        return 0;
+    }
+
+    /* Longest-prefix match: scan the table, prefer the longest name
+     * that argv[0] starts with. This mirrors rizin's
+     * cmd_get_desc_best() (cmd_api.c:342) — except we don't bother
+     * with char-chopping; we just walk the table once and track the
+     * best hit. */
+    size_t best_len = 0;
+    int best_idx = -1;
+    size_t arg_len = strlen(argv[0]);
+    for (int i = 0; cmds[i].name; i++) {
+        size_t nl = strlen(cmds[i].name);
+        if (nl > arg_len) continue;
+        if (nl <= best_len) continue;
+        if (strncmp(cmds[i].name, argv[0], nl) == 0) {
+            best_len = nl;
+            best_idx = i;
+        }
+    }
+
+    if (best_idx < 0) {
+        fprintf(stderr, "debag: unknown command '%s' (try ?)\n", argv[0]);
+        return 0;
+    }
+
+    cmds[best_idx].fn(r, argc, argv);
+    return 0;
+}
+
+/* ── Public entry point ─────────────────────────────────────────── */
+
+int debag_static_db_repl(const char *binary_path)
+{
+    if (!binary_path) return 1;
+
+    debag_analysis_t *a = debag_analyze(binary_path);
+    if (!a) {
+        fprintf(stderr, "debag: cannot analyze '%s'\n", binary_path);
+        return 1;
+    }
+
+    int fd = open(binary_path, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "debag: cannot open '%s': %s\n",
+                binary_path, strerror(errno));
+        debag_analysis_free(a);
+        return 1;
+    }
+
+    repl_t r = { .a = a, .fd = fd, .offset = a->entry_point, .quit = 0 };
+
+    printf("debag static-db: %s (%s, %d-bit)\n",
+           binary_path,
+           a->arch_name ? a->arch_name : "?",
+           a->bits);
+    printf("Type 'q' to quit, '?' for help.\n");
+
+    char line[4096];
+    while (!r.quit) {
+        printf("0x%016" PRIx64 "> ", r.offset);
+        fflush(stdout);
+        if (!fgets(line, sizeof(line), stdin)) {
+            printf("\n");
+            break;
+        }
+        dispatch_line(&r, line);
+    }
+
+    close(fd);
+    debag_analysis_free(a);
+    return 0;
+}

@@ -32,8 +32,39 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /* ── Static analysis result ───────────────────────────────────────── */
+
+/* ELF section descriptor, exposed so the static-db REPL can seek/dump. */
+typedef struct debag_elf_section {
+    char *name;
+    uint64_t vaddr;
+    uint64_t offset;
+    uint64_t size;
+    uint32_t type;          /* SHT_* */
+    uint64_t flags;         /* SHF_* */
+} debag_elf_section_t;
+
+/* ELF program-header / segment descriptor. */
+typedef struct debag_elf_segment {
+    uint32_t type;          /* PT_* */
+    uint32_t flags;         /* PF_* */
+    uint64_t vaddr;
+    uint64_t offset;
+    uint64_t filesz;
+    uint64_t memsz;
+} debag_elf_segment_t;
+
+/* ELF symbol descriptor. Covers both .symtab and .dynsym entries. */
+typedef struct debag_elf_symbol {
+    char *name;
+    uint64_t vaddr;
+    uint64_t size;
+    int type;               /* STT_FUNC, STT_OBJECT, ... */
+    int bind;               /* STB_LOCAL, STB_GLOBAL, STB_WEAK */
+    int is_import;          /* 1 if undefined (from .dynsym, imported) */
+} debag_elf_symbol_t;
 
 typedef struct debag_analysis {
     char *binary_path;
@@ -54,6 +85,20 @@ typedef struct debag_analysis {
     /* Linked libraries */
     char **libs;            /* NULL-terminated list of .so names */
     size_t lib_count;
+
+    /* ELF metadata, populated by debag_analyze(). Used by the static-db
+     * and dynamic-db interactive REPLs. Optional - older callers ignore. */
+    uint64_t entry_point;   /* e_entry */
+    int bits;               /* 32 or 64 */
+    int is_big_endian;      /* 1 = big endian, 0 = little endian */
+    char *arch_name;        /* "x86-64", "x86", "aarch64", "arm", ... */
+    char *binary_type;      /* "EXEC", "DYN" (PIE), "CORE", "REL" */
+    debag_elf_section_t  *sections;
+    size_t section_count;
+    debag_elf_segment_t  *segments;
+    size_t segment_count;
+    debag_elf_symbol_t   *symbols;   /* .dynsym + .symtab merged, deduped */
+    size_t symbol_count;
 } debag_analysis_t;
 
 /* ── Policy ───────────────────────────────────────────────────────── */
@@ -117,5 +162,24 @@ void debag_free_script_analysis(script_analysis_t *a);
 
 /* Print script analysis in human-readable format */
 void debag_print_script_analysis(const script_analysis_t *a, FILE *out);
+
+/* ── Interactive REPLs (db = "debugging") ────────────────────────── */
+
+/* `209 debag --static-db -- <binary>` : rizin-style read-only ELF REPL.
+ * Returns process exit code (0 on clean quit). */
+int debag_static_db_repl(const char *binary_path);
+
+/* `209 debag --dynamic-db -- <argv>` : gdb-style live debugger REPL.
+ * argv[0] is the binary, argv[1..] are its args (NULL-terminated).
+ * Returns process exit code (0 on clean quit). */
+int debag_dynamic_db_repl(int argc, char **argv);
+
+/* ── ELF pretty-printing helpers (shared by static_analysis + REPLs) ─ */
+
+const char *debag_elf_section_type_name(uint32_t sh_type);
+void debag_elf_section_flags_str(uint64_t flags, char *buf, size_t bufsz);
+const char *debag_elf_symbol_type_name(int st_type);
+const char *debag_elf_symbol_bind_name(int st_bind);
+const char *debag_elf_segment_type_name(uint32_t p_type);
 
 #endif /* TWO9_DEBAG_H */

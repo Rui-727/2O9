@@ -313,7 +313,16 @@ will probably use, then builds a seccomp filter from that.
 209 debag --static-scan -- /bin/ls    # see what a binary does before running it
 209 debag --no-net -- curl URL        # run with network blocked
 209 debag --fast-mode -- ls -la       # seccomp only, fastest
+209 debag --static-db -- /bin/ls      # interactive rizin-style ELF REPL
 ```
+
+Debag also has an interactive static-analysis REPL, `--static-db`,
+modelled on rizin. It drops you at a `0xADDR>` prompt where you can
+inspect the parsed ELF: list sections (`iS`), segments (`iSS`), symbols
+(`is`), imports (`ii`), strings (`iz`); hex-dump any virtual address
+(`px`, `pxw`, `pxq`); seek to sections / symbols / `entry0` (`s`); and
+disassemble with libcapstone (`pd`, `pdd`). Type `?` inside the REPL
+for the full command table.
 
 Restriction flags (both Trakker and Debag):
 

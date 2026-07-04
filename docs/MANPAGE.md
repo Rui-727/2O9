@@ -143,12 +143,43 @@ Each maps to the equivalent 2O9 command.
   - `209 trakker --no-net -- curl https://example.com`
   - `209 trakker --no-write --redirect-writes /tmp/trakker -- makepkg -f`
 
-`209 debag` [`--static-scan`] [`--no-net`] [`--fast-mode`] [`--`] `<cmd>` `[args...]`
+`209 debag` [`--static-scan`] [`--static-db`] [`--no-net`] [`--fast-mode`] [`--`] `<cmd>` `[args...]`
 : Run `<cmd>` inside the Debag hybrid sandbox. Uses seccomp-bpf for
   the fast path (most syscalls allowed directly) and ptrace only for
   syscalls that need argument inspection. About 90% native speed. With
   `--static-scan`, scans the ELF symbol table first to build a tighter
   seccomp filter.
+
+`209 debag --static-db --` `<binary>`
+: Drop into an interactive, rizin-style read-only REPL for inspecting
+  an ELF binary. No sandbox, no exec; just static analysis. Commands
+  (longest-prefix match, so `iS` is distinct from `iSS`):
+
+  | Command | Action |
+  |---|---|
+  | `i` | Print binary info (path, arch, bits, endian, type, entry) |
+  | `iS` | List sections (index, name, vaddr, size, type, flags) |
+  | `iSS` | List segments / program headers (type, vaddr, offset, filesz, memsz, flags) |
+  | `is` | List symbols (name, vaddr, size, type, bind) |
+  | `ie` | List entry points (`entry0`) |
+  | `iz` | List printable strings (>= 4 chars) in `.rodata` / `.data` |
+  | `ii` | List imports (undefined dynamic symbols) |
+  | `px <addr> <len>` | Hex dump at virtual address |
+  | `pxw <addr> <len>` | Hex dump as 32-bit little-endian words |
+  | `pxq <addr> <len>` | Hex dump as 64-bit little-endian words |
+  | `ps <addr> <len>` | Print string at address |
+  | `s <addr>` | Seek to address |
+  | `s <section>` | Seek to section start (by name) |
+  | `s entry0` | Seek to entry point |
+  | `pd <n>` | Disassemble `<n>` instructions at current seek |
+  | `pdd <addr> <n>` | Disassemble `<n>` instructions at `<addr>` |
+  | `?` | Show command table |
+  | `q` / `quit` / `exit` | Quit |
+
+  Addresses accept decimal, `0x`-hex, `entry0`, a section name, or a
+  symbol name. Disassembly (`pd` / `pdd`) requires libcapstone; without
+  it, those two commands print a hint and return. The prompt shows the
+  current seek: `0x0000000000401000> `.
 
 `209 <n> rollback`
 : Roll back to generation #n. Repoints the current-generation symlink

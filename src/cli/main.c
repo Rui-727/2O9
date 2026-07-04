@@ -226,6 +226,8 @@ static int cmd_usage(void)
         printf("  209 trakker --no-write -- makepkg -f\n\n");
         printf("Debag (hybrid sandbox - seccomp fast path + ptrace slow path):\n");
         printf("  209 debag --static-scan -- /bin/ls\n");
+        printf("  209 debag --static-db -- /bin/ls     (interactive rizin-style static analysis)\n");
+        printf("  209 debag --dynamic-db -- /bin/ls    (interactive gdb-style dynamic debugger)\n");
         printf("  209 debag --no-net -- curl https://example.com\n");
         printf("  209 debag --fast-mode -- ls -la  (seccomp only, ~native speed)\n\n");
         printf("Rollback:\n");
@@ -3535,11 +3537,15 @@ static int cmd_debag(int argc, char **argv)
 {
         debag_policy_t policy = {0};
         int i = 0;
+        int static_db = 0;
 
         /* Parse flags */
         while (i < argc) {
                 if (strcmp(argv[i], "--static-scan") == 0) {
                         policy.static_scan_only = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--static-db") == 0) {
+                        static_db = 1;
                         i++;
                 } else if (strcmp(argv[i], "--dynamic-block") == 0) {
                         policy.dynamic_block = 1;
@@ -3598,6 +3604,19 @@ static int cmd_debag(int argc, char **argv)
 
         /* Run static analysis */
         debag_analysis_t *analysis = debag_analyze(analyze_path);
+
+        /* --static-db requires analysis; bail out before the sandbox path. */
+        if (static_db) {
+                if (!analysis) {
+                        fprintf(stderr, "209 debag: cannot analyze '%s' (not an ELF binary?)\n",
+                                binary);
+                        return 1;
+                }
+                int rc = debag_static_db_repl(analyze_path);
+                debag_analysis_free(analysis);
+                return rc;
+        }
+
         if (!analysis) {
                 fprintf(stderr, "209 debag: cannot analyze '%s' (not an ELF binary?)\n", binary);
                 /* Continue without analysis - seccomp will use defaults only */
@@ -3614,6 +3633,10 @@ static int cmd_debag(int argc, char **argv)
                 debag_analysis_free(analysis);
                 return 0;
         }
+
+        /* If --static-db, drop into the rizin-style read-only ELF REPL.
+         * No sandbox, no exec - just inspect the binary. (Already handled
+         * above, before the analysis-failure warning.) */
 
         /* Run under the hybrid sandbox */
         const char **cmd_argv = malloc((argc - i + 1) * sizeof(char *));
