@@ -10,7 +10,7 @@ to `src/debag/dynamic_db.c` in this repo).
 Items from the "Recommended port priority" list below that have landed
 on `main`:
 
-1. **Forward signals on `dc`** (recommendation #1, the one-line fix).
+1. Forward signals on `dc` (recommendation #1, the one-line fix).
    Commit `d61e232`. `cmd_dc` now passes `(void *)(intptr_t)s->last_sig`
    to `PTRACE_CONT` instead of `NULL`, so the signal that last stopped
    the child is forwarded to it. `handle_sigtrap` clears `last_sig` to
@@ -19,7 +19,7 @@ on `main`:
    at 0 (session_init never calls handle_stop), so the first `dc`
    forwards nothing.
 
-2. **Signal disposition table + `handle` command** (recommendation #2,
+2. Signal disposition table + `handle` command (recommendation #2,
    ~80 LOC). Commit `c5f0a38`. Three `unsigned char[NSIG]` arrays
    (`sig_stop`, `sig_print`, `sig_program`) on `dyn_session_t`, with
    gdb-style defaults: SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGINT
@@ -33,7 +33,7 @@ on `main`:
    reimplementation from the description below; gdb is GPL-3.0, 2O9 is
    GPL-2.0-only, so no code was copied.
 
-3. **Don't delete `dso` temp bp on unrelated stops** (recommendation
+3. Don't delete `dso` temp bp on unrelated stops (recommendation
    #3, ~10 LOC). Commit `6f6c13f`. `cmd_dso`'s temp-breakpoint
    cleanup now only fires when the child has exited or been killed; if
    the step-over was interrupted by a different breakpoint, a signal
@@ -45,7 +45,7 @@ on `main`:
    `bp_step_resume`, used at `gdb/infrun.c:8013-8048`), which stays
    installed across signal stops and is hit when the handler returns.
 
-4. **Hardware watchpoints via DR0-DR7** (recommendation #6, ~200 LOC).
+4. Hardware watchpoints via DR0-DR7 (recommendation #6, ~200 LOC).
    Commit `3fbb67c`. Adds `hw_watchpoint_t` (slot, addr, len, rw,
    enabled) and a 4-slot `hw_wps[]` array on `dyn_session_t`, plus a
    `pending_hw_exec` int for execute-watchpoint RF handling. DR7 is
@@ -95,7 +95,7 @@ on `main`:
    description; gdb's `nat/x86-dregs.c` is GPL-3.0, 2O9 is
    GPL-2.0-only, so no gdb code was copied.
 
-5. **Close fds and reset signals in the child** (recommendation #5,
+5. Close fds and reset signals in the child (recommendation #5,
    ~10 LOC). Commit `600d881`. The child branch of the fork now calls
    `close_range(3, ~0U, 0)` (with a `sysconf(_SC_OPEN_MAX)` + `close()`
    loop fallback for kernels < 5.9 / glibc < 2.34) before `execvp`, so
@@ -104,14 +104,14 @@ on `main`:
    SIGQUIT, SIGPIPE, etc.) to default disposition. Mirrors
    `gdb/nat/fork-inferior.c:319,353`.
 
-6. **C++ symbol demangling** (recommendation #6, ~20 LOC). Commit
+6. C++ symbol demangling (recommendation #6, ~20 LOC). Commit
    `3a88814`. `dlopen("libstdc++.so.6", RTLD_LAZY)` at first use, dlsym
    `__cxa_demangle`. Applied in `sym`, `bt`, and breakpoint-hit output.
    The mangled name is shown alongside the demangled form so the user
    can match against `nm` output. `--no-demangle` flag in
    `debag_policy_t` disables. `-ldl` added to LIBS.
 
-7. **Stack-scan backtrace fallback** (recommendation #7, ~30 LOC).
+7. Stack-scan backtrace fallback (recommendation #7, ~30 LOC).
    Commit `e79535f`. When the rbp walk ends prematurely (frameless
    function, stripped binary), scans from `rsp` upward for ~4 KB,
    8 bytes at a time, looking for values that fall within an
@@ -120,7 +120,7 @@ on `main`:
    16 candidates. `bt scan` forces the scan even when the rbp walk
    succeeded.
 
-8. **Breakpoint `hit_count` and `ignore_count`** (recommendation #8,
+8. Breakpoint `hit_count` and `ignore_count` (recommendation #8,
    ~30 LOC). Commit `868634f`. Two new fields on `dyn_bp_t`:
    `hit_count` (incremented each time the bp is hit) and `ignore_count`
    (if > 0, decrement on each hit and auto-continue instead of
@@ -130,7 +130,7 @@ on `main`:
    0x<addr> hit (ignore count: N-1 remaining)` and auto-continues
    via `PTRACE_CONT`.
 
-9. **`PTRACE_O_TRACEFORK/VFORK/CLONE/EXEC`** (recommendation #9, one
+9. `PTRACE_O_TRACEFORK/VFORK/CLONE/EXEC` (recommendation #9, one
    line + event handler). Commit `116a1b8`. The parent now sets
    `PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK |
    PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC`
@@ -141,7 +141,7 @@ on `main`:
    signal (the event is synthetic). `info` shows the trace options.
    We don't follow into the child yet (that's a bigger lift).
 
-10. **Breakpoint conditions** (recommendation #10, ~60 LOC). Commit
+10. Breakpoint conditions (recommendation #10, ~60 LOC). Commit
     `868634f`. New `cond <addr> <expr>` command attaches a condition
     to a breakpoint. The evaluator is intentionally tiny, supporting
     only `<reg> <op> <value>` where `<reg>` is one of `rax`, `rbx`,
@@ -154,8 +154,6 @@ on `main`:
     clears the condition. `db` (list) shows conditions inline.
     Not a full expression evaluator; the study explicitly said
     "Conditions should accept `reg OP value` only."
-
-All 10 recommendations from this study are now ported.
 
 ## What 2O9's --dynamic-db has today
 
@@ -185,27 +183,27 @@ mechanism (`gdb/breakpoint.h:330` `class bp_location`, and
 `gdb/breakpoint.h:262` `struct bp_target_info`). The high-level struct
 tracks, at `gdb/breakpoint.h:810-918`:
 
-- `bptype type` (line 810) — one of 30+ kinds from `enum bptype` at
+- `bptype type` (line 810): one of 30+ kinds from `enum bptype` at
   `gdb/breakpoint.h:89-218` (bp_breakpoint, bp_hardware_breakpoint,
   bp_watchpoint, bp_hardware_watchpoint, bp_read_watchpoint,
   bp_access_watchpoint, bp_longjmp, bp_step_resume, bp_shlib_event,
   bp_thread_event, bp_catchpoint, bp_tracepoint, bp_dprintf, etc.)
-- `enable_state enable_state` (line 812) — bp_disabled / bp_enabled /
+- `enable_state enable_state` (line 812): bp_disabled / bp_enabled /
   bp_call_disabled
-- `bpdisp disposition` (line 814, enum at line 241-248) — disp_del,
+- `bpdisp disposition` (line 814, enum at line 241-248): disp_del,
   disp_del_at_next_stop, disp_disable, disp_donttouch
-- `int number` (line 816) — user-visible breakpoint number
+- `int number` (line 816): user-visible breakpoint number
 - `bool silent` (line 820)
-- `int ignore_count` (line 825) — auto-continue N times before stopping
+- `int ignore_count` (line 825): auto-continue N times before stopping
 - `int enable_count` (line 829)
-- `counted_command_line commands` (line 833) — gdb command list to run
+- `counted_command_line commands` (line 833): gdb command list to run
   on hit
-- `frame_id frame_id` (line 836) — break only at this frame
-- `gdb::unique_xmalloc_ptr<char> cond_string` (line 874) — condition
+- `frame_id frame_id` (line 836): break only at this frame
+- `gdb::unique_xmalloc_ptr<char> cond_string` (line 874): condition
   expression source
 - `int thread` (line 888), `int inferior` (line 892), `int task` (line
-  896) — thread/task scoping
-- `int hit_count` (line 902) — how many times this bp was hit
+  896): thread/task scoping
+- `int hit_count` (line 902): how many times this bp was hit
 
 2O9's `dyn_bp_t` at `2O9:69-77` has only: `used`, `enabled`,
 `inserted`, `temporary`, `addr`, `shadow` (one byte), `spec[128]`.
@@ -214,9 +212,9 @@ Missing everything except `enabled`/`addr`/`shadow`.
 The split between breakpoint and bp_location matters because gdb lets
 one logical breakpoint have many resolved locations (e.g. `break foo`
 when `foo` is inlined into five call sites). 2O9 has no inline support
-and conflates the two — that's fine for a first cut.
+and conflates the two. That's fine for a first cut.
 
-**Recommendation.** Add to `dyn_bp_t`: `int number`, `int hit_count`,
+Recommendation: Add to `dyn_bp_t`: `int number`, `int hit_count`,
 `int ignore_count`, `char cond[256]`. Wire `hit_count` into
 `handle_sigtrap` (2O9:448): increment on every hit, print `hit
 breakpoint N at 0x... (count=3)`. Implement `ignore_count`: decrement on
@@ -224,7 +222,7 @@ hit, auto-continue when >0. Implement `cond` as a tiny expression
 evaluator over registers (`rax==0`, `rdx!=0`): parse the comparison,
 fetch the register, compare. ~60 lines for the evaluator. New commands:
 `db <addr> if <expr>`, `db <addr> ignore <N>`, `db <addr> count` (print
-count). Do NOT port gdb's full expression language — that lives in
+count). Do NOT port gdb's full expression language; that lives in
 `gdb/eval.c` (~5000 lines) and depends on `gdb/value.c` (~5000 lines).
 
 ### 2. Continue / step semantics
@@ -233,21 +231,21 @@ count). Do NOT port gdb's full expression language — that lives in
 relevant pieces:
 
 - gdb's `next` over a call (`gdb/infrun.c:8013-8048`) sets a
-  step-resume breakpoint at the **caller's return address** and
-  continues, rather than single-stepping through the callee. 2O9's
+  step-resume breakpoint at the caller's return address and
+  continues. It does not single-step through the callee. 2O9's
   `dso` (`2O9:747-841`) does the same thing at instruction granularity:
   it decodes whether the current instruction is a call, sets a temp bp
-  at `rip + insn_len` (the return address), and continues. **This is
-  correct for instruction-level `nexti`** — what gdb calls `nexti`.
+  at `rip + insn_len` (the return address), and continues. This is
+  correct for instruction-level `nexti`, what gdb calls `nexti`.
   gdb's `next` is line-oriented and needs source line info.
 
 - gdb tracks `step_over_info` (`gdb/infrun.c:1521`) so that other
   threads don't trip the breakpoint being stepped over. 2O9 is
   single-threaded; this doesn't matter yet.
 
-- gdb installs **longjmp master breakpoints** (`gdb/breakpoint.h:180`
+- gdb installs longjmp master breakpoints (`gdb/breakpoint.h:180`
   `bp_longjmp_master`) at every longjmp target. When a stepped-over
-  function does `longjmp` out, gdb's step-resume bp is bypassed — but
+  function does `longjmp` out, gdb's step-resume bp is bypassed, but
   the longjmp bp fires, gdb notices the unwind, and re-evaluates. 2O9's
   `dso` over a function that longjmps would lose the temp bp entirely
   (it would just stay set at the original return address, never hit).
@@ -262,27 +260,27 @@ relevant pieces:
   the stop signal. 2O9 always passes 0 as the signal arg to
   `PTRACE_CONT` (`2O9:707`), swallowing the signal. For SIGALRM-based
   timers, SIGCHLD handlers, or any program that needs the signal
-  delivered, this **breaks the program**.
+  delivered, this breaks the program.
 
-**Recommendation.** Three changes:
+Recommendation: Three changes:
 
-1. **Forward `s->last_sig` on `dc`** unless the user has changed the
+1. Forward `s->last_sig` on `dc` unless the user has changed the
    disposition (see #7). One-line fix at `2O9:707`: replace `NULL` with
    `(void *)(intptr_t)s->last_sig`. Critical correctness bug.
 
-2. **Don't delete the `dso` temp bp on unrelated stops.** Change
+2. Don't delete the `dso` temp bp on unrelated stops. Change
    `2O9:831-838` to only clean up the temp bp if the stop was at
    `next_pc`. If the stop was elsewhere, leave the temp bp in place;
    the next `dc` will hit it. ~10 lines.
 
-3. **Track `dso` intent.** Add `int in_step_over; uintptr_t step_over_target;`
+3. Track `dso` intent. Add `int in_step_over; uintptr_t step_over_target;`
    to `dyn_session_t`. On `dc`, if `in_step_over` is set and the next
    stop matches `step_over_target`, clear it silently (don't print
    "hit breakpoint"). This mimics gdb's silent step-resume bp.
 
 Skip: gdb's displaced stepping (`gdb/infrun.c:1591+`), which is only
 needed for non-stop multi-threaded mode. Skip the longjmp master
-breakpoint machinery — it's the right answer but requires parsing
+breakpoint machinery. It's the right answer but requires parsing
 libpthread internals, not worth it for v1.
 
 ### 3. Memory access
@@ -290,8 +288,8 @@ libpthread internals, not worth it for v1.
 `gdb/linux-nat.c:179-233` documents gdb's strategy in a long comment:
 strongly prefer `/proc/PID/mem`, fall back to ptrace only if
 `/proc/PID/mem` is not writable. gdb opens the fd once at attach and
-holds it (`gdb/linux-nat.c:226-233`) **specifically to avoid the
-post-exec race** where re-opening would read the new address space.
+holds it (`gdb/linux-nat.c:226-233`) specifically to avoid the
+post-exec race where re-opening would read the new address space.
 gdb re-opens `/proc/PID/mem` after `PTRACE_EVENT_EXEC`
 (`gdb/linux-nat.c:2117` comment, `:3995-4082`) because the old fd
 returns EOF (zero bytes) on the post-exec address space.
@@ -299,10 +297,10 @@ returns EOF (zero bytes) on the post-exec address space.
 2O9 already matches gdb's fast-path design: opens `/proc/PID/mem` once
 in `session_init` (`2O9:1366`), holds the fd, falls back to PEEKDATA
 per-call (`2O9:272-284`). For writes, 2O9 uses `PTRACE_POKETEXT`
-directly (`2O9:290-300`) instead of `/proc/PID/mem` writes —
-equivalent for 1-byte bp swaps.
+directly (`2O9:290-300`) instead of `/proc/PID/mem` writes.
+Equivalent for 1-byte bp swaps.
 
-**Recommendation.** No code change for v1; the current design is
+Recommendation: No code change for v1; the current design is
 correct. The one gap (re-open `mem_fd` after `PTRACE_EVENT_EXEC`) only
 matters once `PTRACE_O_TRACEEXEC` is added (#9).
 
@@ -321,7 +319,7 @@ orig_rax, cs, ss, fs_base, gs_base. Compared to gdb's
 `amd64_linux_gregset32_reg_offset` table at
 `gdb/amd64-linux-nat.c:72-97`, 2O9 is missing: `ds`, `es`, `fs`, `gs`
 (segment registers without `_base`; mostly zero in long mode, low
-value). 2O9 is also missing DR0-DR7 (debug registers — needed for #8),
+value). 2O9 is also missing DR0-DR7 (debug registers, needed for #8),
 and all FP/SSE/AVX state.
 
 gdb fetches FP/SSE/AVX via `PTRACE_GETREGSET` with `NT_X86_XSTATE`
@@ -330,11 +328,11 @@ gdb fetches FP/SSE/AVX via `PTRACE_GETREGSET` with `NT_X86_XSTATE`
 debugging this is fine; if a user wants to inspect xmm0, they're out
 of luck.
 
-**Recommendation.** No urgent change. Optionally add `dr0`-`dr7` to
+Recommendation: No urgent change. Optionally add `dr0`-`dr7` to
 the register table for hardware breakpoint support (see #8). Skip
-FP/SSE/AVX — the use cases that need it (numerical code, SIMD) are
+FP/SSE/AVX. The use cases that need it (numerical code, SIMD) are
 rare in a system-package-debugging context, and the XSTATE format is
-unpleasant. Skip gdb's per-register-status model — overkill for one
+unpleasant. Skip gdb's per-register-status model; overkill for one
 thread on one arch.
 
 ### 5. Backtrace
@@ -342,9 +340,9 @@ thread on one arch.
 gdb's frame unwinder (`gdb/frame.c`) is a chain of "sniffers" tried in
 priority order. For amd64 (`gdb/amd64-tdep.c:3620-3622`):
 1. `amd64_sigtramp_frame_unwind` (signal trampoline frames)
-2. `dwarf2_frame_unwind` (`gdb/dwarf2/frame.c:1298`) — DWARF CFI from
+2. `dwarf2_frame_unwind` (`gdb/dwarf2/frame.c:1298`): DWARF CFI from
    `.debug_frame` or `.eh_frame`
-3. `amd64_frame_unwind` (`gdb/amd64-tdep.c:3021`) — prologue analyzer
+3. `amd64_frame_unwind` (`gdb/amd64-tdep.c:3021`): prologue analyzer
 4. `amd64_epilogue_frame_unwind` and `amd64_epilogue_override_frame_unwind`
    for functions in their epilogue
 
@@ -370,9 +368,9 @@ binaries because C++ exceptions need it).
 2O9 detects this gracefully (`2O9:1083-1086`: "frameless function?")
 but produces no useful backtrace in those cases.
 
-**Recommendation.** Two-tier approach:
+Recommendation: Two-tier approach:
 
-1. **Cheap heuristic unwinder (~30 lines).** Scan the stack from `rsp`
+1. Cheap heuristic unwinder (~30 lines). Scan the stack from `rsp`
    upward, reading 8-byte words. For each word, check whether it falls
    in the binary's executable segment range (from
    `s->analysis`'s PT_LOAD headers, which 2O9 already parses). If so,
@@ -382,14 +380,14 @@ but produces no useful backtrace in those cases.
    values that happen to look like code addresses) but far better than
    nothing on stripped binaries. Add as `bt scan` command.
 
-2. **Prologue-aware unwinder (~150 lines).** When the function at PC
+2. Prologue-aware unwinder (~150 lines). When the function at PC
    has a recognizable prologue (`55 48 89 e5` = `push %rbp; mov
    %rsp,%rbp`), use rbp-chain. When it doesn't, scan the function's
    first 64 bytes for `sub $X,%rsp` to find the frame size, then read
    the return address from `[rsp + frame_size]`. This is what
    `amd64_analyze_prologue` does at `gdb/amd64-tdep.c:2724-2752`.
 
-Skip `.eh_frame` parsing for v1 — `gdb/dwarf2/frame.c` is 2224 lines
+Skip `.eh_frame` parsing for v1. `gdb/dwarf2/frame.c` is 2224 lines
 and depends on `gdb/dwarf2/read.c` (18558 lines). A minimal clean-room
 EH_FRAME reader that handles only the `DW_CFA_def_cfa_offset`,
 `DW_CFA_def_cfa_register`, `DW_CFA_offset` opcodes would be ~500 lines
@@ -405,38 +403,38 @@ at `gdb/elfread.c:345-653`. 2O9 already does this in
 
 What 2O9 doesn't do:
 
-- **C++ demangling.** gdb uses `libiberty/cp-demangle.c` (vendored,
+- C++ demangling. gdb uses `libiberty/cp-demangle.c` (vendored,
   ~6000 lines, or `__cxa_demangle` from libstdc++). The demangled name
   is stored in `minimal_symbol` and shown in backtraces, breakpoint
   listings, and `info functions`. 2O9's `sym main` shows `_Z4mainv`
-  for a C++ binary, not `main()`. This is high-leverage for any C++
+  for a C++ binary, not `main()`. This is high-value for any C++
   target (libalpm itself is C, but plugins or LD_PRELOAD'd helpers may
   not be).
 
-- **`.debug_line` parsing.** gdb's `find_sal_for_pc`
+- `.debug_line` parsing. gdb's `find_sal_for_pc`
   (`gdb/symtab.c:3164`) returns source file:line for an address. 2O9's
   `sym_for_addr` (`2O9:119`) returns just `name + offset`. A
   `bt` frame in 2O9 looks like `#0 0x401234 <foo+0x14>`; in gdb it
   looks like `#0 0x401234 in foo (argc=2) at src/foo.c:42`. The
   difference is enormous for actual debugging.
 
-- **Inline frames.** gdb shows inline function calls as separate
+- Inline frames. gdb shows inline function calls as separate
   frames in `bt` (e.g. `#0 std::vector::push_back` then `#1
   std::sort`). 2O9 has no concept of inlining.
 
-**Recommendation.** Do (a) first.
+Recommendation: Do (a) first.
 
-- **C++ demangling.** Use `__cxa_demangle` from `libstdc++_exp` (link
+- C++ demangling. Use `__cxa_demangle` from `libstdc++_exp` (link
   with `-lstdc++_exp`) OR vendor `libiberty/cp-demangle.c` (it's
-  GPL-3.0+libiberty exception, which is **incompatible** with 2O9's
+  GPL-3.0+libiberty exception, which is incompatible with 2O9's
   GPL-2.0-only). Safest path: dynamically `dlopen("libstdc++.so.6")`
   and look up `__cxa_demangle`. If absent, fall back to printing the
   mangled name. ~20 lines. Add to `sym_for_addr` and to `bt` output.
 
-- **`.debug_line` parsing.** ~500 lines for a minimal DWARF line
+- `.debug_line` parsing. ~500 lines for a minimal DWARF line
   number program reader. Worth doing eventually but skip for v1.
 
-- **Inline frames.** Skip; requires `.debug_info` parsing.
+- Inline frames. Skip; requires `.debug_info` parsing.
 
 ### 7. Signal handling
 
@@ -465,15 +463,15 @@ Otherwise, if `signal_print`, print and continue. If
 any signal. `cmd_dc` (`2O9:707`) always passes 0 (swallow) to
 `PTRACE_CONT`.
 
-**This is the single biggest correctness bug in 2O9's dynamic-db.**
-For any program that uses signals for legitimate purposes — timers
-(SIGALRM), child reaping (SIGCHLD), I/O (SIGIO), user-defined
-(SIGUSR1/2) — `dc` after a signal stop silently eats the signal,
-breaking the program. Even SIGSEGV: the user stops at the fault, types
-`dc` expecting the default handler (death), but the signal is
-swallowed, the instruction re-executes, faults again, infinite loop.
+This is the single biggest correctness bug in 2O9's dynamic-db. For
+any program that uses signals for legitimate purposes, timers (SIGALRM),
+child reaping (SIGCHLD), I/O (SIGIO), user-defined (SIGUSR1/2), `dc`
+after a signal stop silently eats the signal, breaking the program.
+Even SIGSEGV: the user stops at the fault, types `dc` expecting the
+default handler (death), but the signal is swallowed, the instruction
+re-executes, faults again, infinite loop.
 
-**Recommendation.** Port the 3-table model. ~80 lines.
+Recommendation: Port the 3-table model. ~80 lines.
 
 - Add to `dyn_session_t`: `uint8_t sig_stop[NSIG]; uint8_t sig_print[NSIG]; uint8_t sig_pass[NSIG];`
 - Initialize in `session_init`: stop+print+pass for SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGINT; pass-only for everything else.
@@ -507,19 +505,19 @@ SIGTRAP, `x86_dr_stopped_by_watchpoint` (`gdb/nat/x86-dregs.c:682`)
 checks DR6 to see if it was a debug-register trap (vs an INT3) and
 returns the watched address via `x86_dr_stopped_data_address`.
 
-**Why this matters.** Hardware watchpoints (`watch *0x1234`) stop the
+Why this matters: Hardware watchpoints (`watch *0x1234`) stop the
 program on the exact instruction that writes a watched memory
-location. This is the single most powerful feature gdb has for
+location. This is the single most useful feature gdb has for
 debugging memory corruption, use-after-free, and race conditions.
 Software equivalents (single-step and check) are 1000x slower and
 unusable in practice.
 
-**License issue.** gdb's `nat/x86-dregs.c` is GPL-3.0. 2O9 is
-GPL-2.0-only. **Cannot copy verbatim.** The `nat/` subdir is
+License issue: gdb's `nat/x86-dregs.c` is GPL-3.0. 2O9 is
+GPL-2.0-only. Cannot copy verbatim. The `nat/` subdir is
 specifically structured for reuse (gdbserver uses it), but the license
 is incompatible.
 
-**Recommendation.** Reimplement clean-room. The algorithm is
+Recommendation: Reimplement clean-room. The algorithm is
 well-documented in the Intel SDM Vol 3, §17.2. ~200 lines of C:
 
 - `static unsigned long dr_mirror[4]; static unsigned long dr7_mirror;`
@@ -535,7 +533,7 @@ well-documented in the Intel SDM Vol 3, §17.2. ~200 lines of C:
   (write watchpoint), `rw <addr> <len>` (read watchpoint), `aw <addr>
   <len>` (access watchpoint).
 
-HIGH leverage, MEDIUM effort. Top priority after #7 (signal handling).
+HIGH value, MEDIUM effort. Top priority after #7 (signal handling).
 
 ### 9. Thread support
 
@@ -556,14 +554,14 @@ waitstatuses.
 
 2O9 sets only `PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL`
 (`2O9:1324`). If the tracee spawns a thread via `pthread_create`
-(which calls `clone(CLONE_THREAD)`), the new thread runs **untraced**
-— it hits no breakpoints, runs freely, and can crash the program
+(which calls `clone(CLONE_THREAD)`), the new thread runs untraced
+; it hits no breakpoints, runs freely, and can crash the program
 while 2O9 is single-stepping the main thread. If the tracee forks,
 the child also runs untraced.
 
-**Recommendation.** Two phases:
+Recommendation: Two phases:
 
-- **Phase 1 (one line, do now).** Add
+- Phase 1 (one line, do now). Add
   `PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE |
   PTRACE_O_TRACEEXEC` to the `PTRACE_SETOPTIONS` call at `2O9:1324`.
   This causes new children to be auto-stopped with
@@ -571,31 +569,31 @@ the child also runs untraced.
   2O9 doesn't yet switch between them, this prevents them from
   running wild.
 
-- **Phase 2 (~150 lines, defer).** Maintain `pid_t threads[MAX_THREADS]`
+- Phase 2 (~150 lines, defer). Maintain `pid_t threads[MAX_THREADS]`
   in `dyn_session_t`. On `PTRACE_EVENT_FORK/CLONE`, wait for the new
   child, add to the list, stop it. Add commands: `info threads`
-  (list), `thread N` (switch — sets the active pid for `dc`/`ds`/`dr`).
+  (list), `thread N` (switch, sets the active pid for `dc`/`ds`/`dr`).
   Each thread needs its own register snapshot; `s->regs` becomes
   per-thread.
 
 Skip gdb's per-thread step-resume bp coordination and
-scheduler-locking mode — those are for non-stop debugging, well
+scheduler-locking mode. Those are for non-stop debugging, well
 beyond 2O9's scope.
 
 ### 10. Process lifecycle
 
 gdb's `nat/fork-inferior.c:240-360` does, in the child after fork:
 
-- `close_most_fds()` (`gdb/nat/fork-inferior.c:319`) — close all fds
+- `close_most_fds()` (`gdb/nat/fork-inferior.c:319`): close all fds
   except stdin/stdout/stderr, so they don't leak to the inferior.
-- `chdir(inferior_cwd)` if set (line 325) — 2O9 doesn't support
+- `chdir(inferior_cwd)` if set (line 325): 2O9 doesn't support
   `--cwd`; minor.
-- `postfork_child_hook()` (line 333) — terminal setup.
-- `traceme_fun()` (line 342) — the `PTRACE_TRACEME` call.
-- `restore_original_signals_state()` (line 353) — reset all signal
+- `postfork_child_hook()` (line 333): terminal setup.
+- `traceme_fun()` (line 342): the `PTRACE_TRACEME` call.
+- `restore_original_signals_state()` (line 353): reset all signal
   handlers to SIG_DFL, so the inferior isn't surprised by inherited
   dispositions.
-- `execv` (later) — gdb supports both `execv` (no shell) and
+- `execv` (later): gdb supports both `execv` (no shell) and
   `execv` via `$SHELL -c` (for shell features like globs).
 
 gdb's parent (`gdb/nat/fork-inferior.c:426-516`) handles the
@@ -606,11 +604,11 @@ the "pending_execs" counter for shell-wrap cases.
 
 - `fork()` then in the child: `PTRACE_TRACEME`,
   `personality(ADDR_NO_RANDOMIZE)`, `execvp`. That's it.
-- **Missing**: close fds, reset signal handlers.
+- Missing: close fds, reset signal handlers.
 
-**Bugs in 2O9:**
+Bugs in 2O9:
 
-1. **fd leak.** If 2O9 is run from a script with many open fds (e.g.
+1. fd leak. If 2O9 is run from a script with many open fds (e.g.
    `209 debag --dynamic-db -- ./binary < input.txt > output.txt 3< some_fd`),
    the child inherits all of them. The child may behave differently
    (e.g. `select` on an unexpected fd). Fix: in the child, after
@@ -618,14 +616,14 @@ the "pending_execs" counter for shell-wrap cases.
    fall back to `for (int fd = 3; fd < sysconf(_SC_OPEN_MAX); fd++)
    close(fd);`. ~5 lines.
 
-2. **Signal disposition inheritance.** 2O9's REPL probably ignores
+2. Signal disposition inheritance. 2O9's REPL probably ignores
    SIGINT (so Ctrl-C in the REPL prints a new prompt instead of
    killing 2O9). The child inherits this. If the child expects
    default SIGINT behavior (death), it instead ignores it. Fix: in
    the child, after `PTRACE_TRACEME`, `signal(SIGINT, SIG_DFL);` for
    all signals 2O9 has overridden. ~5 lines.
 
-3. **No exec event handling.** When the child `execve`s another
+3. No exec event handling. When the child `execve`s another
    binary (common: `bash` exec'ing `ls`), the new binary's symbols
    are different. 2O9's `s->analysis` still points at the old binary.
    Fix: on `PTRACE_EVENT_EXEC`, re-run `debag_analyze` on the new
@@ -633,65 +631,65 @@ the "pending_execs" counter for shell-wrap cases.
    `load_offset`. Requires Phase 1 of #9 first.
 
 Skip: setuid binary handling (gdb warns; the kernel drops privileges
-when ptraced — edge case), terminal pty allocation (2O9 is
+when ptraced, edge case), terminal pty allocation (2O9 is
 pipe-oriented), `LD_PRELOAD` injection (gdbserver's domain).
 
 ## Recommended port priority
 
-Ranked by leverage / effort (highest first):
+Ranked by value / effort (highest first):
 
-1. **Forward signals on `dc`** (#7). One-line fix at `2O9:707`.
-   Without this, any signal-using program is un-debuggable. **Do
-   today.**
+1. Forward signals on `dc` (#7). One-line fix at `2O9:707`.
+   Without this, any signal-using program is un-debuggable. Do
+   today.
 
-2. **Signal disposition table + `handle` command** (#7). ~80 lines.
+2. Signal disposition table + `handle` command (#7). ~80 lines.
    Lets the user say "ignore SIGALRM", "stop on SIGUSR1". Required
    for non-trivial debugging.
 
-3. **Don't delete `dso` temp bp on unrelated stops** (#2). ~10 lines.
+3. Don't delete `dso` temp bp on unrelated stops (#2). ~10 lines.
    Fixes a real bug: stepping over a call that gets a signal loses
    the step-over target.
 
-4. **Close fds and reset signals in the child** (#10). ~10 lines.
+4. Close fds and reset signals in the child (#10). ~10 lines.
    Prevents surprising child behavior when 2O9 is run from scripts.
 
-5. **C++ symbol demangling** (#6). ~20 lines (dlopen
+5. C++ symbol demangling (#6). ~20 lines (dlopen
    `__cxa_demangle`). Huge readability win for C++ targets.
 
-6. **Hardware watchpoints via DR0-DR7** (#8). ~200 lines clean-room.
+6. Hardware watchpoints via DR0-DR7 (#8). ~200 lines clean-room.
    The killer feature for memory-corruption debugging. Top
    "new feature" priority.
 
-7. **Stack-scan backtrace fallback** (#5). ~30 lines. Salvages a
+7. Stack-scan backtrace fallback (#5). ~30 lines. Salvages a
    useful backtrace from stripped/frameless binaries.
 
-8. **Breakpoint `hit_count` and `ignore_count`** (#1). ~30 lines.
+8. Breakpoint `hit_count` and `ignore_count` (#1). ~30 lines.
    Quality-of-life for breakpoint-heavy sessions.
 
-9. **`PTRACE_O_TRACEFORK/CLONE/EXEC`** (#9, phase 1). One line.
+9. `PTRACE_O_TRACEFORK/CLONE/EXEC` (#9, phase 1). One line.
    Prevents child threads from running wild.
 
-10. **Breakpoint conditions** (#1). ~60 lines for a tiny
+10. Breakpoint conditions (#1). ~60 lines for a tiny
     register-comparison evaluator. Useful for "stop only when
     `rdi == 0`".
 
-## What NOT to port
+## What not to port
 
-- **Full expression evaluator** (`gdb/eval.c`, `gdb/value.c`, ~10000
+- Full expression evaluator (`gdb/eval.c`, `gdb/value.c`, ~10000
   lines). Conditions should accept `reg OP value` only.
-- **`.debug_info` reader** (`gdb/dwarf2/read.c`, 18558 lines). Local
+- `.debug_info` reader (`gdb/dwarf2/read.c`, 18558 lines). Local
   variables, types, inlined frames all depend on it. 2O9's ELF
   symbol table is enough.
-- **`.debug_line` reader**. ~500 lines for a minimal version; defer.
-- **`.eh_frame` CFI unwinder** (`gdb/dwarf2/frame.c`, 2224 lines).
+- `.debug_line` reader. ~500 lines for a minimal version; defer.
+- `.eh_frame` CFI unwinder (`gdb/dwarf2/frame.c`, 2224 lines).
   Prologue-aware + stack-scan covers 90% for 10% of the code.
-- **Displaced stepping** (`gdb/infrun.c:1591+`). Only needed for
+- Displaced stepping (`gdb/infrun.c:1591+`). Only needed for
   non-stop multi-threaded mode.
-- **`struct target_ops`** (`gdb/target.c`, 4635 lines) and
-  **`struct gdbarch`** (`gdb/gdbarch.c`, ~12000 lines generated).
+- `struct target_ops` (`gdb/target.c`, 4635 lines) and
+  `struct gdbarch` (`gdb/gdbarch.c`, ~12000 lines generated).
   2O9 is ptrace-on-Linux-x86-64 forever; the abstraction buys
   nothing.
-- **Python scripting** (`gdb/python/`), **reverse debugging**
-  (`gdb/record-full.c`), **non-stop mode**, **gdbserver/remote
-  protocol** (`gdb/remote.c`, ~15000 lines), **tui/CLI command
-  parser** (`gdb/cli/`, `gdb/tui/`). All out of scope.
+- Python scripting (`gdb/python/`), reverse debugging
+  (`gdb/record-full.c`), non-stop mode, gdbserver/remote
+  protocol (`gdb/remote.c`, ~15000 lines), tui/CLI command
+  parser (`gdb/cli/`, `gdb/tui/`). All out of scope.
