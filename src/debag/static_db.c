@@ -69,6 +69,7 @@ static void cmd_info_symbols(repl_t *r, int argc, char **argv);
 static void cmd_info_entry(repl_t *r, int argc, char **argv);
 static void cmd_info_imports(repl_t *r, int argc, char **argv);
 static void cmd_info_strings(repl_t *r, int argc, char **argv);
+static void cmd_info_strings_all(repl_t *r, int argc, char **argv);
 static void cmd_print_hex(repl_t *r, int argc, char **argv);
 static void cmd_print_hexw(repl_t *r, int argc, char **argv);
 static void cmd_print_hexq(repl_t *r, int argc, char **argv);
@@ -98,6 +99,7 @@ static const struct {
     {"is",    "list symbols",                          cmd_info_symbols},
     {"ie",    "list entry points",                     cmd_info_entry},
     {"iz",    "list strings in .rodata/.data",         cmd_info_strings},
+    {"izz",   "list strings in ALL sections",          cmd_info_strings_all},
     {"ii",    "list imports (with GOT slot addresses)",  cmd_info_imports},
     {"px",    "hex dump at <addr> <len>",              cmd_print_hex},
     {"pxw",   "hex dump as 32-bit LE words",           cmd_print_hexw},
@@ -592,14 +594,164 @@ static void cmd_info_entry(repl_t *r, int argc, char **argv)
     printf("entry0: 0x%016" PRIx64 "\n", a->entry_point);
 }
 
-/* List printable-ASCII runs of length >= 4 in SHF_ALLOC && !SHF_EXECINSTR
- * sections (.rodata, .data, .data.rel.ro, etc.). Each run is printed
- * as:  `vaddr  length  "string"` */
+/* ── String extraction (iz / izz) ──────────────────────────────────
+ *
+ * Clean-room reimplementation of rizin's string-extraction pass
+ * (librz/util/str_search.c:303-342 process_one_string + the
+ * check_ascii_freq / RzStrEnc dispatch). We support two encodings:
+ *
+ *   ascii  — printable (0x20..0x7e) run, length >= 4 bytes, terminated
+ *            by a non-printable byte (or end of section).
+ *   utf16  — UTF-16LE run: pairs of (printable_lo, 0x00), length >= 4
+ *            chars (8 bytes), terminated by a pair whose high byte
+ *            isn't 0 or whose low byte isn't printable.
+ *
+ * Output format:
+ *   iz:   0xADDR  ascii  "string"     (or `utf16` for UTF-16LE)
+ *   izz:  0xADDR  <section>  ascii  "string"
+ *         (section name column added so the user can see which
+ *         section the string came from when scanning the whole binary)
+ *
+ * iz subcommands:
+ *   iz           — both ASCII and UTF-16LE (default)
+ *   iz ascii     — ASCII only
+ *   iz utf16     — UTF-16LE only (also accepts `utf16le`)
+ *
+ * izz subcommands: same three forms, same semantics.
+ */
+
+/* Escape-print one character of a string body. `c` is the byte to emit;
+ * it's already known to be printable (the scanners only collect printable
+ * runs), but we still escape `"` and `\` so the output is unambiguous. */
+static void print_string_char(uint8_t c)
+{
+    if (c == '"')      printf("\\\"");
+    else if (c == '\\') printf("\\\\");
+    else                putchar(c);
+}
+
+/* Print an ASCII string at vaddr. `p` points at the first byte, `len`
+ * is the run length in bytes. If `section_name` is non-NULL it's emitted
+ * between the address and the type column (izz style); if NULL the
+ * column is omitted (iz style). */
+static void print_string_ascii(uint64_t vaddr, const uint8_t *p, size_t len,
+                                const char *section_name)
+{
+    if (section_name)
+        printf("0x%016" PRIx64 "  %-12s ascii  \"",
+               vaddr, section_name);
+    else
+        printf("0x%016" PRIx64 "  ascii  \"", vaddr);
+    for (size_t i = 0; i < len; i++) print_string_char(p[i]);
+    printf("\"\n");
+}
+
+/* Print a UTF-16LE string at vaddr. `p` points at the first byte (the
+ * low byte of the first char); `char_count` is the number of 2-byte
+ * chars. The scanners already verified high-byte == 0 for every char,
+ * so we just emit the low bytes. */
+static void print_string_utf16(uint64_t vaddr, const uint8_t *p, size_t char_count,
+                                const char *section_name)
+{
+    if (section_name)
+        printf("0x%016" PRIx64 "  %-12s utf16  \"",
+               vaddr, section_name);
+    else
+        printf("0x%016" PRIx64 "  utf16  \"", vaddr);
+    for (size_t i = 0; i < char_count; i++) print_string_char(p[i * 2]);
+    printf("\"\n");
+}
+
+/* Scan a byte buffer for ASCII and UTF-16LE strings, calling the
+ * per-string printer for each one found. `buf` is the section bytes
+ * (or whole-file bytes for izz); `bufsz` is the size; `vaddr_base` is
+ * the virtual address of buf[0]; `section_name` is forwarded to the
+ * printer (NULL = omit the section column). `want_ascii` and
+ * `want_utf16` select which encodings to emit. */
+static void scan_strings_in_buf(const uint8_t *buf, size_t bufsz,
+                                uint64_t vaddr_base,
+                                const char *section_name,
+                                int want_ascii, int want_utf16)
+{
+    if (want_ascii) {
+        size_t run_start = 0, run_len = 0;
+        for (size_t j = 0; j < bufsz; j++) {
+            uint8_t c = buf[j];
+            if (isprint(c) && c != 0) {
+                if (run_len == 0) run_start = j;
+                run_len++;
+            } else {
+                if (run_len >= 4)
+                    print_string_ascii(vaddr_base + run_start,
+                                       buf + run_start, run_len,
+                                       section_name);
+                run_len = 0;
+            }
+        }
+        if (run_len >= 4)
+            print_string_ascii(vaddr_base + run_start,
+                               buf + run_start, run_len, section_name);
+    }
+
+    if (want_utf16) {
+        /* Walk 2 bytes at a time. A run is a sequence of (printable, 0x00)
+         * pairs. Minimum 4 chars = 8 bytes. The +1 in `j + 1 < bufsz`
+         * guards the high-byte read. */
+        size_t run_start = 0, run_chars = 0;
+        for (size_t j = 0; j + 1 < bufsz; j += 2) {
+            uint8_t lo = buf[j];
+            uint8_t hi = buf[j + 1];
+            if (isprint(lo) && lo != 0 && hi == 0) {
+                if (run_chars == 0) run_start = j;
+                run_chars++;
+            } else {
+                if (run_chars >= 4)
+                    print_string_utf16(vaddr_base + run_start,
+                                       buf + run_start, run_chars,
+                                       section_name);
+                run_chars = 0;
+            }
+        }
+        if (run_chars >= 4)
+            print_string_utf16(vaddr_base + run_start,
+                               buf + run_start, run_chars, section_name);
+    }
+}
+
+/* Parse the iz/izz subcommand argument. Returns:
+ *   0 on success (with *want_ascii and *want_utf16 filled in),
+ *  -1 on unrecognized subcommand (after printing a diagnostic). */
+static int parse_string_filter(int argc, char **argv,
+                                int *want_ascii, int *want_utf16)
+{
+    *want_ascii = 1;
+    *want_utf16 = 1;
+    if (argc < 2) return 0;
+    if (strcmp(argv[1], "ascii") == 0) {
+        *want_utf16 = 0;
+        return 0;
+    }
+    if (strcmp(argv[1], "utf16") == 0 || strcmp(argv[1], "utf16le") == 0) {
+        *want_ascii = 0;
+        return 0;
+    }
+    fprintf(stderr, "debag: unknown string subcommand '%s' "
+            "(expected 'ascii' or 'utf16')\n", argv[1]);
+    return -1;
+}
+
+/* `iz [ascii|utf16]` — list printable strings in SHF_ALLOC && !SHF_EXECINSTR
+ * sections (.rodata, .data, .data.rel.ro, etc.). Detects both 8-bit
+ * ASCII runs and UTF-16LE runs, minimum 4 chars. Output format:
+ *   0xADDR  ascii  "string"
+ *   0xADDR  utf16  "string"
+ * With no subcommand, prints both. `iz ascii` / `iz utf16` filter. */
 static void cmd_info_strings(repl_t *r, int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    const debag_analysis_t *a = r->a;
+    int want_ascii, want_utf16;
+    if (parse_string_filter(argc, argv, &want_ascii, &want_utf16) < 0) return;
 
+    const debag_analysis_t *a = r->a;
     for (size_t i = 0; a->sections && i < a->section_count; i++) {
         const debag_elf_section_t *s = &a->sections[i];
         if (!(s->flags & SHF_ALLOC_X))  continue;
@@ -611,28 +763,48 @@ static void cmd_info_strings(repl_t *r, int argc, char **argv)
         if (!buf) continue;
         ssize_t got = pread(r->fd, buf, s->size, (off_t)s->offset);
         if (got <= 0) { free(buf); continue; }
+        scan_strings_in_buf(buf, (size_t)got, s->vaddr,
+                            /*section_name=*/NULL,
+                            want_ascii, want_utf16);
+        free(buf);
+    }
+}
 
-        size_t run_start = 0;
-        size_t run_len = 0;
-        for (size_t j = 0; j < (size_t)got; j++) {
-            uint8_t c = buf[j];
-            if (isprint(c) && c != 0) {
-                if (run_len == 0) run_start = j;
-                run_len++;
-            } else {
-                if (run_len >= 4) {
-                    printf("0x%016" PRIx64 "  %-4zu  %.*s\n",
-                           s->vaddr + run_start, run_len,
-                           (int)run_len, buf + run_start);
-                }
-                run_len = 0;
-            }
-        }
-        if (run_len >= 4) {
-            printf("0x%016" PRIx64 "  %-4zu  %.*s\n",
-                   s->vaddr + run_start, run_len,
-                   (int)run_len, buf + run_start);
-        }
+/* `izz [ascii|utf16]` — like `iz` but scans ALL sections (drops the
+ * SHF_ALLOC filter), including `.text`, `.comment`, `.note.*`, etc.
+ * Useful for finding strings in unusual places (e.g. error messages
+ * embedded in `.text`, compiler version stamps in `.comment`). The
+ * section name is printed before the type column so the user can see
+ * where each string came from:
+ *   0xADDR  .rodata   ascii  "Hello"
+ *   0xADDR  .text     ascii  "Error: %s"
+ *   0xADDR  .comment  ascii  "GCC: 12.2.0"
+ */
+static void cmd_info_strings_all(repl_t *r, int argc, char **argv)
+{
+    int want_ascii, want_utf16;
+    if (parse_string_filter(argc, argv, &want_ascii, &want_utf16) < 0) return;
+
+    const debag_analysis_t *a = r->a;
+    for (size_t i = 0; a->sections && i < a->section_count; i++) {
+        const debag_elf_section_t *s = &a->sections[i];
+        if (s->type == SHT_NOBITS)      continue;
+        if (s->size == 0)               continue;
+
+        uint8_t *buf = malloc(s->size);
+        if (!buf) continue;
+        ssize_t got = pread(r->fd, buf, s->size, (off_t)s->offset);
+        if (got <= 0) { free(buf); continue; }
+        /* For SHF_ALLOC sections the address column is the virtual
+         * address (matches iz). For non-ALLOC sections (.comment,
+         * .strtab, .note.*, etc.) the vaddr is meaningless (typically
+         * 0), so we use the file offset instead — same convention as
+         * rizin's izz. The user can tell the two apart by the section
+         * name in the middle column. */
+        uint64_t addr_base = (s->flags & SHF_ALLOC_X) ? s->vaddr : s->offset;
+        scan_strings_in_buf(buf, (size_t)got, addr_base,
+                            s->name ? s->name : "?",
+                            want_ascii, want_utf16);
         free(buf);
     }
 }
