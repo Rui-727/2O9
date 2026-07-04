@@ -25,11 +25,13 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 echo "=== test_nix_eval_e2e: sandbox at $TEST_ROOT ==="
 
 export HOME="$TEST_ROOT/home"
-mkdir -p "$HOME/.config/2O9"
+export TWO9_CONFIG_DIR="$TEST_ROOT/nix/config"
+USER_NAME="$(id -un)"
+mkdir -p "$TWO9_CONFIG_DIR"
 mkdir -p "$HOME/.local/state/2O9/generations"
 
-# Write a 2O9.nix that uses self-reference + import + conditional
-cat > "$HOME/.config/2O9/home.nix" <<'EOF'
+# Write a <user>.nix that uses self-reference + import + conditional
+cat > "$TWO9_CONFIG_DIR/$USER_NAME.nix" <<'EOF'
 { config, ... }:
 let
   basePackages = [ "vim" "curl" "htop" ];

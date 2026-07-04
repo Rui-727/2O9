@@ -23,13 +23,15 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 echo "=== test_apply_empty_config: sandbox at $TEST_ROOT ==="
 
 export HOME="$TEST_ROOT/home"
-mkdir -p "$HOME/.config/2O9"
+export TWO9_CONFIG_DIR="$TEST_ROOT/nix/config"
+USER_NAME="$(id -un)"
+mkdir -p "$TWO9_CONFIG_DIR"
 mkdir -p "$HOME/.local/state/2O9/generations"
 mkdir -p "$HOME/.local/bin"
 mkdir -p "$HOME/.local/lib"
 
-# Empty 2O9.nix - just declares an empty package list.
-cat > "$HOME/.config/2O9/2O9.nix" <<'EOF'
+# Empty <user>.nix - just declares an empty package list.
+cat > "$TWO9_CONFIG_DIR/$USER_NAME.nix" <<'EOF'
 { config, ... }:
 {
   packages = [ ];

@@ -24,13 +24,15 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 echo "=== test_install_sig_required_missing: sandbox at $TEST_ROOT ==="
 
 export HOME="$TEST_ROOT/home"
-mkdir -p "$HOME/.config/2O9"
+export TWO9_CONFIG_DIR="$TEST_ROOT/nix/config"
+USER_NAME="$(id -un)"
+mkdir -p "$TWO9_CONFIG_DIR"
 mkdir -p "$HOME/.local/state/2O9/generations"
 mkdir -p "$TEST_ROOT/cache"
 
-# Create a 2O9.nix with SigLevel = "Required". This forces the install
+# Create a <user>.nix with SigLevel = "Required". This forces the install
 # path to fetch and verify a .sig file alongside the .pkg.tar.zst.
-cat > "$HOME/.config/2O9/2O9.nix" <<'EOF'
+cat > "$TWO9_CONFIG_DIR/$USER_NAME.nix" <<'EOF'
 { config, ... }:
 {
   packages = [ ];

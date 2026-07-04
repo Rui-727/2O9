@@ -31,7 +31,9 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 echo "=== test_apply_self_reference_cycle: sandbox at $TEST_ROOT ==="
 
 export HOME="$TEST_ROOT/home"
-mkdir -p "$HOME/.config/2O9"
+export TWO9_CONFIG_DIR="$TEST_ROOT/nix/config"
+USER_NAME="$(id -un)"
+mkdir -p "$TWO9_CONFIG_DIR"
 mkdir -p "$HOME/.local/state/2O9/generations"
 
 # Run the test under a 30s timeout. The evaluator's cap is 100
@@ -45,7 +47,7 @@ elif command -v gtimeout >/dev/null 2>&1; then
 fi
 
 # ── Case 1: converging self-reference ────────────────────────────────
-cat > "$HOME/.config/2O9/2O9.nix" <<'EOF'
+cat > "$TWO9_CONFIG_DIR/$USER_NAME.nix" <<'EOF'
 { config, ... }:
 {
   packages = if config.packages == [ ] then [ "x" ] else [ ];
@@ -82,7 +84,7 @@ fi
 # forever - there is no fixed point. The evaluator should detect the
 # non-convergence (after 100 iterations) and fail with a clear error,
 # NOT hang or crash.
-cat > "$HOME/.config/2O9/2O9.nix" <<'EOF'
+cat > "$TWO9_CONFIG_DIR/$USER_NAME.nix" <<'EOF'
 { config, ... }:
 let
   next = if config.flag or false then false else true;

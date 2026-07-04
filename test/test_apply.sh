@@ -22,17 +22,20 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 echo "=== test_apply: sandbox at $TEST_ROOT ==="
 
-# Set up sandbox directory structure
+# Set up sandbox directory structure.
+# Config lives under $TWO9_CONFIG_DIR (default /nix/config).
 export HOME="$TEST_ROOT/home"
-mkdir -p "$HOME/.config/2O9"
+export TWO9_CONFIG_DIR="$TEST_ROOT/nix/config"
+USER_NAME="$(id -un)"
+mkdir -p "$TWO9_CONFIG_DIR"
 mkdir -p "$HOME/.local/state/2O9/generations"
 mkdir -p "$HOME/.local/bin"
 mkdir -p "$HOME/.local/lib"
 mkdir -p "$TEST_ROOT/store"
 mkdir -p "$TEST_ROOT/etc"
 
-# Create a minimal 2O9.nix - just declares packages, no AUR
-cat > "$HOME/.config/2O9/home.nix" <<'EOF'
+# Create a minimal <user>.nix - just declares packages, no AUR
+cat > "$TWO9_CONFIG_DIR/$USER_NAME.nix" <<'EOF'
 { config, ... }:
 {
   packages = [ "fakepkg" ];
