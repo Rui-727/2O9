@@ -162,7 +162,11 @@ Each maps to the equivalent 2O9 command.
   | `iSS` | List segments / program headers (type, vaddr, offset, filesz, memsz, flags) |
   | `is` | List symbols (name, vaddr, size, type, bind) |
   | `ie` | List entry points (`entry0`) |
-  | `iz` | List printable strings (>= 4 chars) in `.rodata` / `.data` |
+  | `iz` | List printable strings (>= 4 chars, ASCII + UTF-16LE) in `.rodata` / `.data` |
+  | `iz ascii` | List only ASCII strings in `.rodata` / `.data` |
+  | `iz utf16` | List only UTF-16LE strings in `.rodata` / `.data` |
+  | `izz` | List strings in ALL sections (drops the SHF_ALLOC filter; includes `.text`, `.comment`, `.note.*`, etc., with section name in output) |
+  | `izz ascii` / `izz utf16` | Same filters as `iz`, applied to the whole-binary scan |
   | `ii` | List imports (undefined dynamic symbols, with GOT slot addresses) |
   | `px <addr> <len>` | Hex dump at virtual address (sparse-collapse: 3+ identical rows collapse to first, `...`, last) |
   | `pxw <addr> <len>` | Hex dump as 32-bit little-endian words (sparse-collapse) |
@@ -179,14 +183,26 @@ Each maps to the equivalent 2O9 command.
   | `U` | Redo seek (pop redo stack; prints `no seek redo history` if empty) |
   | `pd <n>` | Disassemble `<n>` instructions at current seek (annotates jumps with `; -> <sym>`/`; -> 0x<tgt>` and ` (out)` when the target is outside the window; annotates PLT calls with `; <name>@plt` and direct calls with `; <symname>`) |
   | `pdd <addr> <n>` | Disassemble `<n>` instructions at `<addr>` (same annotation as `pd`) |
+  | `af [addr]` | Analyze function: walk forward from current seek (or `<addr>`) one instruction at a time until a `ret`, an `int3` (0xCC) padding byte, an out-of-range jump (backward past start, or forward more than 4 KB), or 4096 instructions. Stores the range so `pdf` can use it. Prints `function at 0xSTART-0xEND (size 0xSIZE, N instructions)`. Basic linear walk; does not handle jump tables, tail calls, or conditional branches |
+  | `pdf` | Disassemble the current function (the range last computed by `af`). Prints a hint if `af` hasn't been run |
+  | `axt <addr\|sym> [max]` | Find xrefs to an address (or symbol name, resolved first). Scans every executable section for instructions whose immediate or rip-relative effective address matches, then scans data sections for pointer values (qword on 64-bit, dword on 32-bit) that match. Default cap 50 results; `<max>` overrides. One-shot scan, not a precomputed xref DB |
   | `?` | Show command table |
   | `q` / `quit` / `exit` | Quit |
 
   Addresses accept decimal, `0x`-hex, `entry0`, a section name, a
   symbol name, or an import name (resolved to its GOT slot via the
-  dynamic relocation table). Disassembly (`pd` / `pdd`) requires
-  libcapstone; without it, those two commands print a hint and return.
-  The prompt shows the current seek: `0x0000000000401000> `.
+  dynamic relocation table). Disassembly (`pd` / `pdd` / `pdf` / `af`)
+  and `axt` require libcapstone; without it, those commands print a
+  hint and return. The prompt shows the current seek: `0x0000000000401000> `.
+
+  `$`-tokens (resolved before symbol names so a symbol named `s` or `e`
+  can't shadow them):
+  - `$$` — current seek (the REPL's offset). `s $$` is a no-op; `px $$ 16`
+    prints 16 bytes at the current seek.
+  - `$s` — binary size (file bytes, via `fstat`). `s $s` seeks to one
+    past the last byte.
+  - `$e` — entry point address. `axt $e` finds xrefs to the entry point;
+    `pd $e` disassembles starting at the entry point (seek is unchanged).
 
   Seek history: every successful `s <addr>` (where `addr` differs from
   the current seek) pushes the prior position onto a 32-entry history
@@ -227,6 +243,51 @@ Each maps to the equivalent 2O9 command.
   the first row, a `...` line, and the last row (with its real
   address). Two identical rows are printed verbatim; only 3+ trigger
   the collapse. Mirrors rizin's `checkSparse` loop.
+
+  String detection (`iz` / `izz`): both ASCII and UTF-16LE strings are
+  detected. ASCII strings are runs of `>= 4` printable bytes (0x20..0x7e).
+  UTF-16LE strings are runs of `>= 4` two-byte pairs where the low byte
+  is printable and the high byte is 0 (e.g. `48 00 65 00 6c 00 6c 00`
+  for "Hell"). Output format: `0xADDR  ascii  "string"` or
+  `0xADDR  utf16  "string"` (for `iz`); `0xADDR  <section>  ascii
+  "string"` (for `izz`, with the section name added so the user can
+  tell where strings in unusual places like `.text` and `.comment`
+  came from). For non-ALLOC sections (`.comment`, `.strtab`, `.shstrtab`,
+  etc.) the address column is the file offset, since these sections
+  have no virtual address. `iz ascii` / `iz utf16` filter to one
+  encoding; same for `izz`. Mirrors a tiny slice of rizin's
+  `librz/util/str_search.c` `process_one_string`.
+
+  Xref scan (`axt`): a one-shot scan, not a precomputed xref database.
+  Each invocation disassembles every executable section (`SHF_EXECINSTR`:
+  `.text`, `.init`, `.fini`, `.plt`) with Capstone in detail mode and
+  checks each instruction's operands. For x86, an `X86_OP_IMM` operand
+  equal to `<addr>` is a direct reference (call/jmp target, `mov reg,
+  imm`, `cmp reg, imm`, etc.); an `X86_OP_MEM` operand with
+  `base = X86_REG_RIP` is a rip-relative reference whose effective
+  address is `insn.address + insn.size + disp` (this is how `lea rax,
+  [rip + 0xfd8]` references a string in `.rodata` without ever
+  containing the literal address). For non-x86 arches (or memory
+  operands we don't model), the `op_str` is scanned for the literal
+  hex of `<addr>` with a word-boundary check. After the instruction
+  pass, data sections (`SHF_ALLOC && !SHF_EXECINSTR`: `.data`,
+  `.rodata`, `.data.rel.ro`, `.got`, `.dynsym`, ...) are scanned for
+  pointer values (8-byte LE on 64-bit, 4-byte on 32-bit) equal to
+  `<addr>`. Output is capped at 50 results by default; `axt <addr>
+  <max>` overrides. Mirrors the read-only variant of rizin's
+  `axt` (`librz/arch/xrefs.c:164`).
+
+  Function walk (`af` / `pdf`): `af` walks forward from the current
+  seek (or `af <addr>`) one instruction at a time until a `ret`, an
+  `int3` (0xCC) padding byte on x86, an out-of-range jump (target
+  before `start`, or more than 4 KB past the current position), or
+  4096 instructions. The range `[start, end)` is stored in the REPL
+  state and `pdf` disassembles exactly that range. This is a basic
+  linear walk, not rizin's full recursive-descent function detection
+  (`librz/arch/fcn.c:1672`); it does not handle jump tables, tail
+  calls, or conditional branches (the walk follows the fall-through
+  and ignores the taken branch). For typical compiler-emitted
+  functions with a single `ret` at the end, the result is correct.
 
 `209 debag --dynamic-db --` `<cmd>` `[args...]`
 : Drop into an interactive gdb-style live debugger REPL on `<cmd>`.
