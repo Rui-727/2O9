@@ -59,6 +59,13 @@ typedef struct {
     size_t   seek_hist_count;
     uint64_t redo_stack[SEEK_HIST_MAX];
     size_t   redo_count;
+    /* `af` (analyze function) result: the linear-walk function range
+     * starting at the seek position (or `af <addr>`) and ending at the
+     * first ret / int3 / out-of-range jump / 4096-insn cap. Both are
+     * 0 until `af` runs successfully; `pdf` reads them to decide what
+     * range to disassemble. */
+    uint64_t func_start;
+    uint64_t func_end;
 } repl_t;
 
 /* ── Forward declarations for the command table ─────────────────── */
@@ -81,6 +88,9 @@ static void cmd_seek_redo(repl_t *r, int argc, char **argv);
 static void cmd_seek_history(repl_t *r, int argc, char **argv);
 static void cmd_print_disasm(repl_t *r, int argc, char **argv);
 static void cmd_print_disasm_at(repl_t *r, int argc, char **argv);
+static void cmd_xref_to(repl_t *r, int argc, char **argv);
+static void cmd_analyze_func(repl_t *r, int argc, char **argv);
+static void cmd_print_disasm_func(repl_t *r, int argc, char **argv);
 static void cmd_help(repl_t *r, int argc, char **argv);
 static void cmd_quit(repl_t *r, int argc, char **argv);
 
@@ -112,6 +122,9 @@ static const struct {
     {"U",     "redo seek (pop redo stack)",            cmd_seek_redo},
     {"pd",    "disassemble <n> insns at current seek", cmd_print_disasm},
     {"pdd",   "disassemble <n> insns at <addr>",       cmd_print_disasm_at},
+    {"pdf",   "disassemble current function (af range)", cmd_print_disasm_func},
+    {"axt",   "find xrefs to <addr|sym> [max]",        cmd_xref_to},
+    {"af",    "analyze function (walk to ret)",        cmd_analyze_func},
     {"?",     "show this help",                        cmd_help},
     {"q",     "quit",                                  cmd_quit},
     {NULL, NULL, NULL}
@@ -1208,7 +1221,8 @@ static const char *resolve_plt_call(const debag_analysis_t *a,
  *     Otherwise, if the target resolves to a known symbol, append
  *     `  ; <symname>` (or `  ; <symname>+0xN`). Direct calls to
  *     unknown targets are not annotated. */
-static void do_disasm(repl_t *r, uint64_t addr, size_t count)
+static void do_disasm(repl_t *r, uint64_t addr, size_t count,
+                        uint64_t max_addr)
 {
     if (count == 0) count = 16;
     if (count > 4096) count = 4096;
@@ -1274,6 +1288,12 @@ static void do_disasm(repl_t *r, uint64_t addr, size_t count)
         }
 
         for (size_t i = 0; i < n; i++) {
+            /* `max_addr` lets `pdf` stop at the function end (set by
+             * `af`). When non-zero and the next instruction starts at
+             * or past it, we stop printing. Capstone has already
+             * decoded past it (we asked for `count` insns), but the
+             * user only sees the function body. */
+            if (max_addr != 0 && insns[i].address >= max_addr) break;
             printf("0x%016" PRIx64 "  ", insns[i].address);
             char hex[64] = "";
             size_t hl = 0;
@@ -1355,9 +1375,10 @@ static void do_disasm(repl_t *r, uint64_t addr, size_t count)
     cs_close(&handle);
 }
 #else
-static void do_disasm(repl_t *r, uint64_t addr, size_t count)
+static void do_disasm(repl_t *r, uint64_t addr, size_t count,
+                        uint64_t max_addr)
 {
-    (void)r; (void)addr; (void)count;
+    (void)r; (void)addr; (void)count; (void)max_addr;
     fprintf(stderr,
             "debag: disassembly requires capstone "
             "(install libcapstone-dev)\n");
@@ -1372,7 +1393,7 @@ static void cmd_print_disasm(repl_t *r, int argc, char **argv)
         if (parse_uint(r, argv[1], &v) < 0) return;
         count = (size_t)v;
     }
-    do_disasm(r, r->offset, count);
+    do_disasm(r, r->offset, count, /*max_addr=*/0);
 }
 
 static void cmd_print_disasm_at(repl_t *r, int argc, char **argv)
@@ -1385,8 +1406,371 @@ static void cmd_print_disasm_at(repl_t *r, int argc, char **argv)
     if (parse_uint(r, argv[1], &addr) < 0) return;
     uint64_t v;
     if (parse_uint(r, argv[2], &v) < 0) return;
-    do_disasm(r, addr, (size_t)v);
+    do_disasm(r, addr, (size_t)v, /*max_addr=*/0);
 }
+
+/* `pdf` — print disassembly of the current function. The function range
+ * is whatever `af` last computed (repl_t::func_start / func_end). If no
+ * function has been analyzed yet, prints a hint. The disassembly stops
+ * at func_end (passed as max_addr to do_disasm) so the user sees exactly
+ * the function body, not the next function or padding after it. */
+static void cmd_print_disasm_func(repl_t *r, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (r->func_end == 0 || r->func_end <= r->func_start) {
+        fprintf(stderr,
+                "debag: no function analyzed (use `af` first)\n");
+        return;
+    }
+    /* count is the max instructions to decode; the max_addr check stops
+     * printing at func_end regardless. The +16 padding covers the case
+     * where func_end lands mid-instruction. */
+    size_t count = (size_t)(r->func_end - r->func_start) + 16;
+    do_disasm(r, r->func_start, count, /*max_addr=*/r->func_end);
+}
+
+#ifdef HAVE_CAPSTONE
+/* `axt <addr|sym> [max]` — find xrefs to an address. A one-shot scan,
+ * not a precomputed xref database: each invocation re-disassembles the
+ * executable sections and re-scans the data sections. Slow on large
+ * binaries but fine for ad-hoc queries.
+ *
+ * Two scan phases:
+ *   (1) Instruction-level: disassemble every SHF_EXECINSTR section
+ *       (.text, .init, .fini, .plt, ...). With CS_OPT_DETAIL, each
+ *       instruction's operands are exposed. For x86 we check every
+ *       operand: an X86_OP_IMM whose value equals `addr` is a direct
+ *       reference (call/jmp target, mov reg,imm, cmp reg,imm, etc.);
+ *       an X86_OP_MEM with base=X86_REG_RIP is a rip-relative reference
+ *       (lea, mov [rip+disp], etc.) whose effective address is
+ *       insn.address + insn.size + disp. The latter is how `lea rax,
+ *       [rip + 0xfd8]` references a string in .rodata without ever
+ *       containing the literal address. For non-x86 arches we fall
+ *       back to scanning op_str for the literal hex of `addr`.
+ *   (2) Data-level: scan every SHF_ALLOC && !SHF_EXECINSTR section
+ *       (.data, .rodata, .data.rel.ro, .got, ...) for 8-byte LE
+ *       (4-byte on 32-bit) pointer values equal to `addr`. Catches
+ *       GOT slots, vtable entries, and `.data.rel.ro` relocations
+ *       that point at the address. Output for data refs includes
+ *       the section name and the word size so the user can tell
+ *       them apart from instruction refs.
+ *
+ * Output format:
+ *   0xADDR  mnemonic operands          (instruction refs)
+ *   0xADDR  <section>  <size> 0xVALUE  (data refs, size = qword|dword)
+ *
+ * Output is capped at `max` entries (default 50, configurable via the
+ * optional second argument) to avoid spam on large binaries. If no
+ * xrefs are found, prints `no xrefs found to 0xADDR`.
+ *
+ * Clean-room reimplementation of the read-only variant of rizin's
+ * `axt` (librz/arch/xrefs.c:164 rz_analysis_xrefs_get_to) — we don't
+ * build a precomputed xref database, we just scan on demand. */
+static void cmd_xref_to(repl_t *r, int argc, char **argv)
+{
+    if (argc < 2) {
+        fprintf(stderr, "usage: axt <addr|sym> [max]\n");
+        return;
+    }
+    uint64_t addr;
+    if (parse_uint(r, argv[1], &addr) < 0) return;
+
+    size_t max = 50;
+    if (argc >= 3) {
+        uint64_t v;
+        if (parse_uint(r, argv[2], &v) < 0) return;
+        if (v > 0) max = (size_t)v;
+    }
+
+    size_t found = 0;
+
+    /* (1) Instruction-level xrefs via Capstone. */
+    cs_arch arch;
+    cs_mode mode;
+    if (pick_capstone(r->a, &arch, &mode) == 0) {
+        csh handle;
+        if (cs_open(arch, mode, &handle) == CS_ERR_OK) {
+            cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+            int is_x86 = (arch == CS_ARCH_X86);
+
+            for (size_t i = 0;
+                 r->a->sections && i < r->a->section_count && found < max;
+                 i++) {
+                const debag_elf_section_t *s = &r->a->sections[i];
+                if (!(s->flags & SHF_EXECINSTR_X)) continue;
+                if (s->type == SHT_NOBITS || s->size == 0) continue;
+
+                uint8_t *buf = malloc(s->size);
+                if (!buf) continue;
+                ssize_t got = pread(r->fd, buf, s->size, (off_t)s->offset);
+                if (got <= 0) { free(buf); continue; }
+
+                cs_insn *insns = NULL;
+                /* count=0 means "decode all" in capstone. */
+                size_t n = cs_disasm(handle, buf, (size_t)got,
+                                     s->vaddr, 0, &insns);
+                for (size_t k = 0; k < n && found < max; k++) {
+                    cs_insn *insn = &insns[k];
+                    int hit = 0;
+                    if (is_x86 && insn->detail) {
+                        for (int j = 0;
+                             j < insn->detail->x86.op_count;
+                             j++) {
+                            cs_x86_op *op = &insn->detail->x86.operands[j];
+                            if (op->type == X86_OP_IMM &&
+                                (uint64_t)op->imm == addr) {
+                                hit = 1; break;
+                            }
+                            if (op->type == X86_OP_MEM &&
+                                op->mem.base == X86_REG_RIP) {
+                                uint64_t target = insn->address +
+                                                  insn->size +
+                                                  (uint64_t)op->mem.disp;
+                                if (target == addr) { hit = 1; break; }
+                            }
+                        }
+                    }
+                    /* Fallback for non-x86 or memory operands we don't
+                     * model: scan op_str for the literal hex of `addr`,
+                     * with a word-boundary-ish check so 0x4010 doesn't
+                     * match 0x401000. */
+                    if (!hit) {
+                        char needle[32];
+                        int nl = snprintf(needle, sizeof(needle),
+                                          "0x%" PRIx64, addr);
+                        if (nl > 0 && nl < (int)sizeof(needle)) {
+                            const char *p = insn->op_str;
+                            while ((p = strstr(p, needle)) != NULL) {
+                                char after = p[nl];
+                                if (after == '\0' || after == ',' ||
+                                    after == ']' || after == ' ' ||
+                                    after == ')' || after == '+' ||
+                                    after == '-') {
+                                    hit = 1; break;
+                                }
+                                p += nl;
+                            }
+                        }
+                    }
+
+                    if (hit) {
+                        printf("0x%016" PRIx64 "  %s %s\n",
+                               insn->address,
+                               insn->mnemonic, insn->op_str);
+                        found++;
+                    }
+                }
+                cs_free(insns, n);
+                free(buf);
+            }
+            cs_close(&handle);
+        }
+    }
+
+    /* (2) Data-section pointer xrefs: scan .data/.rodata/.got/etc for
+     * pointer values equal to `addr`. Word size matches the binary's
+     * pointer size (8 on 64-bit, 4 on 32-bit). */
+    if (found < max) {
+        int word_size = (r->a->bits == 64) ? 8 : 4;
+        for (size_t i = 0;
+             r->a->sections && i < r->a->section_count && found < max;
+             i++) {
+            const debag_elf_section_t *s = &r->a->sections[i];
+            if (s->flags & SHF_EXECINSTR_X) continue;
+            if (!(s->flags & SHF_ALLOC_X))  continue;
+            if (s->type == SHT_NOBITS || s->size == 0) continue;
+            if (s->size < (size_t)word_size) continue;
+
+            uint8_t *buf = malloc(s->size);
+            if (!buf) continue;
+            ssize_t got = pread(r->fd, buf, s->size, (off_t)s->offset);
+            if (got <= 0) { free(buf); continue; }
+
+            for (size_t off = 0;
+                 off + word_size <= (size_t)got && found < max;
+                 off += word_size) {
+                uint64_t word = 0;
+                for (int b = 0; b < word_size; b++)
+                    word |= (uint64_t)buf[off + b] << (8 * b);
+                if (word == addr) {
+                    printf("0x%016" PRIx64 "  %-10s  %s 0x%" PRIx64 "\n",
+                           s->vaddr + off,
+                           s->name ? s->name : "?",
+                           (word_size == 8) ? "qword" : "dword",
+                           word);
+                    found++;
+                }
+            }
+            free(buf);
+        }
+    }
+
+    if (found == 0) {
+        printf("no xrefs found to 0x%" PRIx64 "\n", addr);
+    }
+}
+#else
+static void cmd_xref_to(repl_t *r, int argc, char **argv)
+{
+    (void)r; (void)argc; (void)argv;
+    fprintf(stderr,
+            "debag: axt requires capstone (install libcapstone-dev)\n");
+}
+#endif
+
+#ifdef HAVE_CAPSTONE
+/* `af [addr]` — analyze function. Walks forward from the current seek
+ * (or the given address) one instruction at a time, via Capstone, until
+ * a stop condition is hit:
+ *
+ *   - A `ret` instruction (mnemonic `ret`/`retn`/`retq` on x86, `ret`
+ *     on aarch64). This is the normal end-of-function marker.
+ *   - An `int3` padding byte (0xCC) on x86. The linker pads between
+ *     functions with int3 bytes; if we hit one, we've walked past the
+ *     end of the function.
+ *   - A jump (mnemonic starting with `j`) whose immediate target is
+ *     outside the function range: either backward past `start`, or
+ *     forward more than 4 KB past the current position. The backward
+ *     case catches loops to a sibling function; the forward case
+ *     catches tail calls. Conditional jumps inside the function (e.g.
+ *     loop back-edges) don't trigger this — only jumps that would take
+ *     us significantly outside the function.
+ *   - 4096 instructions decoded (safety cap to avoid runaway loops on
+ *     stripped binaries with no clear function boundaries).
+ *
+ * The function range [start, end) is stored in repl_t::func_start /
+ * func_end so `pdf` can disassemble exactly that range later.
+ *
+ * This is a *basic linear walk*, not rizin's full recursive-descent
+ * function detection (librz/arch/fcn.c:1672 rz_analysis_fcn, ~500
+ * lines). It does not handle:
+ *   - Jump tables (a `jmp [rax*8 + table]` won't be followed).
+ *   - Tail calls to sibling functions (we stop at the jmp).
+ *   - Conditional branches (we walk the fall-through, ignoring the
+ *     taken branch, so we miss code only reachable via the branch).
+ *   - Functions split into multiple fragments via longjmp-style tricks.
+ *
+ * For a typical compiler-emitted function with a single `ret` at the
+ * end, this gives the right answer. For obfuscated or hand-written
+ * assembly, the result may be too short or too long.
+ *
+ * Output format:
+ *   function at 0xSTART-0xEND (size 0xSIZE, N instructions) */
+static void cmd_analyze_func(repl_t *r, int argc, char **argv)
+{
+    uint64_t start = r->offset;
+    if (argc >= 2) {
+        if (parse_uint(r, argv[1], &start) < 0) return;
+    }
+
+    cs_arch arch;
+    cs_mode mode;
+    if (pick_capstone(r->a, &arch, &mode) < 0) {
+        fprintf(stderr,
+                "debag: unsupported arch '%s' for af\n",
+                r->a->arch_name ? r->a->arch_name : "?");
+        return;
+    }
+    csh handle;
+    if (cs_open(arch, mode, &handle) != CS_ERR_OK) {
+        fprintf(stderr, "debag: cs_open failed\n");
+        return;
+    }
+
+    int is_x86 = (arch == CS_ARCH_X86);
+
+    /* Cap at 4 KB worth of instructions. x86-64 insns are at most 15
+     * bytes, so 4096 insns * 16 bytes = 64 KB is enough for any
+     * real-world function (and the safety cap kicks in long before
+     * this on stripped binaries with no clear boundary). */
+    size_t bufsz = 4096 * 16;
+    uint8_t *buf = malloc(bufsz);
+    if (!buf) { cs_close(&handle); return; }
+    ssize_t got = read_at(r, start, buf, bufsz);
+    if (got <= 0) {
+        fprintf(stderr, "debag: cannot read at 0x%" PRIx64 "\n", start);
+        free(buf);
+        cs_close(&handle);
+        return;
+    }
+
+    cs_insn *insns = NULL;
+    size_t n = cs_disasm(handle, buf, (size_t)got, start, 4096, &insns);
+
+    uint64_t end = start;
+    size_t insn_count = 0;
+    for (size_t i = 0; i < n; i++) {
+        insn_count++;
+        end = insns[i].address + insns[i].size;
+
+        /* (1) ret / retn / retq (x86) or ret (aarch64). */
+        if (strcmp(insns[i].mnemonic, "ret") == 0 ||
+            strcmp(insns[i].mnemonic, "retn") == 0 ||
+            strcmp(insns[i].mnemonic, "retq") == 0) {
+            break;
+        }
+
+        /* (2) int3 padding (0xCC) — x86 only. We require the
+         * instruction to be exactly one byte and that byte to be 0xCC
+         * so we don't accidentally match a real int3 in user code that
+         * Capstone might decode as `int3` with size > 1. */
+        if (is_x86 && insns[i].size == 1 && insns[i].bytes[0] == 0xCC) {
+            /* Don't count the int3 as part of the function. */
+            end = insns[i].address;
+            insn_count--;
+            break;
+        }
+
+        /* (3) Jump outside the function range. We only consider jumps
+         * with an immediate `0x...` operand; indirect jumps (jmp rax,
+         * jmp [rax]) can't be resolved statically. */
+        if (insns[i].mnemonic[0] == 'j' && insns[i].mnemonic[1] != '\0' &&
+            insns[i].op_str[0] == '0' && insns[i].op_str[1] == 'x') {
+            char *e = NULL;
+            errno = 0;
+            unsigned long long tgt = strtoull(insns[i].op_str + 2,
+                                              &e, 16);
+            if (errno == 0 && e && *e == '\0') {
+                uint64_t t = (uint64_t)tgt;
+                /* Backward past the function start: likely a jump to
+                 * a sibling function. */
+                if (t < start) {
+                    break;
+                }
+                /* Forward more than 4 KB past the current position:
+                 * likely a tail call to another function. The 4 KB
+                 * threshold is a heuristic — typical intra-function
+                 * jumps are short (a few hundred bytes max). */
+                if (t > end + 0x1000) {
+                    break;
+                }
+            }
+        }
+
+        /* (4) Safety cap: 4096 instructions. cs_disasm was already
+         * called with a count limit of 4096 so the loop naturally
+         * stops here. */
+    }
+
+    printf("function at 0x%" PRIx64 "-0x%" PRIx64
+           " (size 0x%" PRIx64 ", %zu instructions)\n",
+           start, end, end - start, insn_count);
+
+    r->func_start = start;
+    r->func_end = end;
+
+    cs_free(insns, n);
+    free(buf);
+    cs_close(&handle);
+}
+#else
+static void cmd_analyze_func(repl_t *r, int argc, char **argv)
+{
+    (void)r; (void)argc; (void)argv;
+    fprintf(stderr,
+            "debag: af requires capstone (install libcapstone-dev)\n");
+}
+#endif
 
 static void cmd_help(repl_t *r, int argc, char **argv)
 {
