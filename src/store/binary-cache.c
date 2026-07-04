@@ -311,7 +311,7 @@ static int decompress_to_file(const char *out_path,
 /* ── Public API ───────────────────────────────────────────────────── */
 
 binary_cache_t *binary_cache_new(const char *base_url,
-                                  const char *public_key_b64,
+                                  char **public_keys_b64,
                                   int allow_unsigned)
 {
         if (!base_url) { errno = EINVAL; return NULL; }
@@ -319,10 +319,8 @@ binary_cache_t *binary_cache_new(const char *base_url,
         if (!bc) return NULL;
         bc->base_url = strdup(base_url);
         if (!bc->base_url) { free(bc); return NULL; }
-        if (public_key_b64) {
-                bc->public_key = strdup(public_key_b64);
-                if (!bc->public_key) { free(bc->base_url); free(bc); return NULL; }
-        }
+        /* Take ownership of the public_keys list (may be NULL). */
+        bc->public_keys = public_keys_b64;
         bc->allow_unsigned = allow_unsigned;
         return bc;
 }
@@ -331,7 +329,11 @@ void binary_cache_free(binary_cache_t *bc)
 {
         if (!bc) return;
         free(bc->base_url);
-        free(bc->public_key);
+        if (bc->public_keys) {
+                for (size_t i = 0; bc->public_keys[i]; i++)
+                        free(bc->public_keys[i]);
+                free(bc->public_keys);
+        }
         free(bc);
 }
 
@@ -367,10 +369,15 @@ narinfo_t *binary_cache_lookup(binary_cache_t *bc, const char *store_path)
         membuf_free(&buf);
         if (!ni) return NULL;
 
-        /* Verify signature if we have a public key. */
-        if (bc->public_key) {
-                int ok = narinfo_verify_signed(ni, bc->public_key);
-                if (ok != 1) {
+        /* Verify signature if we have any public keys configured. Accept
+         * the narinfo if ANY public key verifies ANY of its signatures. */
+        if (bc->public_keys && bc->public_keys[0]) {
+                int verified = 0;
+                for (size_t i = 0; bc->public_keys[i] && !verified; i++) {
+                        int rc = narinfo_verify_signed(ni, bc->public_keys[i]);
+                        if (rc == 1) { verified = 1; break; }
+                }
+                if (!verified) {
                         if (!bc->allow_unsigned) {
                                 narinfo_free(ni);
                                 return NULL;
@@ -378,7 +385,7 @@ narinfo_t *binary_cache_lookup(binary_cache_t *bc, const char *store_path)
                         /* Unsigned but allowed - return anyway. */
                 }
         } else if (!bc->allow_unsigned) {
-                /* No public key configured AND allow_unsigned is false.
+                /* No public keys configured AND allow_unsigned is false.
                  * Refuse unless the narinfo has at least one signature
                  * (we can't verify it but we accept the trust assertion). */
                 if (!ni->signatures || !ni->signatures[0]) {

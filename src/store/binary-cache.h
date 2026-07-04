@@ -13,10 +13,11 @@
  *   https://cache.example.com      - HTTP/HTTPS via libcurl
  *   s3://my-bucket/path            - S3 via the `aws` CLI (shelled out)
  *
- * Trust model: if bc->public_key is set, every fetched narinfo must
- * carry at least one Sig: line that verifies against that key. If
- * bc->allow_unsigned is true, unsigned narinfos are accepted (with a
- * warning). If neither, lookup fails for unsigned narinfos.
+ * Trust model: if bc->public_keys is non-NULL, every fetched narinfo
+ * must carry at least one Sig: line that verifies against ANY of the
+ * listed public keys. If bc->allow_unsigned is true, unsigned narinfos
+ * are accepted (with a warning). If neither (no keys configured and
+ * allow_unsigned is false), lookup fails for unsigned narinfos.
  */
 #ifndef TWO9_BINARY_CACHE_H
 #define TWO9_BINARY_CACHE_H
@@ -26,15 +27,19 @@
 
 typedef struct binary_cache {
         char *base_url;         /* e.g. https://cache.example.com or s3://my-bucket */
-        char *public_key;       /* base64-encoded 32-byte Ed25519 public key, may be NULL */
+        char **public_keys;     /* NULL-terminated list of base64 Ed25519 pubkeys, may be NULL */
         int allow_unsigned;     /* 1 = accept unsigned narinfos */
 } binary_cache_t;
 
-/* Construct a cache client. base_url is required. public_key and
- * allow_unsigned control signature verification. Caller frees with
- * binary_cache_free(). NULL on alloc failure. */
+/* Construct a cache client. base_url is required. public_keys is a
+ * NULL-terminated list of base64 Ed25519 public keys (may be NULL);
+ * a narinfo is accepted if ANY of them verifies its signature.
+ * allow_unsigned controls whether unsigned narinfos are accepted.
+ * The new binary_cache_t takes ownership of public_keys (caller must
+ * not free it). Caller frees the cache with binary_cache_free().
+ * NULL on alloc failure. */
 binary_cache_t *binary_cache_new(const char *base_url,
-                                  const char *public_key_b64,
+                                  char **public_keys_b64,
                                   int allow_unsigned);
 void binary_cache_free(binary_cache_t *bc);
 

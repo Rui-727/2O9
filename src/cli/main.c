@@ -104,13 +104,54 @@ static const char *get_db_root(char *buf, size_t bufsize)
         return buf;
 }
 
-/* ── Config home helper ────────────────────────────────────────────
- * Returns the home directory to search for configs.
+/* ── Config dir + username helpers ─────────────────────────────────
+ * The config dir is fixed at /nix/config per the v2 layout (locked
+ * decision #6 in DESIGN.md). TWO9_CONFIG_DIR overrides it for testing.
+ *
+ * get_config_home() still returns the *effective* home directory of the
+ * invoking user (used for the generation DB at ~/.local/state/2O9 and
+ * for chowning user-scoped configs created by `209 init`). It is no
+ * longer used to locate config files: those live at /nix/config now. */
+static const char *two9_config_dir(void)
+{
+        const char *env = getenv("TWO9_CONFIG_DIR");
+        if (env && *env) return env;
+        return "/nix/config";
+}
+
+/* Returns the username to use for per-user config files
+ * (/nix/config/<user>.nix). When running as root via sudo, prefers
+ * SUDO_USER so `sudo 209 apply` loads the original user's config.
+ * Falls back to getpwuid(getuid())->pw_name. Returns NULL on lookup
+ * failure (caller must handle). The returned pointer is valid until
+ * the next call (static buffer). */
+static const char *get_current_username(void)
+{
+        static char buf[256];
+        if (getuid() == 0) {
+                const char *su = getenv("SUDO_USER");
+                if (su && *su) {
+                        strncpy(buf, su, sizeof(buf) - 1);
+                        buf[sizeof(buf) - 1] = '\0';
+                        return buf;
+                }
+        }
+        struct passwd *pw = getpwuid(getuid());
+        if (pw && pw->pw_name) {
+                strncpy(buf, pw->pw_name, sizeof(buf) - 1);
+                buf[sizeof(buf) - 1] = '\0';
+                return buf;
+        }
+        return NULL;
+}
+
+/* Resolve the original user's home directory. Used by get_config_home
+ * (for the generation DB) and cmd_init (to chown user-scoped configs).
  *
  * When running as root via sudo, HOME might be /root. We check
  * SUDO_USER to find the original user's home directory from
- * /etc/passwd. This way `sudo 209 apply` finds the user's config
- * at /home/sonoka/.config/2O9/2O9.nix instead of /root/.config/...
+ * /etc/passwd. This way `sudo 209 apply` resolves the user's
+ * generation DB at /home/sonoka/.local/state/2O9 instead of /root's.
  *
  * Falls back to $HOME, then to getpwuid(getuid())->pw_dir. */
 static const char *get_config_home(char *buf, size_t bufsize)
@@ -149,6 +190,110 @@ static const char *get_config_home(char *buf, size_t bufsize)
         strncpy(buf, "/root", bufsize - 1);
         buf[bufsize - 1] = '\0';
         return buf;
+}
+
+/* ── detect_all_users ──────────────────────────────────────────────
+ * Scan /etc/passwd for real users: uid >= 1000, home dir under /home/,
+ * excluding root and nobody. Returns a NULL-terminated list of usernames
+ * (caller frees each + the list). Used by `209 init --all`. Returns
+ * NULL if /etc/passwd can't be read or no users match. */
+static char **detect_all_users(void)
+{
+        FILE *f = fopen("/etc/passwd", "r");
+        if (!f) return NULL;
+
+        size_t cap = 8, count = 0;
+        char **list = calloc(cap, sizeof(char *));
+        if (!list) { fclose(f); return NULL; }
+
+        char line[1024];
+        while (fgets(line, sizeof(line), f)) {
+                /* passwd format: name:passwd:uid:gid:gecos:home:shell */
+                char *save = NULL;
+                char *name = strtok_r(line, ":\n", &save);
+                if (!name) continue;
+                char *passwd = strtok_r(NULL, ":\n", &save); if (!passwd) continue;
+                char *uid_s  = strtok_r(NULL, ":\n", &save); if (!uid_s) continue;
+                char *gid_s  = strtok_r(NULL, ":\n", &save); if (!gid_s) continue;
+                char *gecos  = strtok_r(NULL, ":\n", &save); if (!gecos) continue;
+                char *home   = strtok_r(NULL, ":\n", &save); if (!home) continue;
+                /* shell is the rest, ignored */
+
+                /* Filter: uid >= 1000, home under /home/, exclude root/nobody. */
+                char *end = NULL;
+                long uid = strtol(uid_s, &end, 10);
+                if (!end || *end != '\0') continue;
+                if (uid < 1000) continue;
+                if (strcmp(name, "root") == 0) continue;
+                if (strcmp(name, "nobody") == 0) continue;
+                if (strncmp(home, "/home/", 6) != 0) continue;
+
+                if (count + 1 >= cap) {
+                        cap *= 2;
+                        char **nl = realloc(list, cap * sizeof(char *));
+                        if (!nl) break;
+                        list = nl;
+                }
+                list[count] = strdup(name);
+                if (!list[count]) break;
+                count++;
+        }
+        fclose(f);
+        list[count] = NULL;
+
+        if (count == 0) {
+                free(list);
+                return NULL;
+        }
+        return list;
+}
+
+static void free_user_list(char **list)
+{
+        if (!list) return;
+        for (size_t i = 0; list[i]; i++) free(list[i]);
+        free(list);
+}
+
+/* ── old_config_detected ───────────────────────────────────────────
+ * Check for any pre-v2 config layout. If found, print the exact move
+ * commands and return 1 (caller should exit 1 without doing anything
+ * else). Returns 0 if no old layout is present.
+ *
+ * Old paths checked:
+ *   ~/.config/2O9/home.nix
+ *   ~/.config/2O9/extra.nix
+ *   /etc/2O9/2O9.nix
+ *   /etc/2O9/extra.nix
+ *   /etc/2O9/2O9.conf */
+static int old_config_detected(void)
+{
+        const char *home = getenv("HOME");
+        char path[PATH_MAX];
+        int found = 0;
+
+        if (home && *home) {
+                snprintf(path, sizeof(path), "%s/.config/2O9/home.nix", home);
+                if (access(path, F_OK) == 0) found = 1;
+                snprintf(path, sizeof(path), "%s/.config/2O9/extra.nix", home);
+                if (access(path, F_OK) == 0) found = 1;
+        }
+        if (access("/etc/2O9/2O9.nix", F_OK) == 0) found = 1;
+        if (access("/etc/2O9/extra.nix", F_OK) == 0) found = 1;
+        if (access("/etc/2O9/2O9.conf", F_OK) == 0) found = 1;
+
+        if (!found) return 0;
+
+        fprintf(stderr,
+                "209: old config layout detected. Move your config:\n"
+                "  sudo mkdir -p /nix/config\n"
+                "  sudo mv /etc/2O9/2O9.nix /nix/config/2O9.nix\n"
+                "  sudo mv /etc/2O9/extra.nix /nix/config/extra.nix\n"
+                "  mv ~/.config/2O9/home.nix /nix/config/$USER.nix\n"
+                "  mv ~/.config/2O9/extra.nix /nix/config/$USER.extra.nix\n"
+                "  rm -rf ~/.config/2O9 /etc/2O9\n"
+                "Then re-run 209 apply.\n");
+        return 1;
 }
 
 #ifndef PACKAGE
@@ -197,7 +342,7 @@ static int cmd_usage(void)
         printf("  optimise           Hardlink-dedup /nix/store (Nix --optimise)\n");
         printf("  cache              Prune old package cache (like paccache)\n");
         printf("  news               Show Arch Linux news\n");
-        printf("  init [--system]    Create a starter 2O9.nix config\n");
+        printf("  init [--system|--all]  Create starter configs in /nix/config/\n");
         printf("  doctor \"<error>\"   Search Arch Wiki for error solutions\n");
         printf("  wiki <pkg>         Fetch Arch Wiki page for a package\n");
         printf("  fuzz <binary>      Fuzz a binary with edge-case inputs\n");
@@ -499,22 +644,21 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
                 resolved_version = strdup("unknown");
         } else {
                 /* Use lib2O9 to find, download, extract */
-                char config_home[PATH_MAX];
-                get_config_home(config_home, sizeof(config_home));
                 char user_config[PATH_MAX] = {0};
-                char user_home_config[PATH_MAX] = {0};
-                snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", config_home);
-                snprintf(user_home_config, sizeof(user_home_config), "%s/.config/2O9/home.nix", config_home);
+                char system_config[PATH_MAX] = {0};
+                snprintf(user_config, sizeof(user_config), "%s/%s.nix",
+                         two9_config_dir(),
+                         get_current_username() ? get_current_username() : "");
+                snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
+                         two9_config_dir());
 
                 char *manifest_json = NULL;
                 char *eval_err = NULL;
                 struct stat st;
-                if (stat(user_config, &st) == 0)
+                if (user_config[0] && stat(user_config, &st) == 0)
                         manifest_json = eval_nix_config(user_config, &eval_err);
-                if (!manifest_json && stat(user_home_config, &st) == 0)
-                        manifest_json = eval_nix_config(user_home_config, &eval_err);
-                if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
-                        manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
+                if (!manifest_json && stat(system_config, &st) == 0)
+                        manifest_json = eval_nix_config(system_config, &eval_err);
 
                 if (!manifest_json) {
                         fprintf(stderr, "209: no config file found.\n");
@@ -604,7 +748,9 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
 
                 /* Cache dir: user's home */
                 char cache_dir[PATH_MAX];
-                snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/2O9/pkg", config_home);
+                char ch[PATH_MAX];
+                get_config_home(ch, sizeof(ch));
+                snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/2O9/pkg", ch);
                 /* mkdir -p */
                 char dir_buf[PATH_MAX];
                 strncpy(dir_buf, cache_dir, sizeof(dir_buf) - 1);
@@ -751,31 +897,32 @@ int cmd_install(const char *pkg_name)
         } else {
                 /* Use lib2O9 to find the package in the repo sync DBs,
                  * download it, and extract to the store. */
-                char config_home[PATH_MAX];
-                get_config_home(config_home, sizeof(config_home));
                 char user_config[PATH_MAX] = {0};
-                char user_home_config[PATH_MAX] = {0};
-                snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", config_home);
-                snprintf(user_home_config, sizeof(user_home_config), "%s/.config/2O9/home.nix", config_home);
+                char system_config[PATH_MAX] = {0};
+                snprintf(user_config, sizeof(user_config), "%s/%s.nix",
+                         two9_config_dir(),
+                         get_current_username() ? get_current_username() : "");
+                snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
+                         two9_config_dir());
 
                 char *manifest_json = NULL;
                 char *eval_err = NULL;
                 struct stat st;
-                /* Check 2O9.nix, then home.nix, then system config */
-                if (stat(user_config, &st) == 0)
+                /* Check /nix/config/<user>.nix, then /nix/config/2O9.nix */
+                if (user_config[0] && stat(user_config, &st) == 0)
                         manifest_json = eval_nix_config(user_config, &eval_err);
-                if (!manifest_json && stat(user_home_config, &st) == 0)
-                        manifest_json = eval_nix_config(user_home_config, &eval_err);
-                if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
-                        manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
+                if (!manifest_json && stat(system_config, &st) == 0)
+                        manifest_json = eval_nix_config(system_config, &eval_err);
 
                 if (!manifest_json) {
                         if (eval_err) {
                                 fprintf(stderr, "209: config evaluation failed: %s\n", eval_err);
                         } else {
                                 fprintf(stderr, "209: no config file found. I looked in:\n");
-                                fprintf(stderr, "    %s\n", user_config[0] ? user_config : "~/.config/2O9/2O9.nix");
-                                fprintf(stderr, "    %s\n", CONFIG_PATH);
+                                fprintf(stderr, "    %s\n",
+                                        user_config[0] ? user_config
+                                                       : "/nix/config/<user>.nix");
+                                fprintf(stderr, "    %s\n", system_config);
                                 fprintf(stderr, "\nRun `209 init` to create one, then `209 -Sy` to sync repos.\n");
                         }
                         free(eval_err);
@@ -824,7 +971,7 @@ int cmd_install(const char *pkg_name)
                         fprintf(stderr, "    Possible causes:\n");
                         fprintf(stderr, "    1. Repo DBs not synced. Run: 209 sync\n");
                         fprintf(stderr, "    2. Repo URLs in 2O9.nix are wrong (still mirror.example.com?)\n");
-                        fprintf(stderr, "       Fix: rm ~/.config/2O9/2O9.nix && 209 init\n");
+                        fprintf(stderr, "       Fix: rm /nix/config/2O9.nix && 209 init\n");
                         fprintf(stderr, "    3. Package is in AUR only. Try: 209 %s aur build\n", pkg_name);
                         fprintf(stderr, "\n    Debug: TWO09_DEBUG=1 209 apply\n");
                         alpm_release(handle);
@@ -1425,8 +1572,8 @@ static char *eval_nix_config(const char *config_path, char **err_out)
  *
  * Merge order (lowest to highest precedence):
  *   1. built-in defaults
- *   2. ~/.config/2O9/home.nix (user)
- *   3. /etc/2O9/2O9.nix (global)  ← wins on conflict
+ *   2. /nix/config/<user>.nix (user)
+ *   3. /nix/config/2O9.nix (global)  ← wins on conflict
  *   4. CLI flags (not handled here)
  *
  * For list values (e.g. "packages"), we concatenate - both user and
@@ -1715,7 +1862,7 @@ static int cmd_apply(void)
         /* The whole point of 2O9: evaluate the config, figure out what
          * changed, make it so. Concretely:
          *
-         *   1. Find the config (~/.config/2O9/home.nix + /etc/2O9/2O9.nix)
+         *   1. Find the config (/nix/config/<user>.nix + /nix/config/2O9.nix)
          *   2. Evaluate both with our own C Nix evaluator -> JSON manifest
          *   3. Merge them (global wins, packages concatenate)
          *   4. Diff the manifest against the current generation
@@ -1726,16 +1873,21 @@ static int cmd_apply(void)
          *   9. Run the activation phase (systemctl, sysusers, tmpfiles, ...)
          */
 
-        /* Step 1: Find config files. Check 2O9.nix (what 209 init creates),
-         * home.nix (user scope), and /etc/2O9/2O9.nix (system scope).
-         * Uses get_config_home() so `sudo 209 apply` finds the original
-         * user's config via SUDO_USER, not root's. */
-        char config_home[PATH_MAX];
-        get_config_home(config_home, sizeof(config_home));
-        char user_2O9[PATH_MAX] = {0};
-        char user_home[PATH_MAX] = {0};
-        snprintf(user_2O9, sizeof(user_2O9), "%s/.config/2O9/2O9.nix", config_home);
-        snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", config_home);
+        /* Refuse to run if pre-v2 config layout is present. */
+        if (old_config_detected()) return 1;
+
+        /* Step 1: Find config files. Per-user config is
+         * /nix/config/<user>.nix (uses SUDO_USER when running as root).
+         * System config is /nix/config/2O9.nix. */
+        char user_nix[PATH_MAX] = {0};
+        char system_nix[PATH_MAX] = {0};
+        const char *user = get_current_username();
+        if (user) {
+                snprintf(user_nix, sizeof(user_nix), "%s/%s.nix",
+                         two9_config_dir(), user);
+        }
+        snprintf(system_nix, sizeof(system_nix), "%s/2O9.nix",
+                 two9_config_dir());
 
         /* Step 2: Evaluate each config that exists */
         char *user_json = NULL;
@@ -1743,33 +1895,22 @@ static int cmd_apply(void)
         char *eval_err = NULL;
         struct stat st;
 
-        /* Check 2O9.nix first (what 209 init creates), then home.nix */
-        if (user_2O9[0] && stat(user_2O9, &st) == 0) {
-                printf("209: evaluating %s...\n", user_2O9);
-                user_json = eval_nix_config(user_2O9, &eval_err);
+        if (user_nix[0] && stat(user_nix, &st) == 0) {
+                printf("209: evaluating %s...\n", user_nix);
+                user_json = eval_nix_config(user_nix, &eval_err);
                 if (!user_json) {
-                        fprintf(stderr, "209: %s: %s\n", user_2O9,
-                                eval_err ? eval_err : "evaluation failed");
-                        free(eval_err);
-                        return 1;
-                }
-        }
-        if (!user_json && user_home[0] && stat(user_home, &st) == 0) {
-                printf("209: evaluating %s...\n", user_home);
-                user_json = eval_nix_config(user_home, &eval_err);
-                if (!user_json) {
-                        fprintf(stderr, "209: %s: %s\n", user_home,
+                        fprintf(stderr, "209: %s: %s\n", user_nix,
                                 eval_err ? eval_err : "evaluation failed");
                         free(eval_err);
                         return 1;
                 }
         }
 
-        if (stat(CONFIG_PATH, &st) == 0) {
-                printf("209: evaluating %s...\n", CONFIG_PATH);
-                global_json = eval_nix_config(CONFIG_PATH, &eval_err);
+        if (stat(system_nix, &st) == 0) {
+                printf("209: evaluating %s...\n", system_nix);
+                global_json = eval_nix_config(system_nix, &eval_err);
                 if (!global_json) {
-                        fprintf(stderr, "209: %s: %s\n", CONFIG_PATH,
+                        fprintf(stderr, "209: %s: %s\n", system_nix,
                                 eval_err ? eval_err : "evaluation failed");
                         free(user_json);
                         free(eval_err);
@@ -1779,9 +1920,8 @@ static int cmd_apply(void)
 
         if (!user_json && !global_json) {
                 fprintf(stderr, "209: no config file found. I looked in:\n");
-                if (user_2O9[0]) fprintf(stderr, "    %s\n", user_2O9);
-                if (user_home[0]) fprintf(stderr, "    %s\n", user_home);
-                fprintf(stderr, "    %s\n", CONFIG_PATH);
+                if (user_nix[0]) fprintf(stderr, "    %s\n", user_nix);
+                fprintf(stderr, "    %s\n", system_nix);
                 fprintf(stderr, "\nRun `209 init` to create a starter config.\n");
                 return 1;
         }
@@ -1799,7 +1939,7 @@ static int cmd_apply(void)
         }
 
         if (merged_both) {
-                printf("209: merged home.nix + 2O9.nix (global wins on conflict)\n");
+                printf("209: merged <user>.nix + 2O9.nix (global wins on conflict)\n");
         }
 
         /* Step 4: Open generation DB */char db_root[PATH_MAX];
@@ -2164,22 +2304,21 @@ static int cmd_sync(void)
          * manifest, then two9_alpm_init_from_manifest() configures an
          * alpm_handle_t with the sync DBs registered. */
         char *manifest_json = NULL;
-        char config_home[PATH_MAX];
-        get_config_home(config_home, sizeof(config_home));
-        char user_2O9[PATH_MAX] = {0};
-        char user_home[PATH_MAX] = {0};
-        snprintf(user_2O9, sizeof(user_2O9), "%s/.config/2O9/2O9.nix", config_home);
-        snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", config_home);
+        char user_config[PATH_MAX] = {0};
+        char system_config[PATH_MAX] = {0};
+        snprintf(user_config, sizeof(user_config), "%s/%s.nix",
+                 two9_config_dir(),
+                 get_current_username() ? get_current_username() : "");
+        snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
+                 two9_config_dir());
 
         char *eval_err = NULL;
         struct stat st;
-        /* Check 2O9.nix (what 209 init creates), then home.nix, then system config */
-        if (stat(user_2O9, &st) == 0)
-                manifest_json = eval_nix_config(user_2O9, &eval_err);
-        if (!manifest_json && stat(user_home, &st) == 0)
-                manifest_json = eval_nix_config(user_home, &eval_err);
-        if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
-                manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
+        /* Check /nix/config/<user>.nix, then /nix/config/2O9.nix */
+        if (user_config[0] && stat(user_config, &st) == 0)
+                manifest_json = eval_nix_config(user_config, &eval_err);
+        if (!manifest_json && stat(system_config, &st) == 0)
+                manifest_json = eval_nix_config(system_config, &eval_err);
 
         /* If we have a manifest, use the lib2O9 path */
         if (manifest_json) {
@@ -2203,7 +2342,7 @@ static int cmd_sync(void)
                         fprintf(stderr, "  sync failed: %s\n",
                                 alpm_strerror(alpm_errno(handle)));
                         fprintf(stderr, "  This usually means the repo URLs in 2O9.nix are wrong.\n");
-                        fprintf(stderr, "  Edit ~/.config/2O9/2O9.nix and set real mirror URLs.\n");
+                        fprintf(stderr, "  Edit /nix/config/2O9.nix and set real mirror URLs.\n");
                         alpm_release(handle);
                         free(eval_err);
                         return 1;
@@ -3344,63 +3483,33 @@ static int cmd_search(const char *term)
 }
 
 /* ── 209 init ──────────────────────────────────────────────────────
- * Creates a starter 2O9.nix in the user's config dir (~/.config/2O9/)
- * or system-wide (/etc/2O9/). Refuses to overwrite an existing file. */
-static int cmd_init(int scope)
+ * Create a starter config in /nix/config/.
+ *
+ *   209 init            - create /nix/config/<user>.nix +
+ *                         /nix/config/<user>.extra.nix for the current
+ *                         user, chowned to that user
+ *   209 init --system   - create /nix/config/2O9.nix +
+ *                         /nix/config/extra.nix as root
+ *   209 init --all      - for every user detected in /etc/passwd
+ *                         (uid >= 1000, /home/*, not root or nobody),
+ *                         create <user>.nix + <user>.extra.nix,
+ *                         chowned to each user
+ *
+ * Refuses to overwrite an existing file. Creates /nix/config (root:root
+ * 0755) if missing. */
+static int write_starter_nix(const char *path, int is_system)
 {
-        /* scope: 0 = user (~/.config/2O9/), 1 = system (/etc/2O9/) */
-        char path[PATH_MAX];
-        if (scope == 1) {
-                snprintf(path, sizeof(path), "/etc/2O9/2O9.nix");
-        } else {
-                char *home = getenv("HOME");
-                if (!home) {
-                        fprintf(stderr, "209: HOME not set, cannot determine user config dir\n");
-                        fprintf(stderr, "    try: 209 init --system\n");
-                        return 1;
-                }
-                snprintf(path, sizeof(path), "%s/.config/2O9/2O9.nix", home);
-        }
-
-        /* Check if file already exists */
-        struct stat st;
-        if (stat(path, &st) == 0) {
-                fprintf(stderr, "209: %s already exists - refusing to overwrite\n", path);
-                fprintf(stderr, "    edit it manually or remove it first\n");
-                return 1;
-        }
-
-        /* Create parent directory (mkdir -p) */
-        char dir[PATH_MAX];
-        snprintf(dir, sizeof(dir), "%s", path);
-        char *slash = strrchr(dir, '/');
-        if (slash) {
-                *slash = '\0';
-                /* Walk the path creating each component */
-                for (char *p = dir + 1; *p; p++) {
-                        if (*p == '/') {
-                                *p = '\0';
-                                (void)mkdir(dir, 0755);  /* ignore error if exists */
-                                *p = '/';
-                        }
-                }
-                if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
-                        fprintf(stderr, "209: cannot create %s: %s\n", dir, strerror(errno));
-                        return 1;
-                }
-        }
-
-        /* Write the starter config */
         FILE *f = fopen(path, "w");
         if (!f) {
                 fprintf(stderr, "209: cannot write %s: %s\n", path, strerror(errno));
-                return 1;
+                return -1;
         }
 
         fprintf(f, "{ config, ... }:\n");
         fprintf(f, "#\n");
         fprintf(f, "# 2O9 configuration - see https://github.com/Rui-727/2O9 for docs\n");
-        fprintf(f, "# This file declares what your system should have installed.\n");
+        fprintf(f, "# This file declares what %s should have installed.\n",
+                is_system ? "your system" : "your user");
         fprintf(f, "# Run `209 apply` to make the system match this file.\n");
         fprintf(f, "#\n");
         fprintf(f, "\n");
@@ -3452,11 +3561,207 @@ static int cmd_init(int scope)
         fprintf(f, "  #       else []);\n");
         fprintf(f, "}\n");
         fclose(f);
+        return 0;
+}
 
-        printf("created: %s\n", path);
-        printf("\n");
-        printf("next steps:\n");
-        printf("  1. Edit the file to match your needs\n");
+static int write_starter_extra(const char *path)
+{
+        FILE *f = fopen(path, "w");
+        if (!f) {
+                fprintf(stderr, "209: cannot write %s: %s\n", path, strerror(errno));
+                return -1;
+        }
+
+        fprintf(f, "# extra.nix - runtime build/cache config for 2O9.\n");
+        fprintf(f, "# See docs/CONFIG.md for all options.\n");
+        fprintf(f, "\n");
+        fprintf(f, "{\n");
+        fprintf(f, "  bin = {\n");
+        fprintf(f, "    Makepkg = \"makepkg\";\n");
+        fprintf(f, "    Git = \"git\";\n");
+        fprintf(f, "    Gpg = \"gpg\";\n");
+        fprintf(f, "    Sudo = \"sudo\";\n");
+        fprintf(f, "    # MFlags = [ \"--skippgpcheck\" \"--nocheck\" ];\n");
+        fprintf(f, "    # GitFlags = [ \"--depth\" \"1\" ];\n");
+        fprintf(f, "  };\n");
+        fprintf(f, "\n");
+        fprintf(f, "  chroot = {\n");
+        fprintf(f, "    Enabled = true;\n");
+        fprintf(f, "    Dir = \"/var/lib/2O9/chroot\";\n");
+        fprintf(f, "  };\n");
+        fprintf(f, "\n");
+        fprintf(f, "  # Named binary-cache subs. A narinfo is accepted if any\n");
+        fprintf(f, "  # of the listed PublicKeys verifies it. `209 cache push`\n");
+        fprintf(f, "  # pushes to every sub that has a SigningKey.\n");
+        fprintf(f, "  # subs = {\n");
+        fprintf(f, "  #   \"personal\" = {\n");
+        fprintf(f, "  #     URLs = [ \"https://cache.example.com\" ];\n");
+        fprintf(f, "  #     PublicKeys = [ \"key1base64==\" ];\n");
+        fprintf(f, "  #     AllowUnsigned = false;\n");
+        fprintf(f, "  #     SigningKey = \"/etc/2O9/personal-secret-key\";\n");
+        fprintf(f, "  #     KeyName = \"personal-1\";\n");
+        fprintf(f, "  #   };\n");
+        fprintf(f, "  # };\n");
+        fprintf(f, "}\n");
+        fclose(f);
+        return 0;
+}
+
+/* mkdir -p, ignoring EEXIST. Returns 0 on success or already-exists. */
+static int mkdir_p(const char *dir, mode_t mode)
+{
+        char tmp[PATH_MAX];
+        snprintf(tmp, sizeof(tmp), "%s", dir);
+        for (char *p = tmp + 1; *p; p++) {
+                if (*p == '/') {
+                        *p = '\0';
+                        if (mkdir(tmp, mode) < 0 && errno != EEXIST)
+                                return -1;
+                        *p = '/';
+                }
+        }
+        if (mkdir(tmp, mode) < 0 && errno != EEXIST) return -1;
+        return 0;
+}
+
+/* Create /nix/config/ if missing (root:root 0755). Returns 0 on
+ * success or if it already exists. */
+static int ensure_config_dir(void)
+{
+        const char *dir = two9_config_dir();
+        struct stat st;
+        if (stat(dir, &st) == 0) return 0;
+        if (mkdir_p(dir, 0755) < 0) {
+                fprintf(stderr, "209: cannot create %s: %s\n", dir, strerror(errno));
+                return -1;
+        }
+        /* Best-effort chown to root:root if we are root. */
+        if (getuid() == 0) chown(dir, 0, 0);
+        return 0;
+}
+
+/* Create a user-scoped config pair: <user>.nix and <user>.extra.nix.
+ * Refuses to overwrite. When running as root, chowns to <user>.
+ * Returns 0 on success, -1 on error. */
+static int init_user_configs(const char *username)
+{
+        char nix_path[PATH_MAX];
+        char extra_path[PATH_MAX];
+        snprintf(nix_path, sizeof(nix_path), "%s/%s.nix",
+                 two9_config_dir(), username);
+        snprintf(extra_path, sizeof(extra_path), "%s/%s.extra.nix",
+                 two9_config_dir(), username);
+
+        struct stat st;
+        if (stat(nix_path, &st) == 0) {
+                fprintf(stderr, "209: %s already exists, skipping\n", nix_path);
+                return -1;
+        }
+        if (stat(extra_path, &st) == 0) {
+                fprintf(stderr, "209: %s already exists, skipping\n", extra_path);
+                return -1;
+        }
+
+        if (write_starter_nix(nix_path, 0) != 0) return -1;
+        if (write_starter_extra(extra_path) != 0) {
+                unlink(nix_path);
+                return -1;
+        }
+        chmod(nix_path, 0644);
+        chmod(extra_path, 0644);
+
+        /* Best-effort chown to the target user when running as root. */
+        if (getuid() == 0) {
+                struct passwd *pw = getpwnam(username);
+                if (pw) {
+                        chown(nix_path, pw->pw_uid, pw->pw_gid);
+                        chown(extra_path, pw->pw_uid, pw->pw_gid);
+                }
+        }
+        printf("created: %s\n", nix_path);
+        printf("created: %s\n", extra_path);
+        return 0;
+}
+
+static int cmd_init(int scope)
+{
+        /* scope: 0 = user, 1 = system, 2 = all detected users */
+        if (old_config_detected()) return 1;
+        if (ensure_config_dir() != 0) return 1;
+
+        if (scope == 1) {
+                /* System-wide: /nix/config/2O9.nix + /nix/config/extra.nix */
+                char nix_path[PATH_MAX];
+                char extra_path[PATH_MAX];
+                snprintf(nix_path, sizeof(nix_path), "%s/2O9.nix",
+                         two9_config_dir());
+                snprintf(extra_path, sizeof(extra_path), "%s/extra.nix",
+                         two9_config_dir());
+
+                struct stat st;
+                if (stat(nix_path, &st) == 0) {
+                        fprintf(stderr, "209: %s already exists, refusing to overwrite\n",
+                                nix_path);
+                        return 1;
+                }
+                if (stat(extra_path, &st) == 0) {
+                        fprintf(stderr, "209: %s already exists, refusing to overwrite\n",
+                                extra_path);
+                        return 1;
+                }
+                if (write_starter_nix(nix_path, 1) != 0) return 1;
+                if (write_starter_extra(extra_path) != 0) {
+                        unlink(nix_path);
+                        return 1;
+                }
+                chmod(nix_path, 0644);
+                chmod(extra_path, 0644);
+                if (getuid() == 0) {
+                        chown(nix_path, 0, 0);
+                        chown(extra_path, 0, 0);
+                }
+                printf("created: %s\n", nix_path);
+                printf("created: %s\n", extra_path);
+                printf("\nnext steps:\n");
+                printf("  1. Edit the files to match your needs\n");
+                printf("  2. Run `209 sync` to download repo databases\n");
+                printf("  3. Run `209 apply` to install everything\n");
+                return 0;
+        }
+
+        if (scope == 2) {
+                /* All detected users. */
+                char **users = detect_all_users();
+                if (!users) {
+                        fprintf(stderr, "209: no real users detected in /etc/passwd\n");
+                        fprintf(stderr, "    (looking for uid >= 1000 with /home/* home dir)\n");
+                        return 1;
+                }
+                int failures = 0;
+                for (size_t i = 0; users[i]; i++) {
+                        if (init_user_configs(users[i]) != 0) failures++;
+                }
+                free_user_list(users);
+                if (failures) {
+                        printf("\n%d user(s) skipped (config already existed)\n", failures);
+                }
+                printf("\nnext steps:\n");
+                printf("  1. Each user edits their <user>.nix\n");
+                printf("  2. Run `209 sync` to download repo databases\n");
+                printf("  3. Run `sudo 209 apply` to install system-wide\n");
+                return 0;
+        }
+
+        /* scope == 0: current user. */
+        const char *user = get_current_username();
+        if (!user) {
+                fprintf(stderr, "209: cannot determine current username\n");
+                fprintf(stderr, "    try: 209 init --system\n");
+                return 1;
+        }
+        if (init_user_configs(user) != 0) return 1;
+        printf("\nnext steps:\n");
+        printf("  1. Edit the files to match your needs\n");
         printf("  2. Run `209 sync` to download repo databases\n");
         printf("  3. Run `209 apply` to install everything\n");
         return 0;
@@ -4002,28 +4307,84 @@ static int cmd_cache(int argc, char **argv)
 
 /* ── Phase 3: binary cache push / pull / keygen ──────────────────── */
 
-/* Build a binary_cache_t for each configured substituter URL.
- * Returns a NULL-terminated list (caller frees each + the list).
- * Returns NULL if no substituters configured. */
-static binary_cache_t **build_substituter_list(const two9_config_t *cfg)
+/* Count entries in a NULL-terminated string list. */
+static size_t str_list_len(char **list)
 {
-        if (!cfg || !cfg->substituters || !cfg->substituters[0])
-                return NULL;
         size_t n = 0;
-        while (cfg->substituters[n]) n++;
-        binary_cache_t **list = calloc(n + 1, sizeof(binary_cache_t *));
+        if (list) while (list[n]) n++;
+        return n;
+}
+
+/* Deep-copy a NULL-terminated string list. Returns NULL if input is
+ * NULL or empty. Caller frees with free_str_list (the same free used
+ * by config.c, but we don't have it here - reimplement inline). */
+static char **str_list_dup(const char *const *list)
+{
         if (!list) return NULL;
+        size_t n = 0;
+        while (list[n]) n++;
+        if (n == 0) return NULL;
+        char **copy = calloc(n + 1, sizeof(char *));
+        if (!copy) return NULL;
         for (size_t i = 0; i < n; i++) {
-                list[i] = binary_cache_new(cfg->substituters[i],
-                                            cfg->public_key_b64,
-                                            cfg->allow_unsigned);
-                if (!list[i]) {
-                        for (size_t j = 0; j < i; j++) binary_cache_free(list[j]);
-                        free(list);
+                copy[i] = strdup(list[i]);
+                if (!copy[i]) {
+                        for (size_t j = 0; j < i; j++) free(copy[j]);
+                        free(copy);
                         return NULL;
                 }
         }
-        list[n] = NULL;
+        copy[n] = NULL;
+        return copy;
+}
+
+static void str_list_free(char **list)
+{
+        if (!list) return;
+        for (size_t i = 0; list[i]; i++) free(list[i]);
+        free(list);
+}
+
+/* Build a binary_cache_t for each URL in each configured sub. Each
+ * cache gets its own copy of the sub's PublicKeys list (the cache
+ * takes ownership). Returns a NULL-terminated list (caller frees each
+ * cache + the list). Returns NULL if no subs are configured. */
+static binary_cache_t **build_substituter_list(const two9_config_t *cfg)
+{
+        if (!cfg || !cfg->subs) return NULL;
+
+        /* First pass: count total URLs across all subs. */
+        size_t total = 0;
+        for (two9_sub_t *s = cfg->subs; s; s = s->next) {
+                total += str_list_len(s->urls);
+        }
+        if (total == 0) return NULL;
+
+        binary_cache_t **list = calloc(total + 1, sizeof(binary_cache_t *));
+        if (!list) return NULL;
+
+        size_t i = 0;
+        for (two9_sub_t *s = cfg->subs; s; s = s->next) {
+                if (!s->urls) continue;
+                for (size_t u = 0; s->urls[u]; u++) {
+                        /* Each cache needs its own copy of the keys list
+                         * because binary_cache_new takes ownership. */
+                        char **keys_copy = str_list_dup(
+                                (const char *const *)s->public_keys);
+                        list[i] = binary_cache_new(s->urls[u],
+                                                    keys_copy,
+                                                    s->allow_unsigned);
+                        if (!list[i]) {
+                                if (keys_copy) str_list_free(keys_copy);
+                                for (size_t j = 0; j < i; j++)
+                                        binary_cache_free(list[j]);
+                                free(list);
+                                return NULL;
+                        }
+                        i++;
+                }
+        }
+        list[i] = NULL;
         return list;
 }
 
@@ -4034,20 +4395,20 @@ static void free_substituter_list(binary_cache_t **list)
         free(list);
 }
 
-/* Load the signing key (if configured) into pub/sec/name buffers.
+/* Load the signing key for one sub into pub/sec/name buffers.
  * Returns 0 on success, -1 if no key configured or load failed. */
-static int load_signing_key(const two9_config_t *cfg,
-                            char **out_name,
-                            unsigned char *out_pub /* 32 */,
-                            unsigned char *out_sec /* 32 */)
+static int load_signing_key_for_sub(const two9_sub_t *s,
+                                    char **out_name,
+                                    unsigned char *out_pub /* 32 */,
+                                    unsigned char *out_sec /* 32 */)
 {
-        if (!cfg || !cfg->signing_key_file) return -1;
+        if (!s || !s->signing_key_file) return -1;
         char *name = NULL;
-        if (signing_load_keyfile(cfg->signing_key_file, &name, out_pub, out_sec) != 0)
+        if (signing_load_keyfile(s->signing_key_file, &name, out_pub, out_sec) != 0)
                 return -1;
         /* Prefer config-supplied KeyName if set; else use the file's. */
-        *out_name = cfg->signing_key_name ? strdup(cfg->signing_key_name) : name;
-        if (cfg->signing_key_name) free(name);
+        *out_name = s->signing_key_name ? strdup(s->signing_key_name) : name;
+        if (s->signing_key_name) free(name);
         return 0;
 }
 
@@ -4065,7 +4426,7 @@ static int try_substitute_pkg(const char *pkg_name, const char *pkg_version,
         *store_path_out = NULL;
         two9_config_t *cfg = two9_config_load();
         if (!cfg) return -1;
-        if (!cfg->substituters || !cfg->substituters[0]) {
+        if (!cfg->subs) {
                 two9_config_free(cfg);
                 return -1;
         }
@@ -4131,7 +4492,8 @@ static int try_substitute_pkg(const char *pkg_name, const char *pkg_version,
 }
 
 /* `209 cache push <store-path>` - upload a store path + its closure
- * to all configured caches. */
+ * to all configured subs that have a SigningKey. Each sub pushes to
+ * every URL it lists, signed with that sub's own key. */
 static int cmd_cache_push(int argc, char **argv)
 {
         if (argc < 1) {
@@ -4166,25 +4528,9 @@ static int cmd_cache_push(int argc, char **argv)
 
         two9_config_t *cfg = two9_config_load();
         if (!cfg) { free(store_path); return 1; }
-        if (!cfg->substituters || !cfg->substituters[0]) {
-                fprintf(stderr, "209: no substituters configured in extra.nix\n");
-                fprintf(stderr, "    add a substituters.URLs entry\n");
-                two9_config_free(cfg);
-                free(store_path);
-                return 1;
-        }
-
-        /* Load signing key (optional - push works unsigned if KeyName
-         * and SigningKey are not set). */
-        char *key_name = NULL;
-        unsigned char sec[32];
-        unsigned char pub[32];
-        int have_key = (load_signing_key(cfg, &key_name, pub, sec) == 0);
-
-        binary_cache_t **caches = build_substituter_list(cfg);
-        if (!caches) {
-                fprintf(stderr, "209: failed to build substituter list\n");
-                free(key_name);
+        if (!cfg->subs) {
+                fprintf(stderr, "209: no subs configured in extra.nix\n");
+                fprintf(stderr, "    add a subs.<name> = { URLs = ...; SigningKey = ...; } entry\n");
                 two9_config_free(cfg);
                 free(store_path);
                 return 1;
@@ -4212,33 +4558,79 @@ static int cmd_cache_push(int argc, char **argv)
                 n_closure = 1;
         }
 
+        /* Walk each sub. Push to every URL in each sub that has a
+         * signing key, signed with that sub's own key. Subs without
+         * a SigningKey are skipped (cache push needs a key to sign). */
         int failed = 0;
-        for (size_t i = 0; i < n_closure; i++) {
-                const char *p = closure[i];
-                printf("pushing %s\n", p);
-                for (size_t c = 0; caches[c]; c++) {
-                        int rc = binary_cache_push(caches[c], p, db,
-                                                    key_name,
-                                                    have_key ? sec : NULL);
-                        if (rc != 0) {
-                                fprintf(stderr, "  failed on %s\n",
-                                        caches[c]->base_url);
-                                failed = 1;
-                        }
+        int pushed_any = 0;
+        for (two9_sub_t *s = cfg->subs; s; s = s->next) {
+                if (!s->urls || !s->urls[0]) continue;
+                if (!s->signing_key_file) {
+                        fprintf(stderr,
+                                "209: sub '%s' has no SigningKey, skipping push\n",
+                                s->name ? s->name : "(unnamed)");
+                        continue;
                 }
+
+                char *key_name = NULL;
+                unsigned char sec[32];
+                unsigned char pub[32];
+                if (load_signing_key_for_sub(s, &key_name, pub, sec) != 0) {
+                        fprintf(stderr,
+                                "209: sub '%s': cannot load SigningKey %s\n",
+                                s->name ? s->name : "(unnamed)",
+                                s->signing_key_file);
+                        failed = 1;
+                        continue;
+                }
+
+                for (size_t u = 0; s->urls[u]; u++) {
+                        /* Each cache needs its own keys list copy because
+                         * binary_cache_new takes ownership. We pass NULL
+                         * here for verification keys since push doesn't
+                         * verify, only signs. */
+                        binary_cache_t *bc = binary_cache_new(s->urls[u], NULL, 1);
+                        if (!bc) {
+                                fprintf(stderr, "209: cannot init cache for %s\n",
+                                        s->urls[u]);
+                                failed = 1;
+                                continue;
+                        }
+                        for (size_t i = 0; i < n_closure; i++) {
+                                const char *p = closure[i];
+                                printf("pushing %s to %s (sub '%s')\n", p,
+                                       s->urls[u],
+                                       s->name ? s->name : "(unnamed)");
+                                int rc = binary_cache_push(bc, p, db,
+                                                            key_name, sec);
+                                if (rc != 0) {
+                                        fprintf(stderr, "  failed on %s\n",
+                                                s->urls[u]);
+                                        failed = 1;
+                                } else {
+                                        pushed_any = 1;
+                                }
+                        }
+                        binary_cache_free(bc);
+                }
+                free(key_name);
         }
 
         for (size_t i = 0; i < n_closure; i++) free(closure[i]);
         free(closure);
         if (db) store_db_close(db);
-        free_substituter_list(caches);
-        free(key_name);
         two9_config_free(cfg);
         free(store_path);
+        if (!pushed_any && !failed) {
+                fprintf(stderr, "209: no sub had a SigningKey; nothing pushed\n");
+                return 1;
+        }
         return failed ? 1 : 0;
 }
 
-/* `209 cache pull <store-path>` - explicitly fetch from configured caches. */
+/* `209 cache pull <store-path>` - explicitly fetch from configured subs.
+ * Tries each sub in config order, and within each sub tries each URL in
+ * order. Stops at the first successful fetch. */
 static int cmd_cache_pull(int argc, char **argv)
 {
         if (argc < 1) {
@@ -4253,8 +4645,8 @@ static int cmd_cache_pull(int argc, char **argv)
 
         two9_config_t *cfg = two9_config_load();
         if (!cfg) return 1;
-        if (!cfg->substituters || !cfg->substituters[0]) {
-                fprintf(stderr, "209: no substituters configured\n");
+        if (!cfg->subs) {
+                fprintf(stderr, "209: no subs configured\n");
                 two9_config_free(cfg);
                 return 1;
         }
@@ -4277,7 +4669,7 @@ static int cmd_cache_pull(int argc, char **argv)
 
         free_substituter_list(caches);
         if (!ok) {
-                fprintf(stderr, "209: not found on any configured cache\n");
+                fprintf(stderr, "209: not found on any configured sub\n");
                 return 1;
         }
         return 0;
@@ -4327,9 +4719,9 @@ static int cmd_keygen(int argc, char **argv)
         if (out != stdout) {
                 fclose(out);
                 fprintf(stderr, "wrote keypair to %s\n", out_path);
-                fprintf(stderr, "public key (add to extra.nix substituters.PublicKey): %s\n", pub_b64);
+                fprintf(stderr, "public key (add to extra.nix subs.<name>.PublicKeys): %s\n", pub_b64);
         } else {
-                fprintf(stderr, "public key (add to extra.nix substituters.PublicKey): %s\n", pub_b64);
+                fprintf(stderr, "public key (add to extra.nix subs.<name>.PublicKeys): %s\n", pub_b64);
         }
 
         /* Best-effort: scrub the secret from memory. */
@@ -4899,22 +5291,21 @@ static int cmd_upgrade(int use_sandbox)
         printf("%s=== Checking for upgrades ===%s\n\n", C_BOLD(), C_RESET());
 
         /* Try using lib2O9 to compare installed vs sync DBs */
-        char config_home[PATH_MAX];
-        get_config_home(config_home, sizeof(config_home));
         char user_config[PATH_MAX] = {0};
-        char user_home[PATH_MAX] = {0};
-        snprintf(user_config, sizeof(user_config), "%s/.config/2O9/2O9.nix", config_home);
-        snprintf(user_home, sizeof(user_home), "%s/.config/2O9/home.nix", config_home);
+        char system_config[PATH_MAX] = {0};
+        snprintf(user_config, sizeof(user_config), "%s/%s.nix",
+                 two9_config_dir(),
+                 get_current_username() ? get_current_username() : "");
+        snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
+                 two9_config_dir());
 
         char *manifest_json = NULL;
         char *eval_err = NULL;
         struct stat st;
-        if (stat(user_config, &st) == 0)
+        if (user_config[0] && stat(user_config, &st) == 0)
                 manifest_json = eval_nix_config(user_config, &eval_err);
-        if (!manifest_json && stat(user_home, &st) == 0)
-                manifest_json = eval_nix_config(user_home, &eval_err);
-        if (!manifest_json && stat(CONFIG_PATH, &st) == 0)
-                manifest_json = eval_nix_config(CONFIG_PATH, &eval_err);
+        if (!manifest_json && stat(system_config, &st) == 0)
+                manifest_json = eval_nix_config(system_config, &eval_err);
 
         if (!manifest_json) {
                 fprintf(stderr, "209 -Su: no 2O9.nix config found - cannot init lib2O9\n");
@@ -5189,11 +5580,11 @@ int main(int argc, char *argv[])
                         fprintf(stderr, "209: this operation needs root (writes to /nix/store/)\n");
                         fprintf(stderr, "    re-running with sudo...\n\n");
 
-                        /* Use sudo --preserve-env=HOME so the elevated process
-                         * can find the user's config (~/.config/2O9/2O9.nix)
-                         * and generation DB (~/.local/state/2O9) instead of
-                         * root's. Without this, sudo sets HOME=/root and the
-                         * user's config becomes invisible. */
+                        /* Use sudo --preserve-env=HOME so the elevated
+                         * process can resolve SUDO_USER (used to locate
+                         * /nix/config/<user>.nix) and the user's
+                         * generation DB (~/.local/state/2O9) instead of
+                         * root's. */
                         char **new_argv = malloc((argc + 4) * sizeof(char *));
                         int j = 0;
                         new_argv[j++] = "sudo";
@@ -5377,10 +5768,12 @@ int main(int argc, char *argv[])
                 return cmd_news();
         }
         if (strcmp(argv[1], "init") == 0) {
-                /* 209 init [--system] */
+                /* 209 init [--system | --all] */
                 int scope = 0;  /* user by default */
                 if (argc >= 3 && strcmp(argv[2], "--system") == 0)
                         scope = 1;
+                else if (argc >= 3 && strcmp(argv[2], "--all") == 0)
+                        scope = 2;
                 return cmd_init(scope);
         }
         if (strcmp(argv[1], "trakker") == 0) {

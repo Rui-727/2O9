@@ -23,7 +23,7 @@ DEFS = -D_GNU_SOURCE \
        -DPACKAGE='"2O9"' \
        -DPACKAGE_VERSION='"$(VERSION)"' \
        -DSTORE_ROOT='"/nix/store"' \
-       -DCONFIG_PATH='"/etc/2O9/2O9.nix"' \
+       -DCONFIG_PATH='"/nix/config/2O9.nix"' \
        -DDBPATH='"/var/lib/2O9/"' \
        -DCACHEDIR='"/var/cache/2O9/pkg/"' \
        -DPROFILE_DIR='"/nix/var/nix/profiles/per-user/2O9-system"' \
@@ -108,22 +108,22 @@ CAPSTONE_LIBS :=
 CAPSTONE_CFLAGS :=
 endif
 ALPM_DEFS = -DHAVE_LIBCURL -DHAVE_LIBARCHIVE -DHAVE_LIBGPGME -DHAVE_LIBSSL \
-	    -DHAVE_STRNLEN \
-	    -DHAVE_SYS_STATVFS_H -DHAVE_SYS_MOUNT_H -DHAVE_SYS_TYPES_H \
-	    -DFSSTATSTYPE='struct statvfs' \
-	    -DSYSHOOKDIR='"/usr/lib/systemd/hooks"' \
-	    -DSCRIPTLET_SHELL='"/bin/sh"' \
-	    -DLDCONFIG='"/sbin/ldconfig"' \
-	    -DLOCALEDIR='"/usr/share/locale"' \
-	    -DLIB_VERSION='"13.0.0"' \
-	    -D_FILE_OFFSET_BITS=64
+            -DHAVE_STRNLEN \
+            -DHAVE_SYS_STATVFS_H -DHAVE_SYS_MOUNT_H -DHAVE_SYS_TYPES_H \
+            -DFSSTATSTYPE='struct statvfs' \
+            -DSYSHOOKDIR='"/usr/lib/systemd/hooks"' \
+            -DSCRIPTLET_SHELL='"/bin/sh"' \
+            -DLDCONFIG='"/sbin/ldconfig"' \
+            -DLOCALEDIR='"/usr/share/locale"' \
+            -DLIB_VERSION='"13.0.0"' \
+            -D_FILE_OFFSET_BITS=64
 
 ALPM_CFLAGS = $(CFLAGS) $(ALPM_DEFS) $(DEFS) \
-	      -Ilib/2O9/alpm -Ilib/2O9/common -Isrc/aur \
-	      $(LIB2O9_DEPS_INCS) \
-	      -Wno-unused-parameter -Wno-format-truncation -Wno-comment \
-	      -Wno-address-of-packed-member -Wno-multichar -Wno-switch \
-	      -Wno-calloc-transposed-args
+              -Ilib/2O9/alpm -Ilib/2O9/common -Isrc/aur \
+              $(LIB2O9_DEPS_INCS) \
+              -Wno-unused-parameter -Wno-format-truncation -Wno-comment \
+              -Wno-address-of-packed-member -Wno-multichar -Wno-switch \
+              -Wno-calloc-transposed-args
 
 ALPM_SRC = $(wildcard lib/2O9/alpm/*.c) $(wildcard lib/2O9/common/*.c)
 ALPM_OBJ = $(patsubst lib/2O9/%.c,lib/2O9/%.o,$(ALPM_SRC))
@@ -131,13 +131,13 @@ ALPM_OBJ = $(patsubst lib/2O9/%.c,lib/2O9/%.o,$(ALPM_SRC))
 # ── 209 binary source ──
 CLI_SRC   = src/cli/main.c
 STORE_SRC = src/store/store.c src/store/symlinks.c src/store/nar.c src/store/optimise.c \
-	    src/store/narinfo.c src/store/binary-cache.c src/store/signing.c
+            src/store/narinfo.c src/store/binary-cache.c src/store/signing.c
 ifeq ($(HAVE_SQLITE3),yes)
 STORE_SRC += src/store/db.c
 endif
 DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/reconcile_execute.c src/declarative/activation.c src/declarative/gen_index.c
 AUR_SRC   = src/aur/aur_rpc.c src/aur/aur_build.c src/aur/aur_resolve.c \
-	    src/aur/chroot.c src/aur/pgp.c src/aur/config.c
+            src/aur/chroot.c src/aur/pgp.c src/aur/config.c
 TRAK_SRC  = src/trakker/trakker.c src/debag/debag.c src/debag/static_analysis.c src/debag/seccomp_filter.c src/debag/script_analysis.c src/debag/dynamic_db.c src/debag/static_db.c
 NIX_SRC   = lib/2O9/nix/nix_eval.c lib/2O9/nix/nix_lexer.c lib/2O9/nix/nix_parser.c
 
@@ -148,11 +148,11 @@ OBJ = $(SRC:.c=.o)
 # libgpgme + assuan + gpg-error for signature verification, openssl for crypto,
 # plus libarchive's transitive deps (zlib, lzma, bz2, lz4, zstd, nettle, gmp).
 LIB2O9_LIBS = -lcurl -larchive -lgpgme -lassuan -lgpg-error -lcrypto -lsqlite3 \
-	      -lz -llzma -lbz2 -llz4 -lzstd -lnettle -lhogweed -lgmp \
-	      -lxml2 -lacl -lm -lseccomp -ldl \
-	      $(SODIUM_LIBS) \
-	      $(CAPSTONE_LIBS) \
-	      $(LIB2O9_DEPS_LIBS)
+              -lz -llzma -lbz2 -llz4 -lzstd -lnettle -lhogweed -lgmp \
+              -lxml2 -lacl -lm -lseccomp -ldl \
+              $(SODIUM_LIBS) \
+              $(CAPSTONE_LIBS) \
+              $(LIB2O9_DEPS_LIBS)
 
 all: 209 test-aur-rpc test-nix-lexer test-nix-eval test-nix-eval-edge \
      test-nar test-db test-signing test-narinfo test-keygen
@@ -187,13 +187,13 @@ test-db: src/store/test_db.o src/store/db.o
 	$(CC) $(CFLAGS) -o $@ $^ -lsqlite3
 
 test-signing: src/store/test_signing.o src/store/signing.o
-	$(CC) $(CFLAGS) -o $@ $^ -lcrypto $(SODIUM_LIBS)
+	$(CC) $(CFLAGS) -o $@ $^ -lcrypto $(SODIUM_LIBS) $(LIB2O9_DEPS_LIBS)
 
 test-narinfo: src/store/test_narinfo.o src/store/narinfo.o src/store/nar.o src/store/signing.o src/store/db.o
-	$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lsqlite3 $(SODIUM_LIBS)
+	$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lsqlite3 $(SODIUM_LIBS) $(LIB2O9_DEPS_LIBS)
 
 test-keygen: src/store/test_keygen.o src/store/signing.o
-	$(CC) $(CFLAGS) -o $@ $^ -lcrypto $(SODIUM_LIBS)
+	$(CC) $(CFLAGS) -o $@ $^ -lcrypto $(SODIUM_LIBS) $(LIB2O9_DEPS_LIBS)
 
 # Pattern rule for 209-specific objects (uses 209 INCS)
 %.o: %.c
@@ -206,13 +206,13 @@ lib/2O9/%.o: lib/2O9/%.c
 
 clean:
 	rm -f 209 test-aur-rpc test-nix-lexer test-nix-eval test-nix-eval-edge \
-	      test-nar test-db test-signing test-narinfo test-keygen \
-	      lib2O9.a \
-	      $(OBJ) $(ALPM_OBJ) \
-	      src/aur/test_aur_rpc.o lib/2O9/nix/test_nix_lexer.o lib/2O9/nix/test_nix_eval.o \
-	      lib/2O9/nix/test_nix_eval_edge.o \
-	      src/store/test_nar.o src/store/test_db.o src/store/test_signing.o \
-	      src/store/test_narinfo.o src/store/test_keygen.o
+              test-nar test-db test-signing test-narinfo test-keygen \
+              lib2O9.a \
+              $(OBJ) $(ALPM_OBJ) \
+              src/aur/test_aur_rpc.o lib/2O9/nix/test_nix_lexer.o lib/2O9/nix/test_nix_eval.o \
+              lib/2O9/nix/test_nix_eval_edge.o \
+              src/store/test_nar.o src/store/test_db.o src/store/test_signing.o \
+              src/store/test_narinfo.o src/store/test_keygen.o
 
 install: 209
 	install -d $(DESTDIR)$(PREFIX)/bin
@@ -226,34 +226,34 @@ test: test-nix-eval test-nix-eval-edge test-nix-lexer test-aur-rpc \
       test-nar test-db test-signing test-narinfo test-keygen
 	@echo "=== running unit tests ==="
 	@./test-nix-eval >/tmp/209-test-nix-eval.log 2>&1; rc=$$?; \
-		tail -1 /tmp/209-test-nix-eval.log; \
-		if [ $$rc -ne 0 ]; then exit 1; fi
+                tail -1 /tmp/209-test-nix-eval.log; \
+                if [ $$rc -ne 0 ]; then exit 1; fi
 	@./test-nix-lexer >/tmp/209-test-nix-lexer.log 2>&1; rc=$$?; \
-		tail -1 /tmp/209-test-nix-lexer.log; \
-		if [ $$rc -ne 0 ]; then exit 1; fi
+                tail -1 /tmp/209-test-nix-lexer.log; \
+                if [ $$rc -ne 0 ]; then exit 1; fi
 	@./test-nix-eval-edge >/tmp/209-test-nix-eval-edge.log 2>&1; rc=$$?; \
-		tail -1 /tmp/209-test-nix-eval-edge.log; \
-		if [ $$rc -ne 0 ]; then exit 1; fi
+                tail -1 /tmp/209-test-nix-eval-edge.log; \
+                if [ $$rc -ne 0 ]; then exit 1; fi
 	@./test-aur-rpc >/tmp/209-test-aur-rpc.log 2>&1; rc=$$?; \
-		tail -3 /tmp/209-test-aur-rpc.log; \
-		if [ $$rc -ne 0 ]; then echo "  (aur-rpc needs network; skipping)"; fi
+                tail -3 /tmp/209-test-aur-rpc.log; \
+                if [ $$rc -ne 0 ]; then echo "  (aur-rpc needs network; skipping)"; fi
 	@./test-nar >/tmp/209-test-nar.log 2>&1; rc=$$?; \
-		tail -1 /tmp/209-test-nar.log; \
-		if [ $$rc -ne 0 ]; then exit 1; fi
+                tail -1 /tmp/209-test-nar.log; \
+                if [ $$rc -ne 0 ]; then exit 1; fi
 	@./test-db >/tmp/209-test-db.log 2>&1; rc=$$?; \
-		tail -1 /tmp/209-test-db.log; \
-		if [ $$rc -ne 0 ]; then exit 1; fi
+                tail -1 /tmp/209-test-db.log; \
+                if [ $$rc -ne 0 ]; then exit 1; fi
 	@./test-signing >/tmp/209-test-signing.log 2>&1; rc=$$?; \
-		tail -1 /tmp/209-test-signing.log; \
-		if [ $$rc -ne 0 ]; then exit 1; fi
+                tail -1 /tmp/209-test-signing.log; \
+                if [ $$rc -ne 0 ]; then exit 1; fi
 	@./test-narinfo >/tmp/209-test-narinfo.log 2>&1; rc=$$?; \
-		tail -1 /tmp/209-test-narinfo.log; \
-		if [ $$rc -ne 0 ]; then exit 1; fi
+                tail -1 /tmp/209-test-narinfo.log; \
+                if [ $$rc -ne 0 ]; then exit 1; fi
 	@./test-keygen >/dev/null 2>&1 || true
 	@echo "=== running integration tests ==="
 	@for t in test/test_*.sh; do \
-		echo "--- $$t ---"; \
-		./$$t ./209 || exit 1; \
+                echo "--- $$t ---"; \
+                ./$$t ./209 || exit 1; \
 	done
 	@echo "=== all tests passed ==="
 

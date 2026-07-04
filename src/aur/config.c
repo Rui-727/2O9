@@ -1,9 +1,9 @@
 /* config.c - extra.nix evaluator for 2O9 runtime config
  *
- * Reads ~/.config/2O9/extra.nix (or /etc/2O9/extra.nix for system-wide)
- * and evaluates it with the project's own C Nix evaluator (lib/2O9/nix).
- * The evaluator returns a JSON string, which we parse with cJSON and walk
- * to populate two9_config_t.
+ * Reads /nix/config/<user>.extra.nix (or /nix/config/extra.nix for
+ * system-wide) and evaluates it with the project's own C Nix evaluator
+ * (lib/2O9/nix). The evaluator returns a JSON string, which we parse
+ * with cJSON and walk to populate two9_config_t.
  *
  * This honors locked decision #7 in DESIGN.md: "One declarative config
  * format: Nix." There is no separate INI file anymore.
@@ -25,12 +25,14 @@
  *       Dir = "/var/lib/2O9/chroot";
  *     };
  *
- *     substituters = {
- *       URLs = [ "https://cache.example.com" ];
- *       PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
- *       AllowUnsigned = false;
- *       SigningKey = "/etc/2O9/secret-key";
- *       KeyName = "cache.example.com-1";
+ *     subs = {
+ *       "personal" = {
+ *         URLs = [ "https://cache.example.com" "s3://backup-bucket" ];
+ *         PublicKeys = [ "key1base64==" "key2base64==" ];
+ *         AllowUnsigned = false;
+ *         SigningKey = "/etc/2O9/personal-secret-key";
+ *         KeyName = "personal-1";
+ *       };
  *     };
  *   }
  *
@@ -42,10 +44,15 @@
  * Missing file = use defaults (chroot on, default binaries, no mflags).
  * Unknown keys are silently ignored (forward-compat).
  *
+ * Backward compat: the old flat `substituters` block (with a single
+ * PublicKey string) is still parsed as a single sub named "legacy".
+ * A deprecation warning is printed to stderr.
+ *
  * The two9_config_t struct, two9_config_load() / two9_config_free()
  * signatures are unchanged from the old INI parser; only the file format
  * and parser change. Callers (src/cli/main.c, src/aur/aur_build.c) are
- * not affected.
+ * not affected by the file format change, but main.c's substituter
+ * iteration was updated to walk cfg->subs (linked list).
  */
 
 /* _GNU_SOURCE is provided by the Makefile (-D_GNU_SOURCE). */
@@ -55,6 +62,7 @@
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
+#include <pwd.h>
 
 #include "config.h"
 #include "nix_eval.h"
@@ -65,6 +73,28 @@
 #define DEFAULT_GPG_BIN     "gpg"
 #define DEFAULT_SUDO_BIN    "sudo"
 #define DEFAULT_CHROOT_DIR  "/var/lib/2O9/chroot"
+
+/* The config dir is fixed at /nix/config per the v2 layout.
+ * TWO9_CONFIG_DIR env var overrides for testing. */
+static const char *config_dir(void)
+{
+        const char *env = getenv("TWO9_CONFIG_DIR");
+        if (env && *env) return env;
+        return "/nix/config";
+}
+
+/* Resolve the username for the per-user extra.nix path.
+ * If running as root via sudo, use SUDO_USER; else getpwuid(getuid()). */
+static const char *current_username(void)
+{
+        if (getuid() == 0) {
+                const char *su = getenv("SUDO_USER");
+                if (su && *su) return su;
+        }
+        struct passwd *pw = getpwuid(getuid());
+        if (pw && pw->pw_name) return pw->pw_name;
+        return NULL;
+}
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -128,6 +158,64 @@ static void json_set_bool(int *out, const cJSON *obj, const char *key)
         *out = cJSON_IsTrue(item);
 }
 
+/* ── two9_sub_t helpers ───────────────────────────────────────────── */
+
+static two9_sub_t *sub_new(const char *name)
+{
+        two9_sub_t *s = calloc(1, sizeof(*s));
+        if (!s) return NULL;
+        if (name) {
+                s->name = strdup(name);
+                if (!s->name) { free(s); return NULL; }
+        }
+        return s;
+}
+
+static void sub_free(two9_sub_t *s)
+{
+        if (!s) return;
+        free(s->name);
+        free_str_list(s->urls);
+        free_str_list(s->public_keys);
+        free(s->signing_key_file);
+        free(s->signing_key_name);
+        free(s);
+}
+
+static void subs_free_all(two9_sub_t *head)
+{
+        while (head) {
+                two9_sub_t *next = head->next;
+                sub_free(head);
+                head = next;
+        }
+}
+
+/* Append sub to the end of cfg->subs. */
+static void subs_append(two9_config_t *cfg, two9_sub_t *s)
+{
+        if (!cfg || !s) return;
+        s->next = NULL;
+        if (!cfg->subs) {
+                cfg->subs = s;
+                return;
+        }
+        two9_sub_t *tail = cfg->subs;
+        while (tail->next) tail = tail->next;
+        tail->next = s;
+}
+
+/* Parse one sub attrset (the value side of subs.<name>). */
+static void apply_sub_attrs(two9_sub_t *s, const cJSON *obj)
+{
+        if (!s || !obj || !cJSON_IsObject(obj)) return;
+        json_set_str_list(&s->urls,         obj, "URLs");
+        json_set_str_list(&s->public_keys,  obj, "PublicKeys");
+        json_set_bool(&s->allow_unsigned,   obj, "AllowUnsigned");
+        json_set_str(&s->signing_key_file,  obj, "SigningKey");
+        json_set_str(&s->signing_key_name,  obj, "KeyName");
+}
+
 /* ── Apply the parsed JSON to the config ──────────────────────────── */
 
 static void apply_json(two9_config_t *cfg, const cJSON *root)
@@ -150,15 +238,45 @@ static void apply_json(two9_config_t *cfg, const cJSON *root)
                 json_set_str(&cfg->chroot_dir,  chroot, "Dir");
         }
 
-        cJSON *subs = cJSON_GetObjectItemCaseSensitive(root, "substituters");
+        /* New format: named subs attrset. */
+        cJSON *subs = cJSON_GetObjectItemCaseSensitive(root, "subs");
         if (subs && cJSON_IsObject(subs)) {
-                json_set_str_list(&cfg->substituters, subs, "URLs");
-                json_set_bool(&cfg->allow_unsigned,  subs, "AllowUnsigned");
-                json_set_str(&cfg->signing_key_file, subs, "SigningKey");
-                json_set_str(&cfg->signing_key_name, subs, "KeyName");
-                json_set_str(&cfg->public_key_b64,   subs, "PublicKey");
+                for (cJSON *child = subs->child; child; child = child->next) {
+                        if (!cJSON_IsObject(child)) continue;
+                        two9_sub_t *s = sub_new(child->string ? child->string : "sub");
+                        if (!s) continue;
+                        apply_sub_attrs(s, child);
+                        subs_append(cfg, s);
+                }
         }
+
+        /* Backward compat: old flat substituters block. Parse as a
+         * single sub named "legacy" with one PublicKey. Warn. */
+        cJSON *legacy = cJSON_GetObjectItemCaseSensitive(root, "substituters");
+        if (legacy && cJSON_IsObject(legacy)) {
+                fprintf(stderr,
+                        "209: warning: extra.nix uses the deprecated `substituters` block.\n"
+                        "    Rename it to `subs.legacy` and convert `PublicKey` (string)\n"
+                        "    to `PublicKeys` (list of strings).\n");
+                two9_sub_t *s = sub_new("legacy");
+                if (!s) goto done;
+                apply_sub_attrs(s, legacy);
+                /* If the old code used the singular `PublicKey` field,
+                 * fold it into the public_keys list as a single entry. */
+                cJSON *pk = cJSON_GetObjectItemCaseSensitive(legacy, "PublicKey");
+                if (pk && cJSON_IsString(pk) && !s->public_keys) {
+                        s->public_keys = calloc(2, sizeof(char *));
+                        if (s->public_keys) {
+                                s->public_keys[0] = strdup(pk->valuestring);
+                                s->public_keys[1] = NULL;
+                        }
+                }
+                subs_append(cfg, s);
+        }
+
+done:
         /* Unknown sections/keys: silently ignored (forward-compat). */
+        ;
 }
 
 /* ── Defaults + load ──────────────────────────────────────────────── */
@@ -176,35 +294,29 @@ static two9_config_t *two9_config_defaults(void)
         return cfg;
 }
 
-/* Resolve the config file path. Tries ~/.config/2O9/extra.nix first
- * (with SUDO_USER resolution), then falls back to /etc/2O9/extra.nix.
- * Returns a malloc'd path the caller must free, or NULL if neither
- * exists. *path_out is set to the malloc'd path on success. */
+/* Resolve the config file path. Tries /nix/config/<user>.extra.nix
+ * first (with SUDO_USER resolution), then falls back to
+ * /nix/config/extra.nix. Returns a malloc'd path the caller must free,
+ * or NULL if neither exists. */
 static char *resolve_config_path(void)
 {
-        /* User-local: ~/.config/2O9/extra.nix
-         * When running under sudo, look up the original user's home. */
-        const char *home = getenv("HOME");
-        if (!home || !*home) {
-                const char *sudo_user = getenv("SUDO_USER");
-                if (sudo_user && *sudo_user) {
-                        char buf[PATH_MAX];
-                        snprintf(buf, sizeof(buf), "/home/%s", sudo_user);
-                        setenv("HOME", buf, 1);
-                        home = getenv("HOME");
-                }
-        }
+        const char *dir = config_dir();
 
-        if (home && *home) {
+        /* User-local: /nix/config/<user>.extra.nix.
+         * When running under sudo, look up the original user's name. */
+        const char *user = current_username();
+        if (user && *user) {
                 char path[PATH_MAX];
-                snprintf(path, sizeof(path), "%s/.config/2O9/extra.nix", home);
+                snprintf(path, sizeof(path), "%s/%s.extra.nix", dir, user);
                 if (access(path, R_OK) == 0)
                         return strdup(path);
         }
 
         /* System-wide fallback. */
-        if (access("/etc/2O9/extra.nix", R_OK) == 0)
-                return strdup("/etc/2O9/extra.nix");
+        char syspath[PATH_MAX];
+        snprintf(syspath, sizeof(syspath), "%s/extra.nix", dir);
+        if (access(syspath, R_OK) == 0)
+                return strdup(syspath);
 
         return NULL;
 }
@@ -285,9 +397,6 @@ void two9_config_free(two9_config_t *cfg)
         free(cfg->gpg_bin);
         free(cfg->sudo_bin);
         free(cfg->chroot_dir);
-        free_str_list(cfg->substituters);
-        free(cfg->signing_key_name);
-        free(cfg->signing_key_file);
-        free(cfg->public_key_b64);
+        subs_free_all(cfg->subs);
         free(cfg);
 }
