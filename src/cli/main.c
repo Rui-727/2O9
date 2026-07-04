@@ -3566,6 +3566,9 @@ static int cmd_debag(int argc, char **argv)
                 } else if (strcmp(argv[i], "--verbose") == 0) {
                         policy.verbose = 1;
                         i++;
+                } else if (strcmp(argv[i], "--no-demangle") == 0) {
+                        policy.no_demangle = 1;
+                        i++;
                 } else if (strcmp(argv[i], "--") == 0) {
                         i++;
                         break;
@@ -3646,7 +3649,7 @@ static int cmd_debag(int argc, char **argv)
          * the gdb-style live-debugger REPL. Skips the seccomp sandbox. */
         if (dynamic_db) {
                 debag_analysis_free(analysis);
-                return debag_dynamic_db_repl(argc - i, &argv[i]);
+                return debag_dynamic_db_repl(argc - i, &argv[i], &policy);
         }
 
         /* Run under the hybrid sandbox */

@@ -127,6 +127,7 @@ typedef struct debag_policy {
     int no_net;             /* --no-net: block network syscalls */
     int no_write;           /* --no-write: block write syscalls */
     int verbose;            /* --verbose: log every ptrace event */
+    int no_demangle;        /* --no-demangle: don't dlopen __cxa_demangle */
 } debag_policy_t;
 
 /* ── Result ───────────────────────────────────────────────────────── */
@@ -188,8 +189,10 @@ int debag_static_db_repl(const char *binary_path);
 
 /* `209 debag --dynamic-db -- <argv>` : gdb-style live debugger REPL.
  * argv[0] is the binary, argv[1..] are its args (NULL-terminated).
- * Returns process exit code (0 on clean quit). */
-int debag_dynamic_db_repl(int argc, char **argv);
+ * policy (may be NULL) carries flags that affect the REPL, currently
+ * just `no_demangle`. Returns process exit code (0 on clean quit). */
+int debag_dynamic_db_repl(int argc, char **argv,
+                           const debag_policy_t *policy);
 
 /* ── ELF pretty-printing helpers (shared by static_analysis + REPLs) ─ */
 

@@ -57,6 +57,7 @@
 #include <ctype.h>
 #include <elf.h>
 #include <limits.h>
+#include <dlfcn.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/types.h>
@@ -156,11 +157,17 @@ typedef struct {
      * immediately re-trigger the wp on the same rip (execute watchpoints
      * use trap-before semantics: rip points AT the wp address). */
     int                  pending_hw_exec;
+    /* Non-zero to skip C++ symbol demangling in sym/bt/bp-hit output.
+     * Set from policy->no_demangle via the --no-demangle flag. When
+     * zero (default), the demangle() helper dlopens libstdc++.so.6 and
+     * calls __cxa_demangle on each symbol name. */
+    int                  no_demangle;
 } dyn_session_t;
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
-static int  session_init(dyn_session_t *s, int argc, char **argv);
+static int  session_init(dyn_session_t *s, int argc, char **argv,
+                          const debag_policy_t *policy);
 static void session_destroy(dyn_session_t *s);
 static int  refresh_regs(dyn_session_t *s);
 static int  handle_stop(dyn_session_t *s, int status);
@@ -320,6 +327,62 @@ static uintptr_t sym_any_by_name(dyn_session_t *s, const char *name)
             return (uintptr_t)(sym->vaddr + s->load_offset);
     }
     return 0;
+}
+
+/* ── C++ symbol demangling ────────────────────────────────────────── */
+
+/* Demangle a C++ mangled symbol name (e.g. `_ZNSt6vectorIiSaIiEE9push_backEOi')
+ * into a human-readable form (`std::vector<int, std::allocator<int> >::push_back(int&&)')
+ * using __cxa_demangle from libstdc++. The library is dlopen'd lazily on
+ * the first call so 2O9 doesn't link against libstdc++ for users who never
+ * touch C++ binaries. Returns a freshly malloc'd string the caller must
+ * free, or NULL if the name isn't a C++ mangled name (or libstdc++ is
+ * unavailable, or the user passed --no-demangle).
+ *
+ * We pass the session so the helper can short-circuit on s->no_demangle
+ * without the call sites having to check it themselves. */
+static char *demangle(dyn_session_t *s, const char *mangled)
+{
+    if (!mangled || !*mangled) return NULL;
+    if (s && s->no_demangle) return NULL;
+    /* C++ Itanium ABI mangled names start with `_Z' (or `_Z$' on some
+     * platforms). Any other prefix isn't a mangled name; skip the
+     * dlopen+__cxa_demangle call entirely. */
+    if (!(mangled[0] == '_' && mangled[1] == 'Z')) return NULL;
+
+    static void *handle = NULL;
+    static char *(*cxa_demangle_fn)(const char *, char *, size_t *, int *) = NULL;
+    static int tried = 0;  /* don't keep retrying dlopen on every call */
+    if (!tried) {
+        tried = 1;
+        handle = dlopen("libstdc++.so.6", RTLD_LAZY | RTLD_GLOBAL);
+        if (handle)
+            cxa_demangle_fn = (char *(*)(const char *, char *, size_t *, int *))
+                              dlsym(handle, "__cxa_demangle");
+    }
+    if (!cxa_demangle_fn) return NULL;
+
+    int status = 0;
+    char *out = cxa_demangle_fn(mangled, NULL, NULL, &status);
+    if (status != 0 || !out) return NULL;
+    return out;  /* caller must free */
+}
+
+/* Format helper: print a symbol name (the borrowed `name' pointer),
+ * demangling it on the fly if possible. Prints nothing if `name' is
+ * NULL. `off' is the byte offset within the symbol, printed as
+ * `+0xN' (or nothing if `off' is zero and `always_off' is false). */
+static void print_sym_name(dyn_session_t *s, const char *name, uint64_t off,
+                            int always_off)
+{
+    if (!name) return;
+    char *dem = demangle(s, name);
+    const char *display = dem ? dem : name;
+    if (off || always_off)
+        printf(" <%s+0x%llx>", display, (unsigned long long)off);
+    else
+        printf(" <%s>", display);
+    free(dem);
 }
 
 /* ── Address / register token parser ─────────────────────────────── */
@@ -822,8 +885,7 @@ static int wp_check_hit(dyn_session_t *s)
                        (unsigned long long)s->regs.rip);
                 uint64_t off = 0;
                 const char *name = sym_for_addr(s, (uintptr_t)s->regs.rip, &off);
-                if (name) printf(" <%s+0x%llx>", name,
-                                 (unsigned long long)off);
+                print_sym_name(s, name, off, /*always_off=*/0);
                 printf("\n");
             }
         }
@@ -963,7 +1025,7 @@ static int handle_sigtrap(dyn_session_t *s)
                    (unsigned long long)s->regs.rip);
             uint64_t off;
             const char *name = sym_for_addr(s, (uintptr_t)s->regs.rip, &off);
-            if (name) printf(" <%s+0x%llx>", name, (unsigned long long)off);
+            print_sym_name(s, name, off, /*always_off=*/0);
             printf("\n");
             /* Auto-remove temp bps. */
             bp->used = 0;
@@ -973,7 +1035,7 @@ static int handle_sigtrap(dyn_session_t *s)
                    (unsigned long long)s->regs.rip);
             uint64_t off;
             const char *name = sym_for_addr(s, (uintptr_t)s->regs.rip, &off);
-            if (name) printf(" <%s+0x%llx>", name, (unsigned long long)off);
+            print_sym_name(s, name, off, /*always_off=*/0);
             printf("\n");
         }
     } else {
@@ -1646,7 +1708,7 @@ static int cmd_bt(dyn_session_t *s, char *args)
         uint64_t off = 0;
         const char *name = sym_for_addr(s, pc, &off);
         printf("#%-2d 0x%016lx", level, (unsigned long)pc);
-        if (name) printf(" <%s+0x%llx>", name, (unsigned long long)off);
+        print_sym_name(s, name, off, /*always_off=*/0);
         printf("\n");
 
         /* Read saved rbp and return address from the stack. */
@@ -1684,8 +1746,11 @@ static int cmd_sym(dyn_session_t *s, char *args)
     uint64_t off = 0;
     const char *name = sym_for_addr(s, addr, &off);
     if (name) {
+        char *dem = demangle(s, name);
+        const char *display = dem ? dem : name;
         printf("0x%016lx: <%s+0x%llx>\n",
-               (unsigned long)addr, name, (unsigned long long)off);
+               (unsigned long)addr, display, (unsigned long long)off);
+        free(dem);
     } else {
         printf("0x%016lx: <unknown>\n", (unsigned long)addr);
     }
@@ -2134,7 +2199,8 @@ static uintptr_t find_load_base(pid_t pid, const char *binary_path)
     return base;
 }
 
-static int session_init(dyn_session_t *s, int argc, char **argv)
+static int session_init(dyn_session_t *s, int argc, char **argv,
+                         const debag_policy_t *policy)
 {
     if (argc < 1 || !argv[0]) {
         fprintf(stderr, "209 debag --dynamic-db: no binary specified\n");
@@ -2145,6 +2211,7 @@ static int session_init(dyn_session_t *s, int argc, char **argv)
     s->mem_fd = -1;
     s->alive  = 1;
     s->pending_hw_exec = -1;  /* no execute watchpoint pending RF */
+    s->no_demangle = policy && policy->no_demangle;
     sig_init_defaults(s);
 
     /* Run static analysis on the binary (for symbol resolution). */
@@ -2299,10 +2366,10 @@ static void session_destroy(dyn_session_t *s)
 
 /* ── Public entry ────────────────────────────────────────────────── */
 
-int debag_dynamic_db_repl(int argc, char **argv)
+int debag_dynamic_db_repl(int argc, char **argv, const debag_policy_t *policy)
 {
     dyn_session_t s;
-    if (session_init(&s, argc, argv) < 0) {
+    if (session_init(&s, argc, argv, policy) < 0) {
         session_destroy(&s);
         return 1;
     }

@@ -149,7 +149,7 @@ OBJ = $(SRC:.c=.o)
 # plus libarchive's transitive deps (zlib, lzma, bz2, lz4, zstd, nettle, gmp).
 LIB2O9_LIBS = -lcurl -larchive -lgpgme -lassuan -lgpg-error -lcrypto -lsqlite3 \
 	      -lz -llzma -lbz2 -llz4 -lzstd -lnettle -lhogweed -lgmp \
-	      -lxml2 -lacl -lm -lseccomp \
+	      -lxml2 -lacl -lm -lseccomp -ldl \
 	      $(SODIUM_LIBS) \
 	      $(CAPSTONE_LIBS) \
 	      $(LIB2O9_DEPS_LIBS)
