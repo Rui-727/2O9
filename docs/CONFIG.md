@@ -29,19 +29,23 @@ Every `2O9.nix` must be a function taking at least `{ config, ... }:`:
 
 ```nix
 { config, ... }:
+let
+  basePackages = [ "vim" ];
+in
 {
-  packages = [ "vim" ];
   # Self-reference: config is the result of evaluating this function.
   # You can read other parts of the config from here.
-  packages = packages ++ (if config.services.sshd.enable
-                          then [ "openssh" ]
-                          else []);
+  packages = basePackages ++ (if config.services.sshd.enable
+                              then [ "openssh" ]
+                              else []);
 }
 ```
 
 The `config` argument enables self-reference. The evaluator resolves
 this via fixed-point recursion: `config` is the result of evaluating
-the function itself, resolved lazily.
+the function itself, resolved lazily. Use `let` to bind a name to your
+base package list so the `packages` attribute can refer to it without
+infinite recursion.
 
 ## Schema
 
@@ -235,7 +239,10 @@ let
   desktopPackages = [ "firefox" "alacritty" "dunst" ];
 in
 {
-  packages = basePackages ++ desktopPackages;
+  packages = basePackages ++ desktopPackages
+    ++ (if config.services.sshd.enable
+        then [ "openssh" ]
+        else []);
 
   aur.packages = [ "google-chrome" ];
   aur.build.profile = "native";
@@ -257,16 +264,13 @@ in
     sshd.enable = true;
     NetworkManager.enable = true;
   };
-
-  # Self-reference: install openssh only if sshd is enabled
-  packages = packages
-    ++ (if config.services.sshd.enable
-        then [ "openssh" ]
-        else []);
 }
 ```
 
-Run `209 apply` to make the system match this file.
+Run `209 apply` to make the system match this file. The `let` block
+binds `basePackages` and `desktopPackages` so the `packages` attribute
+can concatenate them plus conditionally add `openssh` based on
+`config.services.sshd.enable`, all without infinite recursion.
 
 ---
 
