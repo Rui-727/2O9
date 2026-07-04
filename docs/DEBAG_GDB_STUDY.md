@@ -34,7 +34,7 @@ on `main`:
    GPL-2.0-only, so no code was copied.
 
 3. **Don't delete `dso` temp bp on unrelated stops** (recommendation
-   #3, ~10 LOC). Commit `<pending>`. `cmd_dso`'s temp-breakpoint
+   #3, ~10 LOC). Commit `6f6c13f`. `cmd_dso`'s temp-breakpoint
    cleanup now only fires when the child has exited or been killed; if
    the step-over was interrupted by a different breakpoint, a signal
    with `sig_stop` set, or any other stop not at `next_pc`, the temp bp
