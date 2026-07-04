@@ -181,13 +181,44 @@ static ssize_t read_at(const repl_t *r, uint64_t vaddr, void *buf, size_t n)
 }
 
 /* Resolve a single token to a virtual address. Order matches rizin's
- * num_callback (core.c:890-932): entry0 first, then section names,
- * then symbol names, then hex/decimal numbers. Returns 0 on success
- * and writes the address to *out; returns -1 and prints a diagnostic
- * otherwise. */
+ * num_callback (core.c:890-932): $-tokens first, then entry0, then
+ * section names, then symbol names, then hex/decimal numbers. Returns
+ * 0 on success and writes the address to *out; returns -1 and prints
+ * a diagnostic otherwise.
+ *
+ * $-tokens (rizin's secret sauce, core.c:593-692):
+ *   $$ = current seek (r->offset)
+ *   $s = binary size (file bytes, via fstat)
+ *   $e = entry point address (same as entry0)
+ * These resolve BEFORE symbol/number lookup so a binary that happens
+ * to define a symbol named "s" or "e" doesn't shadow the tokens. */
 static int resolve_expr(repl_t *r, const char *s, uint64_t *out)
 {
     if (!s || !*s) return -1;
+
+    /* $-tokens. */
+    if (s[0] == '$') {
+        if (s[1] == '$' && s[2] == '\0') {
+            *out = r->offset;
+            return 0;
+        }
+        if (s[1] == 's' && s[2] == '\0') {
+            struct stat st;
+            if (fstat(r->fd, &st) == 0) {
+                *out = (uint64_t)st.st_size;
+                return 0;
+            }
+            fprintf(stderr, "debag: $s fstat failed\n");
+            return -1;
+        }
+        if (s[1] == 'e' && s[2] == '\0') {
+            *out = r->a->entry_point;
+            return 0;
+        }
+        fprintf(stderr, "debag: unknown $-token '%s' "
+                "(known: $$, $s, $e)\n", s);
+        return -1;
+    }
 
     /* entry0 -> e_entry (always defined for executables). */
     if (strcmp(s, "entry0") == 0 || strcmp(s, "entry") == 0) {
