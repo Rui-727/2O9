@@ -336,8 +336,16 @@ modelled on gdb. Software breakpoints via the INT3 (0xCC) trick
 (`db <addr|sym>`), continue (`dc`), single-step (`ds`), step over a
 call (`dso`), inspect registers (`dr`), hex-dump memory (`px`), print
 strings (`ps`), walk the rbp chain for a backtrace (`bt`), resolve
-nearest symbol (`sym <addr>`), and manage signal dispositions
-(`handle`). Signals that last stopped the child are forwarded on `dc`
+nearest symbol (`sym <addr>`), set **hardware watchpoints** via the
+x86 debug registers (`watch <addr|sym> [len]`, `watchw`, `watchr`,
+`watcha`, `watchx <addr|sym>` for execute breakpoints, `watch-` to
+remove), and manage signal dispositions (`handle`). Hardware
+watchpoints stop the program on the exact instruction that writes or
+reads a watched memory location, with zero runtime overhead
+(hardware-assisted, not single-step-and-check). Four slots (DR0-DR3),
+lengths 1/2/4/8 bytes, write / read-write / execute modes; `watch x`
+works on a `volatile int x` (STT_OBJECT symbols are resolved by
+name). Signals that last stopped the child are forwarded on `dc`
 gated by a per-signal `stop`/`print`/`pass` table — SIGSEGV/SIGBUS/
 SIGFPE/SIGILL/SIGTRAP/SIGINT stop+print+pass by default, while
 SIGALRM/SIGCHLD/SIGUSR1/SIGUSR2/SIGIO/SIGURG/SIGWINCH/SIGPIPE pass

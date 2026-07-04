@@ -5,15 +5,18 @@
  * Forks the target under PTRACE_TRACEME, stops it at the entry point,
  * and presents an interactive debugger. Software breakpoints via the
  * INT3 (0xCC) trick, /proc/PID/mem for memory access (with a
- * PTRACE_PEEKDATA fallback), rbp-chain walk for backtraces, and a
- * minimal x86-64 instruction-length decoder for step-over.
+ * PTRACE_PEEKDATA fallback), rbp-chain walk for backtraces, a
+ * minimal x86-64 instruction-length decoder for step-over, and
+ * hardware data/execute watchpoints via the x86 debug registers
+ * (DR0-DR3 addresses, DR6 status, DR7 control) for zero-overhead
+ * memory-access trapping.
  *
  * Design cribbed from GDB (clean-room reimplementation; GDB is GPL-3.0,
  * 2O9 is GPL-2.0-only). See /home/z/my-project/tool-results/gdb-research.md
  * for the full design notes.
  *
  * Usage: see `help` inside the REPL. The command set is rizin-style
- * (db, dc, ds, dso, dr, px, ps, bt, sym, info, q).
+ * (db, dc, ds, dso, dr, px, ps, bt, sym, info, handle, watch, q).
  *
  * Limitations:
  *  - x86-64 only.
@@ -30,6 +33,15 @@
  *    encodings (e.g. with multiple legacy prefixes) may be miscounted;
  *    in that case `dso` falls back to a single step. With libcapstone
  *    available (HAVE_CAPSTONE), the full decoder is used instead.
+ *  - Hardware watchpoints: 4 slots max (DR0-DR3). The watched range
+ *    must be naturally aligned to its length (a 4-byte watch needs a
+ *    4-byte aligned address, etc.). On modern x86 with DR7 LE+GE set,
+ *    data watchpoints use trap-after semantics: rip points at the
+ *    instruction AFTER the faulting access. Execute watchpoints
+ *    (`watchx`) use trap-before: rip points AT the wp address, and we
+ *    set RF in EFLAGS on the next resume so the CPU skips the wp for
+ *    one instruction. Hardware watchpoints are per-process and not
+ *    inherited across fork (we don't trace forks anyway).
  */
 
 #define _GNU_SOURCE
@@ -63,6 +75,7 @@
 #define MAX_FRAMES      64
 #define LINE_MAX_LEN    512
 #define INT3            0xCC
+#define HW_WP_SLOTS     4    /* DR0-DR3 */
 
 /* ── Breakpoint table ────────────────────────────────────────────── */
 
@@ -75,6 +88,33 @@ typedef struct {
     uint8_t    shadow;        /* original byte saved before 0xCC write */
     char       spec[128];     /* original user input for `db` (no args) */
 } dyn_bp_t;
+
+/* ── Hardware watchpoints (DR0-DR7) ──────────────────────────────── */
+
+/* x86 debug-register watchpoint. Maps 1:1 to one of the 4 address
+ * registers (DR0-DR3). DR7 holds the per-slot control bits (local
+ * enable, R/W mode, length); DR6 reports which slot(s) fired on a
+ * SIGTRAP.
+ *
+ * R/W modes (Intel SDM Vol 3, §17.2):
+ *   0 = execute (trap-before, rip AT the wp address)
+ *   1 = write   (trap-after, rip PAST the faulting insn on modern x86)
+ *   3 = read/write (trap-after, rip PAST the faulting insn)
+ * (R/W=2 is I/O, unavailable in protected mode.)
+ *
+ * Lengths: 1, 2, 4, or 8 bytes. The watched range must be naturally
+ * aligned to its length (kernel rejects unaligned watchpoints).
+ *
+ * Clean-room reimplementation from the Intel SDM Vol 3 §17.2
+ * description; gdb's nat/x86-dregs.c is GPL-3.0, 2O9 is
+ * GPL-2.0-only, so no gdb code was copied. */
+typedef struct hw_watchpoint {
+    int       slot;       /* 0-3, maps to DR0-DR3 */
+    uintptr_t addr;       /* watched runtime address */
+    int       len;        /* 1, 2, 4, or 8 bytes */
+    int       rw;         /* 0=execute, 1=write, 3=read/write */
+    int       enabled;    /* 1 if slot is armed in DR7 */
+} hw_watchpoint_t;
 
 /* ── Session state ───────────────────────────────────────────────── */
 
@@ -106,6 +146,16 @@ typedef struct {
     unsigned char        sig_stop[NSIG];
     unsigned char        sig_print[NSIG];
     unsigned char        sig_program[NSIG];
+    /* Hardware watchpoints. 4 slots, one per DR0-DR3. hw_wps[i].slot==i
+     * when enabled; the array index always equals the slot number. */
+    hw_watchpoint_t      hw_wps[HW_WP_SLOTS];
+    /* If >= 0, the child is sitting on a hardware EXECUTE watchpoint
+     * (set via `watchx`) at slot `pending_hw_exec`. The next resume
+     * must set RF (Resume Flag, bit 16 of EFLAGS) so the CPU ignores
+     * the wp for one instruction; otherwise PTRACE_CONT would
+     * immediately re-trigger the wp on the same rip (execute watchpoints
+     * use trap-before semantics: rip points AT the wp address). */
+    int                  pending_hw_exec;
 } dyn_session_t;
 
 /* ── Forward declarations ────────────────────────────────────────── */
@@ -240,6 +290,32 @@ static uintptr_t sym_by_name(dyn_session_t *s, const char *name)
         const debag_elf_symbol_t *sym = &s->analysis->symbols[i];
         if (sym->is_import) continue;
         if (sym->type != STT_FUNC && sym->type != STT_GNU_IFUNC) continue;
+        if (sym->name && strcmp(sym->name, name) == 0)
+            return (uintptr_t)(sym->vaddr + s->load_offset);
+    }
+    return 0;
+}
+
+/* Find any non-import symbol (function, object, TLS, etc.) by name.
+ * Used by `watch` so the user can `watch <variable>` (an STT_OBJECT)
+ * in addition to `watch <function>`. Returns the runtime address
+ * (vaddr + load_offset), or 0 if not found. */
+static uintptr_t sym_any_by_name(dyn_session_t *s, const char *name)
+{
+    if (!s->analysis || !name) return 0;
+    /* Prefer STT_OBJECT (variables) for watch semantics. */
+    for (size_t i = 0; i < s->analysis->symbol_count; i++) {
+        const debag_elf_symbol_t *sym = &s->analysis->symbols[i];
+        if (sym->is_import) continue;
+        if (sym->type != STT_OBJECT) continue;
+        if (sym->name && strcmp(sym->name, name) == 0)
+            return (uintptr_t)(sym->vaddr + s->load_offset);
+    }
+    /* Fall back to any non-import symbol (functions, TLS, etc.). */
+    for (size_t i = 0; i < s->analysis->symbol_count; i++) {
+        const debag_elf_symbol_t *sym = &s->analysis->symbols[i];
+        if (sym->is_import) continue;
+        if (sym->type == STT_NOTYPE || sym->type == STT_SECTION) continue;
         if (sym->name && strcmp(sym->name, name) == 0)
             return (uintptr_t)(sym->vaddr + s->load_offset);
     }
@@ -477,6 +553,312 @@ static void bp_list(dyn_session_t *s)
     if (!any) printf("  (no breakpoints)\n");
 }
 
+/* ── Hardware watchpoint helpers (DR0-DR7) ───────────────────────── */
+
+/* Encode the DR7 control register from the session's watchpoint state.
+ * DR7 layout (Intel SDM Vol 3, §17.2):
+ *   bit 0,2,4,6   : local enable for DR0,1,2,3 (we use local only;
+ *                   Linux ignores the global-enable bits 1,3,5,7)
+ *   bit 8 (LE)    : local exact — set for precise watchpoint reporting
+ *   bit 9 (GE)    : global exact — set for precise watchpoint reporting
+ *   bits 16-17    : R/W0 (00=execute, 01=write, 10=io, 11=read/write)
+ *   bits 18-19    : LEN0 (00=1, 01=2, 10=8, 11=4 — yes, weird)
+ *   bits 20-21,22-23 : R/W1, LEN1 (offset +4 from R/W0)
+ *   bits 24-25,26-27 : R/W2, LEN2 (offset +8)
+ *   bits 28-29,30-31 : R/W3, LEN3 (offset +12)
+ * Execute watchpoints (R/W=00) ignore LEN; we set LEN=00 (1 byte). */
+static uint32_t compute_dr7(dyn_session_t *s)
+{
+    uint32_t dr7 = (1u << 8) | (1u << 9);  /* LE + GE: precise reporting */
+    for (int i = 0; i < HW_WP_SLOTS; i++) {
+        if (!s->hw_wps[i].enabled) continue;
+        dr7 |= (1u << (i * 2));                                    /* L<i> */
+        dr7 |= ((uint32_t)(s->hw_wps[i].rw & 0x3)) << (16 + i * 4);/* R/W<i> */
+        int len_code;
+        switch (s->hw_wps[i].len) {
+            case 1: len_code = 0; break;
+            case 2: len_code = 1; break;
+            case 8: len_code = 2; break;
+            case 4: len_code = 3; break;
+            default: len_code = 0;
+        }
+        dr7 |= ((uint32_t)len_code) << (18 + i * 4);              /* LEN<i> */
+    }
+    return dr7;
+}
+
+/* Push the session's watchpoint state into the tracee's DR0-DR3 + DR7.
+ * Returns 0 on success, -1 on error (errno set). Called whenever a
+ * watchpoint is added, removed, or temporarily toggled. The child must
+ * be stopped (caller ensures this). */
+static int wp_apply(dyn_session_t *s)
+{
+    if (!s->alive) return -1;
+    for (int i = 0; i < HW_WP_SLOTS; i++) {
+        long off = offsetof(struct user, u_debugreg[i]);
+        unsigned long val = s->hw_wps[i].enabled
+                            ? (unsigned long)s->hw_wps[i].addr : 0;
+        errno = 0;
+        if (ptrace(PTRACE_POKEUSER, s->pid, (void *)off, (void *)val) < 0)
+            return -1;
+    }
+    long off7 = offsetof(struct user, u_debugreg[7]);
+    uint32_t dr7 = compute_dr7(s);
+    errno = 0;
+    if (ptrace(PTRACE_POKEUSER, s->pid, (void *)off7,
+               (void *)(unsigned long)dr7) < 0)
+        return -1;
+    return 0;
+}
+
+/* Validate a watchpoint's len/rw. Returns 0 on success, -1 on error
+ * (message printed). */
+static int wp_validate(int len, int rw)
+{
+    if (len != 1 && len != 2 && len != 4 && len != 8) {
+        fprintf(stderr, "invalid watchpoint length %d "
+                "(must be 1, 2, 4, or 8)\n", len);
+        return -1;
+    }
+    if (rw != 0 && rw != 1 && rw != 3) {
+        fprintf(stderr, "invalid watchpoint mode %d "
+                "(must be 0=execute, 1=write, or 3=read/write)\n", rw);
+        return -1;
+    }
+    /* Execute watchpoints must be 1 byte (LEN is ignored by the CPU
+     * but the kernel rejects other lengths to avoid surprises). */
+    if (rw == 0 && len != 1) {
+        fprintf(stderr, "execute watchpoints must be length 1 "
+                "(hardware ignores LEN for execute bps)\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* Set a hardware watchpoint. len is 1/2/4/8; rw is 0/1/3 (exec/write/
+ * read-write). Returns 0 on success, -1 on error (message printed). */
+static int wp_set(dyn_session_t *s, uintptr_t addr, int len, int rw)
+{
+    if (wp_validate(len, rw) < 0) return -1;
+
+    /* Hardware requires the watched range not to cross a DR-length
+     * aligned boundary. The simplest correct rule is natural
+     * alignment (len==1 any, len==2 mod 2, len==4 mod 4, len==8 mod 8).
+     * The kernel rejects unaligned watchpoints, so we surface a clear
+     * error instead of letting POKEUSER fail mysteriously later. */
+    if (len > 1 && (addr & (uintptr_t)(len - 1))) {
+        fprintf(stderr, "address 0x%lx not aligned to length %d\n",
+                (unsigned long)addr, len);
+        return -1;
+    }
+
+    /* Reject exact duplicates (same addr/len/rw in another slot). */
+    for (int i = 0; i < HW_WP_SLOTS; i++) {
+        if (s->hw_wps[i].enabled &&
+            s->hw_wps[i].addr == addr &&
+            s->hw_wps[i].len == len &&
+            s->hw_wps[i].rw == rw) {
+            fprintf(stderr, "watchpoint already set in slot %d "
+                    "(addr 0x%lx, len %d, %s)\n", i, (unsigned long)addr,
+                    len, rw == 0 ? "execute" :
+                         rw == 1 ? "write" : "read/write");
+            return -1;
+        }
+    }
+
+    /* Find a free slot. */
+    int slot = -1;
+    for (int i = 0; i < HW_WP_SLOTS; i++) {
+        if (!s->hw_wps[i].enabled) { slot = i; break; }
+    }
+    if (slot < 0) {
+        fprintf(stderr, "all %d hardware watchpoints in use, "
+                "remove one first\n", HW_WP_SLOTS);
+        for (int i = 0; i < HW_WP_SLOTS; i++) {
+            fprintf(stderr, "  slot %d: addr=0x%016lx len=%d %s\n",
+                    i, (unsigned long)s->hw_wps[i].addr, s->hw_wps[i].len,
+                    s->hw_wps[i].rw == 0 ? "execute" :
+                    s->hw_wps[i].rw == 1 ? "write" : "read/write");
+        }
+        return -1;
+    }
+
+    s->hw_wps[slot].slot    = slot;
+    s->hw_wps[slot].addr    = addr;
+    s->hw_wps[slot].len     = len;
+    s->hw_wps[slot].rw      = rw;
+    s->hw_wps[slot].enabled = 1;
+    if (wp_apply(s) < 0) {
+        fprintf(stderr, "POKEUSER DR%d/DR7 failed: %s\n",
+                slot, strerror(errno));
+        s->hw_wps[slot].enabled = 0;
+        return -1;
+    }
+    const char *mode = (rw == 0) ? "execute" :
+                       (rw == 1) ? "write" : "read/write";
+    if (rw == 0) {
+        printf("Hardware execute breakpoint %d (DR%d) set at 0x%016lx\n",
+               slot, slot, (unsigned long)addr);
+    } else {
+        printf("Hardware watchpoint %d (DR%d) set at 0x%016lx, len=%d, %s\n",
+               slot, slot, (unsigned long)addr, len, mode);
+    }
+    return 0;
+}
+
+/* Remove a hardware watchpoint by slot (0..3) or by address.
+ * Returns 0 on success, -1 on error (message printed). */
+static int wp_remove_slot(dyn_session_t *s, int slot)
+{
+    if (slot < 0 || slot >= HW_WP_SLOTS) {
+        fprintf(stderr, "invalid watchpoint slot %d (must be 0-%d)\n",
+                slot, HW_WP_SLOTS - 1);
+        return -1;
+    }
+    if (!s->hw_wps[slot].enabled) {
+        fprintf(stderr, "no hardware watchpoint in slot %d\n", slot);
+        return -1;
+    }
+    s->hw_wps[slot].enabled = 0;
+    if (s->pending_hw_exec == slot) s->pending_hw_exec = -1;
+    if (wp_apply(s) < 0) {
+        fprintf(stderr, "warning: failed to update DR7: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    printf("Removed hardware watchpoint %d (DR%d)\n", slot, slot);
+    return 0;
+}
+
+/* Remove a hardware watchpoint by watched address. Removes the first
+ * enabled slot whose addr matches. Returns 0 on success, -1 on error. */
+static int wp_remove_addr(dyn_session_t *s, uintptr_t addr)
+{
+    for (int i = 0; i < HW_WP_SLOTS; i++) {
+        if (s->hw_wps[i].enabled && s->hw_wps[i].addr == addr) {
+            return wp_remove_slot(s, i);
+        }
+    }
+    fprintf(stderr, "no hardware watchpoint at 0x%lx\n", (unsigned long)addr);
+    return -1;
+}
+
+/* Remove all hardware watchpoints. Returns 0 on success. */
+static int wp_remove_all(dyn_session_t *s)
+{
+    int any = 0;
+    for (int i = 0; i < HW_WP_SLOTS; i++) {
+        if (s->hw_wps[i].enabled) {
+            s->hw_wps[i].enabled = 0;
+            any = 1;
+        }
+    }
+    s->pending_hw_exec = -1;
+    if (!any) {
+        printf("(no hardware watchpoints set)\n");
+        return 0;
+    }
+    if (wp_apply(s) < 0) {
+        fprintf(stderr, "warning: failed to update DR7: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    printf("Removed all hardware watchpoints\n");
+    return 0;
+}
+
+static void wp_list(dyn_session_t *s)
+{
+    int any = 0;
+    for (int i = 0; i < HW_WP_SLOTS; i++) {
+        if (!s->hw_wps[i].enabled) continue;
+        any = 1;
+        const char *mode = (s->hw_wps[i].rw == 0) ? "execute" :
+                           (s->hw_wps[i].rw == 1) ? "write" : "read/write";
+        printf("  slot %d (DR%d): addr=0x%016lx len=%d %s\n",
+               i, i, (unsigned long)s->hw_wps[i].addr,
+               s->hw_wps[i].len, mode);
+    }
+    if (!any) printf("  (no hardware watchpoints)\n");
+}
+
+/* Check DR6 for hardware watchpoint hits. Called from handle_sigtrap
+ * BEFORE the INT3-rewind logic, because a watchpoint hit also
+ * generates SIGTRAP and rip must NOT be rewound — for data
+ * watchpoints (trap-after), rip is PAST the faulting instruction;
+ * for execute watchpoints (trap-before), rip is AT the wp address.
+ *
+ * Returns 1 if any watchpoint hit was reported (caller should treat
+ * the stop as a wp hit and not as an INT3), 0 otherwise. Always
+ * clears DR6 after reading to prevent stale bits causing false
+ * positives on the next stop (Linux does not auto-clear DR6). */
+static int wp_check_hit(dyn_session_t *s)
+{
+    errno = 0;
+    long dr6 = ptrace(PTRACE_PEEKUSER, s->pid,
+                      offsetof(struct user, u_debugreg[6]), 0);
+    if (dr6 == -1 && errno != 0) return 0;  /* PEEKUSER failed */
+    if (!(dr6 & 0xF)) return 0;              /* no watchpoint bits set */
+
+    int any_hit = 0;
+    int exec_slot_hit = -1;
+    for (int i = 0; i < HW_WP_SLOTS; i++) {
+        if ((dr6 & (1L << i)) && s->hw_wps[i].enabled) {
+            any_hit = 1;
+            const char *mode = (s->hw_wps[i].rw == 0) ? "execute" :
+                               (s->hw_wps[i].rw == 1) ? "write" : "read/write";
+            if (s->hw_wps[i].rw == 0) {
+                /* Execute wp: trap-before, rip is AT the wp address. */
+                printf("Hardware execute breakpoint %d (DR%d) triggered "
+                       "at 0x%016lx\n",
+                       i, i, (unsigned long)s->hw_wps[i].addr);
+                exec_slot_hit = i;
+            } else {
+                /* Data wp: trap-after, rip is PAST the faulting insn. */
+                printf("Hardware watchpoint %d (DR%d) triggered at 0x%016lx, "
+                       "len=%d, %s, rip=0x%016llx",
+                       i, i, (unsigned long)s->hw_wps[i].addr,
+                       s->hw_wps[i].len, mode,
+                       (unsigned long long)s->regs.rip);
+                uint64_t off = 0;
+                const char *name = sym_for_addr(s, (uintptr_t)s->regs.rip, &off);
+                if (name) printf(" <%s+0x%llx>", name,
+                                 (unsigned long long)off);
+                printf("\n");
+            }
+        }
+    }
+    /* Always clear DR6 (bits 0-3 are sticky on Linux). Even if no slot
+     * we track fired, a stray bit would cause false positives later. */
+    ptrace(PTRACE_POKEUSER, s->pid,
+           offsetof(struct user, u_debugreg[6]), 0);
+
+    /* If an execute wp hit, mark it for RF-on-next-resume so we don't
+     * re-trigger on the same instruction. */
+    if (exec_slot_hit >= 0) {
+        s->pending_hw_exec = exec_slot_hit;
+    }
+    return any_hit;
+}
+
+/* If the child is sitting on a hardware execute watchpoint
+ * (pending_hw_exec >= 0), set RF (Resume Flag, bit 16 of EFLAGS) so
+ * the CPU ignores the wp for one instruction on the next resume.
+ * The CPU auto-clears RF after one instruction, so subsequent resumes
+ * are unaffected. Returns 0 on success, -1 on error. */
+static int wp_set_rf_for_exec_resume(dyn_session_t *s)
+{
+    if (s->pending_hw_exec < 0) return 0;
+    if (refresh_regs(s) < 0) return -1;
+    s->regs.eflags |= (1ULL << 16);  /* RF */
+    if (ptrace(PTRACE_SETREGS, s->pid, NULL, &s->regs) < 0) {
+        perror("ptrace SETREGS (RF for execute wp)");
+        return -1;
+    }
+    s->pending_hw_exec = -1;
+    return 0;
+}
+
 /* ── Resume helpers ──────────────────────────────────────────────── */
 
 /* If the child is currently sitting on a breakpoint whose 0xCC has
@@ -523,10 +905,30 @@ static int resume_step_over_bp(dyn_session_t *s)
 /* Decode a SIGTRAP stop. On x86-64, when the kernel reports SIGTRAP
  * for an INT3, rip points to the byte AFTER the 0xCC. We rewind rip
  * by 1, then look up the breakpoint. If found, restore the shadow
- * byte and mark pending_bp so the next resume single-steps over it. */
+ * byte and mark pending_bp so the next resume single-steps over it.
+ *
+ * SIGTRAP can also be a hardware watchpoint hit (the kernel reports
+ * DR6 bits 0-3 set in that case). We check DR6 FIRST because a
+ * watchpoint hit must NOT rewind rip — for data watchpoints (trap-
+ * after), rip is PAST the faulting instruction; for execute
+ * watchpoints (trap-before), rip is AT the wp address. */
 static int handle_sigtrap(dyn_session_t *s)
 {
     if (refresh_regs(s) < 0) return -1;
+
+    /* Check DR6 for hardware watchpoint hits FIRST. This must come
+     * before the TRAP_TRACE (single-step) check below, because a
+     * PTRACE_SINGLESTEP that executes an instruction triggering a
+     * data watchpoint generates a SIGTRAP where DR6 has watchpoint
+     * bits set. If we returned early on TRAP_TRACE we would silently
+     * swallow the watchpoint hit. wp_check_hit also clears DR6 to
+     * prevent stale bits causing false positives on the next stop.
+     * For execute watchpoints, wp_check_hit sets s->pending_hw_exec
+     * so the next resume sets RF and skips the wp for one insn. */
+    if (wp_check_hit(s)) {
+        s->last_sig = 0;
+        return 0;
+    }
 
     /* Distinguish syscall traps (sig | 0x80) from real SIGTRAPs.
      * We don't use PTRACE_SYSCALL in this REPL, so we shouldn't see
@@ -820,7 +1222,17 @@ static int cmd_dc(dyn_session_t *s, char *args)
         fprintf(stderr, "child is not running\n");
         return -1;
     }
-    /* If we're sitting on a bp, step past it first. */
+    /* If we're sitting on a hardware execute watchpoint (rip AT the wp
+     * address), set RF in EFLAGS so the next PTRACE_CONT skips the wp
+     * for one instruction. Without RF, the CPU would re-trigger the
+     * wp on the same instruction and we'd loop forever. The CPU
+     * auto-clears RF after one instruction, so subsequent resumes are
+     * unaffected. */
+    if (wp_set_rf_for_exec_resume(s) < 0) {
+        if (!s->alive) return 0;
+        return -1;
+    }
+    /* If we're sitting on a (software) bp, step past it first. */
     if (resume_step_over_bp(s) < 0) {
         if (!s->alive) return 0;
         return -1;
@@ -859,6 +1271,11 @@ static int cmd_ds(dyn_session_t *s, char *args)
         fprintf(stderr, "child is not running\n");
         return -1;
     }
+    /* If we're sitting on a hardware execute wp, set RF so the upcoming
+     * single-step doesn't re-trigger it. (Data watchpoints don't need
+     * this: trap-after means rip is already past the faulting insn, so
+     * PTRACE_SINGLESTEP executes the next insn without re-firing.) */
+    if (wp_set_rf_for_exec_resume(s) < 0) return -1;
     /* If we're sitting on a bp, step past the bp byte (this counts as
      * the one instruction step). Otherwise, just single-step. */
     if (s->pending_bp) {
@@ -886,6 +1303,12 @@ static int cmd_dso(dyn_session_t *s, char *args)
         fprintf(stderr, "child is not running\n");
         return -1;
     }
+    /* If we're sitting on a hardware execute wp, set RF so the upcoming
+     * resume doesn't re-trigger it. (For dso, the next resume is either
+     * a PTRACE_SINGLESTEP at a non-call or a PTRACE_CONT after setting
+     * a temp bp at next_pc. Either way, RF suppresses the wp for one
+     * instruction, which is what we want.) */
+    if (wp_set_rf_for_exec_resume(s) < 0) return -1;
     if (!s->regs_valid) refresh_regs(s);
 
     /* If we're sitting on a bp, the 0xCC has already been removed, so
@@ -1305,6 +1728,14 @@ static int cmd_info(dyn_session_t *s, char *args)
     for (int i = 0; i < MAX_BPS; i++)
         if (s->bps[i].used) bp_count++;
     printf("breakpoints:   %d\n", bp_count);
+    /* Count hardware watchpoints. */
+    int wp_count = 0;
+    for (int i = 0; i < HW_WP_SLOTS; i++)
+        if (s->hw_wps[i].enabled) wp_count++;
+    printf("hw watchpoints:%d / %d (DR0-DR3)\n", wp_count, HW_WP_SLOTS);
+    if (s->pending_hw_exec >= 0)
+        printf("pending hw exec: slot %d (RF will be set on next resume)\n",
+               s->pending_hw_exec);
     return 0;
 }
 
@@ -1370,6 +1801,203 @@ static int cmd_handle(dyn_session_t *s, char *args)
     return 0;
 }
 
+/* ── Hardware watchpoint commands ─────────────────────────────────── */
+
+/* Parse the common "<addr|sym> [<len>]" prefix used by watch/watchw/
+ * watchr/watcha. Resolves the address (hex/decimal/register/STT_FUNC/
+ * STT_OBJECT), parses an optional length (default 1 byte), and writes
+ * the results to *out_addr and *out_len. Returns 0 on success, -1 on
+ * error (message printed). */
+static int wp_parse_addr_len(dyn_session_t *s, char *args,
+                             uintptr_t *out_addr, int *out_len)
+{
+    char *tok = strtok(args, " \t");
+    if (!tok) {
+        fprintf(stderr, "usage: watch <addr|sym> [<len>]\n");
+        return -1;
+    }
+    uintptr_t addr;
+    /* parse_addr_or_reg resolves hex/decimal addresses, register names,
+     * and STT_FUNC symbols. For watchpoints we also want to watch
+     * global variables (STT_OBJECT), so fall back to sym_any_by_name
+     * which matches any non-import symbol. */
+    if (!parse_addr_or_reg(s, tok, &addr)) {
+        addr = sym_any_by_name(s, tok);
+        if (!addr) {
+            fprintf(stderr, "cannot resolve '%s' as address, register, "
+                    "or symbol\n", tok);
+            return -1;
+        }
+    }
+    int len = 1;  /* default per spec */
+    char *tok2 = strtok(NULL, " \t");
+    if (tok2) {
+        errno = 0;
+        char *end = NULL;
+        long v = strtol(tok2, &end, 0);
+        if (end == tok2 || *end != '\0') {
+            fprintf(stderr, "invalid length '%s' (expected 1, 2, 4, or 8)\n",
+                    tok2);
+            return -1;
+        }
+        len = (int)v;
+    }
+    *out_addr = addr;
+    *out_len  = len;
+    return 0;
+}
+
+/* watch [no args]              list hardware watchpoints
+ * watch <addr|sym> [<len>]     set write watchpoint (default 1 byte).
+ * Internally calls wp_set with rw=1 (write). */
+static int cmd_watch(dyn_session_t *s, char *args)
+{
+    if (!args || !*args) {
+        wp_list(s);
+        return 0;
+    }
+    if (!s->alive) {
+        fprintf(stderr, "child is not running; cannot set watchpoint\n");
+        return -1;
+    }
+    uintptr_t addr;
+    int len;
+    if (wp_parse_addr_len(s, args, &addr, &len) < 0) return -1;
+    return wp_set(s, addr, len, 1);  /* rw=1: write */
+}
+
+/* watchw <addr|sym> [<len>]    set write watchpoint (default 1 byte). */
+static int cmd_watchw(dyn_session_t *s, char *args)
+{
+    if (!args || !*args) {
+        fprintf(stderr, "usage: watchw <addr|sym> [<len>]\n");
+        return -1;
+    }
+    if (!s->alive) {
+        fprintf(stderr, "child is not running; cannot set watchpoint\n");
+        return -1;
+    }
+    uintptr_t addr;
+    int len;
+    if (wp_parse_addr_len(s, args, &addr, &len) < 0) return -1;
+    return wp_set(s, addr, len, 1);  /* rw=1: write */
+}
+
+/* watchr <addr|sym> [<len>]    set read/write watchpoint (default 1 byte). */
+static int cmd_watchr(dyn_session_t *s, char *args)
+{
+    if (!args || !*args) {
+        fprintf(stderr, "usage: watchr <addr|sym> [<len>]\n");
+        return -1;
+    }
+    if (!s->alive) {
+        fprintf(stderr, "child is not running; cannot set watchpoint\n");
+        return -1;
+    }
+    uintptr_t addr;
+    int len;
+    if (wp_parse_addr_len(s, args, &addr, &len) < 0) return -1;
+    return wp_set(s, addr, len, 3);  /* rw=3: read/write */
+}
+
+/* watcha <addr|sym> [<len>]    set access (read or write) watchpoint.
+ * On x86 this is the same as watchr (R/W=11 is read/write; there is
+ * no separate "access" mode in the hardware). */
+static int cmd_watcha(dyn_session_t *s, char *args)
+{
+    if (!args || !*args) {
+        fprintf(stderr, "usage: watcha <addr|sym> [<len>]\n");
+        return -1;
+    }
+    if (!s->alive) {
+        fprintf(stderr, "child is not running; cannot set watchpoint\n");
+        return -1;
+    }
+    uintptr_t addr;
+    int len;
+    if (wp_parse_addr_len(s, args, &addr, &len) < 0) return -1;
+    return wp_set(s, addr, len, 3);  /* rw=3: read/write (=access on x86) */
+}
+
+/* watchx <addr|sym>            set hardware execute breakpoint.
+ * Like `db` but uses DR0-DR7 instead of INT3, so it works on read-only
+ * memory. Always len=1 (execute watchpoints ignore LEN). The CPU
+ * traps BEFORE executing the instruction (rip AT the wp address); the
+ * next dc sets RF in EFLAGS to skip the wp for one instruction. */
+static int cmd_watchx(dyn_session_t *s, char *args)
+{
+    if (!args || !*args) {
+        fprintf(stderr, "usage: watchx <addr|sym>\n");
+        return -1;
+    }
+    if (!s->alive) {
+        fprintf(stderr, "child is not running; cannot set watchpoint\n");
+        return -1;
+    }
+    char *tok = strtok(args, " \t");
+    if (!tok) {
+        fprintf(stderr, "usage: watchx <addr|sym>\n");
+        return -1;
+    }
+    uintptr_t addr;
+    /* Execute watchpoints usually target code, so try STT_FUNC first
+     * (via parse_addr_or_reg) then fall back to any symbol. */
+    if (!parse_addr_or_reg(s, tok, &addr)) {
+        addr = sym_any_by_name(s, tok);
+        if (!addr) {
+            fprintf(stderr, "cannot resolve '%s' as address, register, "
+                    "or symbol\n", tok);
+            return -1;
+        }
+    }
+    /* Reject any extra tokens; watchx takes only an address. */
+    char *extra = strtok(NULL, " \t");
+    if (extra) {
+        fprintf(stderr, "watchx takes only an address "
+                "(execute watchpoints are always 1 byte)\n");
+        return -1;
+    }
+    return wp_set(s, addr, 1, 0);  /* len=1, rw=0: execute */
+}
+
+/* watch- <slot>      remove watchpoint in slot 0-3
+ * watch- <addr>      remove watchpoint at address
+ * watch- *           remove all hardware watchpoints */
+static int cmd_watch_remove(dyn_session_t *s, char *args)
+{
+    if (!args || !*args) {
+        fprintf(stderr, "usage: watch- <slot> | watch- <addr> | watch- *\n");
+        return -1;
+    }
+    char *tok = strtok(args, " \t");
+    if (!tok) {
+        fprintf(stderr, "usage: watch- <slot> | watch- <addr> | watch- *\n");
+        return -1;
+    }
+    if (!s->alive) {
+        fprintf(stderr, "child is not running\n");
+        return -1;
+    }
+    if (strcmp(tok, "*") == 0 || strcasecmp(tok, "all") == 0) {
+        return wp_remove_all(s);
+    }
+    /* Try to interpret as a small DR index first (0-3, no 0x prefix).
+     * This is unambiguous because addresses are typically much larger
+     * and either have an 0x prefix or aren't single-digit hex. */
+    if (tok[0] != '\0' && tok[1] == '\0' &&
+        tok[0] >= '0' && tok[0] <= '3') {
+        return wp_remove_slot(s, tok[0] - '0');
+    }
+    /* Otherwise treat as an address. */
+    uintptr_t addr;
+    if (!parse_addr_or_reg(s, tok, &addr)) {
+        fprintf(stderr, "cannot parse '%s' as slot (0-3), address, or '*'\n",
+                tok);
+        return -1;
+    }
+    return wp_remove_addr(s, addr);
+}
+
 static int cmd_help(dyn_session_t *s, char *args)
 {
     (void)s; (void)args;
@@ -1384,18 +2012,32 @@ static int cmd_help(dyn_session_t *s, char *args)
     printf("  dr              print all GP registers + rip + eflags\n");
     printf("  dr <reg>        print single register\n");
     printf("  dr <reg>=<val>  set register (hex)\n");
+    printf("  watch <a> [len] set hardware write watchpoint (default len=1)\n");
+    printf("  watch <sym> [len]     resolve symbol (func or data), watch it\n");
+    printf("  watchw <a> [len]      write watchpoint (alias for watch)\n");
+    printf("  watchr <a> [len]      read/write watchpoint\n");
+    printf("  watcha <a> [len]      access watchpoint (= watchr on x86)\n");
+    printf("  watchx <a>            hardware execute breakpoint (like db,\n");
+    printf("                         uses DR0-DR3; works on read-only memory)\n");
+    printf("  watch                 list hardware watchpoints (DR0-DR3, max 4)\n");
+    printf("  watch- <slot|addr>    remove one watchpoint\n");
+    printf("  watch- *              remove all hardware watchpoints\n");
     printf("  px <a> <len>    hex dump of memory at address or register\n");
     printf("  ps <a> <len>    string at memory\n");
     printf("  bt              backtrace (rbp chain, max %d frames)\n",
            MAX_FRAMES);
     printf("  sym <addr>      find nearest symbol at or before address\n");
-    printf("  info            process status\n");
+    printf("  info            process status (incl. hw watchpoint count)\n");
     printf("  handle          list signal dispositions (stop/print/pass)\n");
     printf("  handle <sig> <stop|nostop> <print|noprint> <pass|nopass>\n");
     printf("                  set signal disposition (e.g. handle SIGINT nostop noprint pass)\n");
     printf("  help | ?        this help\n");
     printf("  q | quit | exit kill child and quit\n");
     printf("\nNumbers are hex by default (gdb convention).\n");
+    printf("Hardware watchpoints use x86 debug registers (zero runtime\n");
+    printf("overhead, exact instruction pinpointing). Lengths: 1, 2, 4, 8\n");
+    printf("bytes; modes: write (watch/watchw), read/write (watchr/watcha),\n");
+    printf("execute (watchx). 4 slots max (DR0-DR3).\n");
     printf("Empty line repeats the last command.\n");
     return 0;
 }
@@ -1427,6 +2069,12 @@ static int dispatch(dyn_session_t *s, char *line)
     else if (strcmp(cmd, "ds")  == 0) return cmd_ds(s, args);
     else if (strcmp(cmd, "dso") == 0) return cmd_dso(s, args);
     else if (strcmp(cmd, "dr")  == 0) return cmd_dr(s, args);
+    else if (strcmp(cmd, "watch")  == 0) return cmd_watch(s, args);
+    else if (strcmp(cmd, "watchw") == 0) return cmd_watchw(s, args);
+    else if (strcmp(cmd, "watchr") == 0) return cmd_watchr(s, args);
+    else if (strcmp(cmd, "watcha") == 0) return cmd_watcha(s, args);
+    else if (strcmp(cmd, "watchx") == 0) return cmd_watchx(s, args);
+    else if (strcmp(cmd, "watch-") == 0) return cmd_watch_remove(s, args);
     else if (strcmp(cmd, "px")  == 0) return cmd_px(s, args);
     else if (strcmp(cmd, "ps")  == 0) return cmd_ps(s, args);
     else if (strcmp(cmd, "bt")  == 0) return cmd_bt(s, args);
@@ -1496,6 +2144,7 @@ static int session_init(dyn_session_t *s, int argc, char **argv)
     memset(s, 0, sizeof(*s));
     s->mem_fd = -1;
     s->alive  = 1;
+    s->pending_hw_exec = -1;  /* no execute watchpoint pending RF */
     sig_init_defaults(s);
 
     /* Run static analysis on the binary (for symbol resolution). */

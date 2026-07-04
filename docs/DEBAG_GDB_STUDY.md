@@ -45,6 +45,56 @@ on `main`:
    `bp_step_resume`, used at `gdb/infrun.c:8013-8048`), which stays
    installed across signal stops and is hit when the handler returns.
 
+4. **Hardware watchpoints via DR0-DR7** (recommendation #6, ~200 LOC).
+   Commit `<pending>`. Adds `hw_watchpoint_t` (slot, addr, len, rw,
+   enabled) and a 4-slot `hw_wps[]` array on `dyn_session_t`, plus a
+   `pending_hw_exec` int for execute-watchpoint RF handling. DR7 is
+   encoded by `compute_dr7()` with LE+GE set for precise (trap-after
+   for data, trap-before for execute) reporting; the slot's R/W and
+   LEN bits are programmed per the Intel SDM Vol 3 §17.2 layout (R/W
+   at 16+i*4, LEN at 18+i*4; LEN encoding 0=1/1=2/2=8/3=4 bytes).
+   `wp_apply()` pushes the slot addresses into DR0-DR3 and the control
+   word into DR7 via `PTRACE_POKEUSER` at
+   `offsetof(struct user, u_debugreg[i])`. `wp_check_hit()` reads DR6
+   on every SIGTRAP, reports which slot(s) fired, and clears DR6
+   (Linux does not auto-clear it). The DR6 check runs BEFORE the
+   single-step (`TRAP_TRACE`) check in `handle_sigtrap`, so a
+   `PTRACE_SINGLESTEP` that executes a watched-access instruction
+   correctly reports the watchpoint hit instead of being swallowed as
+   a plain single-step trap.
+
+   On modern x86 with LE+GE set, data watchpoints (write,
+   read/write) use trap-after semantics: the faulting instruction has
+   already executed and rip points at the NEXT instruction.
+   `PTRACE_CONT` therefore does not re-trigger the data wp on the same
+   instruction, so no single-step-over is needed (gdb's
+   `x86_handle_watchpoint` step-over in `nat/x86-dregs.c` is for
+   condition/value evaluation, which 2O9 doesn't do). Execute
+   watchpoints (`watchx`) use trap-before: rip is AT the wp address;
+   the next resume sets RF (Resume Flag, bit 16 of EFLAGS) via
+   `wp_set_rf_for_exec_resume()` so the CPU ignores the wp for one
+   instruction (the CPU auto-clears RF after one insn, so subsequent
+   resumes re-arm the wp normally).
+
+   New commands: `watch <addr|sym> [<len>]` (write, default len=1),
+   `watchw` (alias for `watch`), `watchr` (read/write), `watcha`
+   (access; same as `watchr` on x86), `watchx <addr|sym>` (execute
+   breakpoint, like `db` but uses DR0-DR7 instead of INT3, works on
+   read-only memory), `watch` (no args, list), `watch- <slot|addr>`
+   (remove one), `watch- *` (remove all). `sym_any_by_name()` resolves
+   STT_OBJECT symbols (global variables) in addition to STT_FUNC, so
+   `watch x` works on a `volatile int x`. Alignment is enforced
+   (natural alignment: 4-byte watch needs 4-byte aligned address,
+   etc.) since the hardware requires the watched range not to cross a
+   DR-length boundary; the kernel rejects unaligned watchpoints, so
+   the error message is "address 0x... not aligned to length N". Slot
+   exhaustion (all 4 in use) and duplicate detection produce clear
+   errors. `info` now reports `hw watchpoints: N / 4 (DR0-DR3)`.
+
+   Clean-room reimplementation from the Intel SDM Vol 3 §17.2
+   description; gdb's `nat/x86-dregs.c` is GPL-3.0, 2O9 is
+   GPL-2.0-only, so no gdb code was copied.
+
 ## What 2O9's --dynamic-db has today
 
 `src/debag/dynamic_db.c` is a 1460-line single-file live debugger REPL.

@@ -233,8 +233,10 @@ Each maps to the equivalent 2O9 command.
   Forks the target under `PTRACE_TRACEME`, stops it at the entry point,
   and presents a `(209-db)` prompt. Software breakpoints via the INT3
   (0xCC) trick, `/proc/PID/mem` for memory access, rbp-chain walk for
-  backtraces, and a minimal x86-64 instruction-length decoder for
-  step-over (libcapstone used if available). x86-64 only; single-threaded.
+  backtraces, a minimal x86-64 instruction-length decoder for
+  step-over (libcapstone used if available), and hardware
+  watchpoints via the x86 debug registers (DR0-DR7). x86-64 only;
+  single-threaded.
 
   Commands (empty line repeats the last command, numbers are hex):
 
@@ -250,15 +252,49 @@ Each maps to the equivalent 2O9 command.
   | `dr` | Print all GP registers + rip + eflags |
   | `dr <reg>` | Print single register |
   | `dr <reg>=<val>` | Set register (hex) |
+  | `watch <addr\|sym> [len]` | Set hardware write watchpoint (default len=1, max 4 slots) |
+  | `watchw <addr\|sym> [len]` | Set hardware write watchpoint (alias for `watch`) |
+  | `watchr <addr\|sym> [len]` | Set hardware read/write watchpoint |
+  | `watcha <addr\|sym> [len]` | Set hardware access (read or write) watchpoint (= `watchr` on x86) |
+  | `watchx <addr\|sym>` | Set hardware execute breakpoint (like `db` but uses DR0-DR7; works on read-only memory) |
+  | `watch` | List active hardware watchpoints (DR0-DR3, max 4) |
+  | `watch- <slot\|addr>` | Remove one hardware watchpoint (slot 0-3 or its watched address) |
+  | `watch- *` | Remove all hardware watchpoints |
   | `px <addr\|reg> <len>` | Hex dump of memory at address or in register |
   | `ps <addr\|reg> <len>` | Print string at memory |
   | `bt` | Backtrace (rbp chain, max 64 frames) |
   | `sym <addr>` | Find nearest symbol at or before address |
-  | `info` | Print process status (pid, state, rip, bp count) |
+  | `info` | Print process status (pid, state, rip, bp count, hw watchpoint count) |
   | `handle` | List signal dispositions (stop/print/pass per signal) |
   | `handle <sig> <stop\|nostop> <print\|noprint> <pass\|nopass>` | Set signal disposition (e.g. `handle SIGINT nostop noprint pass` to let SIGINT through without breaking) |
   | `help` \| `?` | List commands |
   | `q` \| `quit` \| `exit` | Kill child and quit |
+
+  Hardware watchpoints: `watch <addr|sym> [len]` arms one of the four
+  x86 debug-register slots (DR0-DR3). DR7 is programmed with the
+  slot's length (1, 2, 4, or 8 bytes; default 1) and access mode
+  (write, read/write, or execute). DR6 reports which slot(s) fired on
+  a SIGTRAP; debag reads it on every stop, prints `Hardware watchpoint
+  N (DRN) triggered at 0x<addr>...`, then clears DR6 (Linux does not
+  auto-clear it). Watched ranges must be naturally aligned (a 4-byte
+  watch must be 4-byte aligned, etc.) or the kernel rejects the
+  POKEUSER; debag pre-checks alignment and prints
+  `address 0x... not aligned to length N`. On modern x86 with DR7
+  LE+GE set (which debag always sets), data watchpoints use
+  trap-after semantics: the faulting instruction has already executed
+  and rip points at the next instruction, so `dc` does not re-trigger
+  the watchpoint. Execute watchpoints (`watchx`) use trap-before: rip
+  points AT the wp address; the next `dc`/`ds`/`dso` sets RF (Resume
+  Flag) in EFLAGS so the CPU ignores the wp for one instruction, then
+  re-arms automatically. Symbols (both STT_FUNC and STT_OBJECT) are
+  resolved by name, so `watch x` watches a `volatile int x` and
+  `watchx main` sets an execute bp at `main` (useful for code in
+  read-only memory where INT3 insertion would fail). The watched
+  address can be unmapped; the watchpoint only fires when the CPU
+  actually accesses it. Hardware watchpoints are per-process and not
+  inherited across fork (debag does not trace forks). This is
+  hardware-assisted: zero runtime overhead, exact instruction
+  pinpointing, the killer feature for memory-corruption debugging.
 
   Signal handling: by default, fatal signals (SIGSEGV, SIGBUS, SIGFPE,
   SIGILL, SIGTRAP, SIGINT) stop and print, and are forwarded to the
