@@ -181,6 +181,43 @@ Each maps to the equivalent 2O9 command.
   it, those two commands print a hint and return. The prompt shows the
   current seek: `0x0000000000401000> `.
 
+`209 debag --dynamic-db --` `<cmd>` `[args...]`
+: Drop into an interactive gdb-style live debugger REPL on `<cmd>`.
+  Forks the target under `PTRACE_TRACEME`, stops it at the entry point,
+  and presents a `(209-db)` prompt. Software breakpoints via the INT3
+  (0xCC) trick, `/proc/PID/mem` for memory access, rbp-chain walk for
+  backtraces, and a minimal x86-64 instruction-length decoder for
+  step-over (libcapstone used if available). x86-64 only; single-threaded.
+
+  Commands (empty line repeats the last command, numbers are hex):
+
+  | Command | Action |
+  |---|---|
+  | `db <addr>` | Set breakpoint at address |
+  | `db <sym>` | Set breakpoint at symbol name (resolved via static analysis) |
+  | `db` | List all breakpoints |
+  | `db- <addr>` | Remove breakpoint |
+  | `dc` | Continue execution |
+  | `ds` | Single step (one instruction) |
+  | `dso` | Step over (step past a call instruction) |
+  | `dr` | Print all GP registers + rip + eflags |
+  | `dr <reg>` | Print single register |
+  | `dr <reg>=<val>` | Set register (hex) |
+  | `px <addr\|reg> <len>` | Hex dump of memory at address or in register |
+  | `ps <addr\|reg> <len>` | Print string at memory |
+  | `bt` | Backtrace (rbp chain, max 64 frames) |
+  | `sym <addr>` | Find nearest symbol at or before address |
+  | `info` | Print process status (pid, state, rip, bp count) |
+  | `help` \| `?` | List commands |
+  | `q` \| `quit` \| `exit` | Kill child and quit |
+
+  Known limitations: frameless functions (compiled with
+  `-fomit-frame-pointer`) break the rbp-chain backtrace walk; the walk
+  terminates gracefully via the `next_rbp > rbp` sanity check. Stripped
+  binaries with no useful `.symtab`/`.dynsym` produce `<unknown>` for
+  `sym` and `bt`. Step-over (`dso`) on exotic call encodings may
+  miscount instruction length and fall back to a single step.
+
 `209 <n> rollback`
 : Roll back to generation #n. Repoints the current-generation symlink
   and rebuilds the symlink farm. A reboot is recommended for the full

@@ -314,6 +314,7 @@ will probably use, then builds a seccomp filter from that.
 209 debag --no-net -- curl URL        # run with network blocked
 209 debag --fast-mode -- ls -la       # seccomp only, fastest
 209 debag --static-db -- /bin/ls      # interactive rizin-style ELF REPL
+209 debag --dynamic-db -- /bin/ls     # interactive gdb-style live debugger
 ```
 
 Debag also has an interactive static-analysis REPL, `--static-db`,
@@ -323,6 +324,15 @@ inspect the parsed ELF: list sections (`iS`), segments (`iSS`), symbols
 (`px`, `pxw`, `pxq`); seek to sections / symbols / `entry0` (`s`); and
 disassemble with libcapstone (`pd`, `pdd`). Type `?` inside the REPL
 for the full command table.
+
+For live debugging, `--dynamic-db` forks the target under `ptrace`,
+stops it at the entry point, and drops you at a `(209-db)` prompt
+modelled on gdb. Software breakpoints via the INT3 (0xCC) trick
+(`db <addr|sym>`), continue (`dc`), single-step (`ds`), step over a
+call (`dso`), inspect registers (`dr`), hex-dump memory (`px`), print
+strings (`ps`), walk the rbp chain for a backtrace (`bt`), and resolve
+nearest symbol (`sym <addr>`). Empty line repeats the last command;
+`q` kills the child and quits. x86-64 only; single-threaded.
 
 Restriction flags (both Trakker and Debag):
 

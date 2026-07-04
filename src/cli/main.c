@@ -3538,6 +3538,7 @@ static int cmd_debag(int argc, char **argv)
         debag_policy_t policy = {0};
         int i = 0;
         int static_db = 0;
+        int dynamic_db = 0;
 
         /* Parse flags */
         while (i < argc) {
@@ -3546,6 +3547,9 @@ static int cmd_debag(int argc, char **argv)
                         i++;
                 } else if (strcmp(argv[i], "--static-db") == 0) {
                         static_db = 1;
+                        i++;
+                } else if (strcmp(argv[i], "--dynamic-db") == 0) {
+                        dynamic_db = 1;
                         i++;
                 } else if (strcmp(argv[i], "--dynamic-block") == 0) {
                         policy.dynamic_block = 1;
@@ -3637,6 +3641,13 @@ static int cmd_debag(int argc, char **argv)
         /* If --static-db, drop into the rizin-style read-only ELF REPL.
          * No sandbox, no exec - just inspect the binary. (Already handled
          * above, before the analysis-failure warning.) */
+
+        /* If --dynamic-db, fork the target under ptrace and drop into
+         * the gdb-style live-debugger REPL. Skips the seccomp sandbox. */
+        if (dynamic_db) {
+                debag_analysis_free(analysis);
+                return debag_dynamic_db_repl(argc - i, &argv[i]);
+        }
 
         /* Run under the hybrid sandbox */
         const char **cmd_argv = malloc((argc - i + 1) * sizeof(char *));
