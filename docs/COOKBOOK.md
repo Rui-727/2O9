@@ -412,3 +412,110 @@ the Arch mirror, verifies each NAR hash matches what the lockfile
 expects, and commits a new generation. The two machines now have
 byte-identical user packages. This is the closest thing 2O9 has to
 NixOS-style reproducibility without going full NixOS.
+
+## 21. Share a folder between two machines
+
+You have a directory on machine A (dotfiles, a project tree, a VM
+image, anything) and you want it on machine B with a content-addressed
+guarantee that the bytes match. No PKGBUILD, no install, just NAR it
+over.
+
+On machine A (the publisher), generate a signing key if you don't
+have one and configure a sub:
+
+```sh
+# 209 keygen > /tmp/key
+# head -1 /tmp/key    # public key
+# tail -1 /tmp/key > /etc/2O9/secret-key; chmod 0600 /etc/2O9/secret-key
+```
+
+Add to `/nix/config/extra.nix` on machine A:
+
+```nix
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" ];
+    SigningKey = "/etc/2O9/secret-key";
+    KeyName = "personal-1";
+  };
+};
+```
+
+Share the folder:
+
+```sh
+# 209 share /home/me/dotfiles
+shared: /nix/store/0v4v8nxq2c...-share-dotfiles
+       nar://0v4v8nxq2cfk7kbhcr5d4s5d9lqzrqyr
+```
+
+The share is now at `/nix/store/<hash>-share-dotfiles/` locally and
+pushed (signed) to the cache. The hash is the NAR hash of the tree, so
+the same input always produces the same hash.
+
+On machine B (the subscriber), configure the sub with the publisher's
+public key:
+
+```nix
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" ];
+    PublicKeys = [ "<from 209 keygen on A>" ];
+    AllowUnsigned = false;
+  };
+};
+```
+
+Fetch and extract:
+
+```sh
+$ 209 get nar://0v4v8nxq2cfk7kbhcr5d4s5d9lqzrqyr /tmp/dotfiles
+  found on https://cache.example.com (sub 'personal')
+$ ls /tmp/dotfiles
+... the same tree as on machine A, byte-identical
+```
+
+If the directory changed on machine A, re-share it. The hash changes,
+so the URI changes. The old share stays on the cache until the cache
+operator removes it (the index.json grows monotonically).
+
+## 22. Browse subs interactively
+
+You forgot what you pushed to which cache. `209 subs` drops you into a
+small TUI for browsing configured subs and their contents.
+
+```sh
+$ 209 subs
+2O9 Subs
+
+> 1. personal      https://cache.example.com, s3://backup-bucket  (2 URLs, 2 keys)
+  2. friend        https://friend.example.org/cache              (1 URL, 1 key)
+
+Up/Down move, Enter view, q quit
+```
+
+Press Enter on `personal`:
+
+```
+Sub: personal
+URLs: https://cache.example.com, s3://backup-bucket
+Public keys: 2
+AllowUnsigned: false
+
+Contents (fetched from https://cache.example.com/index.json):
+   1. 0v4v8nxq2cfk  share  dotfiles           12.4 KB  2026-07-04 14:30
+   2. abc123share   share  myapp-backup       12.4 MB  2026-07-04 14:30
+   3. ghi789pkg     pkg    neovim-0.10.0      4.2 MB   2026-07-03 18:00
+
+Up/Down move, Enter view item, b back, q quit
+```
+
+Press Enter on a row to see the item's narinfo (store path, NAR hash,
+references, signatures). Press `b` to go back to the sub list, `q` to
+quit.
+
+If stdin or stdout isn't a TTY (piping output to a pager, running in a
+script), `209 subs` prints the sub list non-interactively. `209 subs
+<name>` prints one sub's details and contents non-interactively. Both
+fetch `index.json` from each URL in the sub and merge the items
+(deduped by hash).

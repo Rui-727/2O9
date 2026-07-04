@@ -151,6 +151,34 @@ Binary cache (share packages between machines):
 # normal install path also consults subs automatically
 ```
 
+Snapshots (content-addressed copies of declared paths):
+
+```sh
+# Declare in 2O9.nix:
+#   snapshots."/var/lib/postgres" = { auto = "daily"; keep = 7; };
+209 snapshot take /var/lib/postgres       # take a snapshot now
+209 snapshot list /var/lib/postgres       # list snapshots of a path
+209 snapshot diff 1 2                     # diff two snapshots of the same path
+209 snapshot restore 1                    # restore (auto-snapshots current state first)
+209 snapshot rm 1                         # remove from the DB (store path GC'd later)
+```
+
+Paths declared under `snapshots` in `2O9.nix` (absolute) or `<user>.nix`
+(relative to home) are "managed". `209 snapshot take` only works on
+managed paths. `auto = "hourly"|"daily"|"weekly"` installs a systemd
+timer; `auto = "manual"` means snapshots only via the CLI. See
+[`docs/CONFIG.md`](./docs/CONFIG.md) for the schema.
+
+NAR file sharing (share any file or folder by hash):
+
+```sh
+209 share /home/me/dotfiles        # hash, copy to /nix/store/, push, print nar://<hash>
+209 share ls                       # list local shares
+209 get nar://<hash> /tmp/restore  # fetch a share by URI and extract to /tmp/restore
+209 subs                           # interactive picker: browse subs and their contents
+209 subs <name>                    # print one sub's details and contents
+```
+
 Trakker (sandbox, command resolved via `$PATH`):
 
 ```sh
@@ -290,6 +318,19 @@ Both work; pick whichever feels right.
 | `209 cache push <path>` | Upload a store path and its closure to configured caches | new |
 | `209 cache pull <path>` | Explicitly fetch a store path from configured caches | new |
 | `209 keygen` | Generate an Ed25519 keypair for signing narinfos | new |
+| `209 snapshot take <path>` | Take a snapshot of a declared path (NAR-hashed, content-addressed) | new |
+| `209 snapshot list [path]` | List snapshots (all or filtered by path) | new |
+| `209 snapshot restore <id>` | Restore a snapshot by ID (auto-snapshots current state first) | new |
+| `209 snapshot diff <id1> <id2>` | Diff two snapshots of the same path | new |
+| `209 snapshot rm <id>` | Remove a snapshot from the DB (store path GC'd later) | new |
+| `209 share <path>` | Share a file or folder as a NAR blob, push to subs | new |
+| `209 share ls` | List local shares | new |
+| `209 share rm <hash>` | Remove a share from the store | new |
+| `209 get <uri> [dest]` | Fetch a share by `nar://<hash>` URI and extract | new |
+| `209 get pkg <name>` | Explicitly fetch a package from caches | new |
+| `209 subs` | Interactive subscription picker (TUI) | new |
+| `209 subs <name>` | Print one sub's details and contents | new |
+| `209 subs add/rm <name>` | Add or remove a sub from config | new |
 
 **Special subjects**: `apply`, `generations`, `sync`, `news`, `gc`,
 `optimise` are zero-argument commands. They have no subject, only a
@@ -424,6 +465,15 @@ signed with that sub's own key. `209 cache pull` (and install-time
 substitution) pulls from every sub in config order. The old flat
 `substituters` block still parses as a single sub named `legacy` with a
 `PublicKey` (singular) field; a deprecation warning is printed.
+
+**NAR file sharing**. `209 share <path>` NAR-hashes any file or
+folder, copies it into `/nix/store/<hash>-share-<basename>/`, pushes
+it to every sub that has a `SigningKey`, and prints `nar://<hash>`.
+The receiver runs `209 get nar://<hash> <dest>` to fetch and extract.
+Each push also appends to the sub's `index.json`, so `209 subs` can
+list shares, packages, and snapshots side by side. Use it for
+dotfiles, ad-hoc file transfer between machines, or anything that
+needs content addressing without going through a PKGBUILD.
 
 ## Documentation
 

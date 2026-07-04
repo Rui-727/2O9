@@ -773,6 +773,40 @@ services continue running the old code. A reboot ensures everything picks up
 the new generation. This is the tradeoff of not having boot-time rollback
 machinery: simpler code, no activation service, but manual reboot.
 
+### Snapshots: content-addressed path checkpoints
+
+A snapshot is a NAR-hashed copy of a path declared under `snapshots` in
+`2O9.nix` or `<user>.nix`. Snapshots live in `/nix/store/<base32>-snap-<name>/`
+alongside packages, content-addressed by the same NAR fingerprint formula
+(minus the version component). This means two snapshots of identical content
+produce the same store path, and snapshots benefit from `209 optimise`
+hardlink dedup and `209 gc` like any other store path.
+
+The snapshot DB at `~/.local/state/2O9/snapshots.sqlite` (or
+`/var/lib/2O9/snapshots.sqlite` for system scope) records the history per
+path: `id`, `path`, `store_path`, `nar_hash`, `parent_id`, `message`,
+`taken_at`, `scope`. `parent_id` links each snapshot to the prior one of
+the same path, forming an undo chain.
+
+Path resolution rules:
+- In `2O9.nix` (system config): paths MUST be absolute.
+- In `<user>.nix` (user config): paths are relative to that user's home.
+  `Documents` resolves to `/home/<user>/Documents`.
+
+A path declared in config is "managed". `209 snapshot take <path>` refuses
+unmanaged paths. This stops users from accidentally snapshotting arbitrary
+directories and tying up disk in the store.
+
+Auto-scheduling: when `209 apply` sees a snapshot path with `auto != "manual"`,
+it installs a systemd timer + service at
+`/etc/systemd/system/2O9-snap-<sanitized>.{timer,service}`. The service runs
+`209 snapshot take <path>` on the configured schedule (`hourly`, `daily`, or
+`weekly`). System paths run as root; user paths run as the declaring user.
+Paths removed from the manifest have their timers disabled and uninstalled.
+
+Retention: `keep = N` prunes snapshots beyond the last N (oldest first) on
+each `209 apply`. `keep = 0` keeps everything.
+
 ### Trakker: execution sandbox and trace recorder
 
 `209 trakker <cmd>` runs a command inside 2O9's sandbox, recording everything

@@ -399,11 +399,111 @@ Each maps to the equivalent 2O9 command.
   to the Arch mirror. Useful for debugging or for pre-populating a
   machine.
 
+### Sharing (NAR blobs)
+
+`209 share` `<path>`
+: NAR-hash the path, copy it into `/nix/store/<hash>-share-<basename>/`,
+  push the share to every configured sub that has a `SigningKey`, and
+  print the share URI `nar://<hash>`. The path MUST be absolute. No
+  `~` expansion, no relative paths.
+
+  Shares use the same NAR hashing and content-addressed store path
+  scheme as packages, so a share of a directory produces the same
+  store path on any machine that shares the same input tree. Each
+  push also appends an entry to the sub's `index.json` so `209 subs`
+  can list it.
+
+`209 share ls`
+: List local shares (paths in `/nix/store/` matching `*-share-*`).
+  Shows hash, name, size, and when the share was taken.
+
+`209 share rm` `<hash>`
+: Remove a share from the store. Just removes the directory; the next
+  `209 gc` cleans up any dangling DB entries.
+
+`209 get` `<uri>` `[dest]`
+: Fetch a share by URI. The URI is `nar://<hash>` or just the bare
+  `<hash>`. Walks each configured sub in config order, then each URL
+  within the sub. If a sub has the share and the signature verifies
+  against ANY of its `PublicKeys`, the NAR is downloaded and extracted
+  to `<dest>` (or the current directory if not specified). Errors if
+  no sub has the share or no signature verifies.
+
+`209 get pkg` `<name>`
+: Explicitly fetch a package from configured caches. Same as `209
+  cache pull` but resolves the package name to a store path via the
+  store DB first. Normally this happens automatically during `209 -S`,
+  but this forces it.
+
+### Subscription picker
+
+`209 subs`
+: Launch the interactive subscription picker. Shows all configured
+  subs from `extra.nix`. Arrow keys (or `j`/`k`) move the selection,
+  `Enter` opens a sub, `q` quits. The sub view fetches `index.json`
+  from the sub's first URL and lists its contents (hash, type, name,
+  size, when pushed). `Enter` on an item fetches and prints its
+  narinfo, `b` goes back to the sub list.
+
+  If stdin or stdout is not a TTY, falls back to non-interactive: just
+  prints the sub list and exits.
+
+`209 subs` `<name>`
+: Print one sub's details and contents non-interactively, then exit.
+  Fetches `index.json` from each URL and merges the items.
+
+`209 subs add` `<name>`
+: Interactively prompt for URL(s), PublicKeys, AllowUnsigned,
+  SigningKey, and KeyName. Appends the new sub to
+  `/nix/config/<user>.extra.nix` (or `/nix/config/extra.nix` if
+  running as root).
+
+`209 subs rm` `<name>`
+: Remove a sub from the config file.
+
 ### Multi-subject
 
 `209 <pkg1> <pkg2> ... <verb>`
 : Apply the verb to all subjects. For example:
   `209 vim curl install` installs both.
+
+### Snapshot commands
+
+`209 snapshot take <path>`
+: Take a snapshot of a declared path now. Refuses if `<path>` is not
+  declared under `snapshots` in `2O9.nix` or `<user>.nix`. NAR-hashes
+  the path, copies it into `/nix/store/<base32>-snap-<sanitized>/`,
+  and registers a row in the snapshot DB with `parent_id` set to the
+  most recent prior snapshot of the same path. If the content-addressed
+  store path already exists (same content was snapshotted before), the
+  copy is skipped and the existing path is reused.
+
+`209 snapshot list` [`<path>`]
+: List snapshots. With no argument, lists every snapshot across all
+  paths. With `<path>`, lists only snapshots of that path. Output
+  columns: ID, path, taken-at timestamp, short NAR hash, parent ID,
+  scope. The message (if any) is printed on a second line.
+
+`209 snapshot restore <id>`
+: Restore a snapshot by ID. Before restoring, takes a snapshot of the
+  path's current state so you can undo the restore. Then replaces the
+  path's contents with the snapshot's store path contents. The original
+  path is removed first; the snapshot's contents are copied in via
+  `cp -a`.
+
+`209 snapshot diff <id1> <id2>`
+: Diff two snapshots of the same path. Walks both store paths
+  recursively and reports per-file diffs: added (in `id2` only),
+  removed (in `id1` only), modified (in both with different content
+  hashes). The hash is SHA-256 of the file's bytes (or the symlink
+  target for symlinks), so two files with different mtimes but
+  identical content compare equal.
+
+`209 snapshot rm <id>`
+: Remove a snapshot from the DB. The store path is left in place and
+  will be reaped by `209 gc` on the next run if nothing else
+  references it. Children of this snapshot (rows with `parent_id ==
+  id`) have their `parent_id` cleared. The rows are not cascaded.
 
 ## OPTIONS
 
@@ -469,7 +569,9 @@ auto-migration. See [`docs/MIGRATION.md`](./MIGRATION.md).
 `/nix/store/`
 : The store. Package files live here as
   `/nix/store/<base32-hash>-<name>-<version>/`. The hash is computed
-  from the NAR serialisation of the extracted tree.
+  from the NAR serialisation of the extracted tree. Shares live here
+  as `/nix/store/<base32-hash>-share-<basename>/` and snapshots as
+  `/nix/store/<base32-hash>-snap-<name>/`.
 
 `/nix/store/.links/`
 : Hardlink pool used by `209 optimise`. Files are linked here by their
@@ -478,6 +580,13 @@ auto-migration. See [`docs/MIGRATION.md`](./MIGRATION.md).
 `/nix/store/.tmp/`
 : Staging directory for atomic extraction. 2O9 extracts here, then
   `rename()`s to the final store path. Hidden from normal store scans.
+
+`<cache-root>/index.json`
+: The cache index, maintained by `209 share` and `209 cache push`.
+  Lists every share, package, and snapshot pushed to the cache with
+  its hash, name, type, NAR size, NAR hash, push timestamp, and the
+  key name that signed it. `209 subs` and `209 subs <name>` fetch and
+  display it. Last-write-wins on concurrent publishes.
 
 `~/.local/bin/`, `~/.local/lib/`
 : Symlink farm targets. The shell's `$PATH` should include

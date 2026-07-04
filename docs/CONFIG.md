@@ -158,6 +158,61 @@ services = {
 enable. After `209 apply`, a reboot is recommended for the full system
 state to take effect.
 
+### `snapshots` (attrset of attrsets)
+
+Paths to snapshot on a schedule. Each key is a path, each value is an
+attrset with `auto` and `keep`. Snapshots are NAR-hashed copies stored
+in `/nix/store/<base32>-snap-<sanitized-name>/`, content-addressed like
+packages. A SQLite DB at `~/.local/state/2O9/snapshots.sqlite` (or
+`/var/lib/2O9/snapshots.sqlite` for system scope) records the snapshot
+history per path with parent links.
+
+Path resolution rules depend on which config file declares them:
+
+- In `2O9.nix` (system config): paths MUST be absolute. A relative
+  path is rejected with an error.
+- In `<user>.nix` (user config): paths are relative to that user's
+  home dir. `Documents` resolves to `/home/<user>/Documents`. Absolute
+  paths and paths starting with `~` are rejected.
+
+```nix
+# /nix/config/2O9.nix - system paths must be absolute
+snapshots = {
+  "/var/lib/postgres" = {
+    auto = "daily";     # "hourly", "daily", "weekly", "manual"
+    keep = 7;           # keep last 7, 0 = keep forever
+  };
+};
+```
+
+```nix
+# /nix/config/<user>.nix - user paths are relative to home
+snapshots = {
+  "Documents" = {
+    auto = "daily";
+    keep = 7;
+  };
+  "projects" = {
+    auto = "manual";    # only taken via `209 snapshot take`
+    keep = 0;
+  };
+};
+```
+
+`auto` selects the systemd timer schedule. `manual` means no timer is
+installed; snapshots are only taken when you run `209 snapshot take
+<path>`. The other values (`hourly`, `daily`, `weekly`) install a
+systemd timer that runs `209 snapshot take <path>` on that calendar.
+System paths run as root; user paths run as the declaring user.
+
+`keep` is the retention count. After each `209 apply`, snapshots beyond
+the keep count are pruned (oldest first). `0` means keep forever.
+
+A path declared in `snapshots` is "managed". `209 snapshot take <path>`
+refuses to snapshot unmanaged paths. Take, list, restore, diff, and rm
+all live under `209 snapshot <subcommand>`; see the manpage for the
+full command reference.
+
 ## Imports
 
 Configs can be split across multiple files using `import`:
@@ -279,6 +334,13 @@ in
     sshd.enable = true;
     NetworkManager.enable = true;
   };
+
+  snapshots = {
+    "/var/lib/postgres" = {
+      auto = "daily";
+      keep = 7;
+    };
+  };
 }
 ```
 
@@ -369,8 +431,9 @@ recommended for untrusted PKGBUILDs.
 ### `subs`
 
 Named binary-cache substituters. Each sub is an attrset keyed by a
-bare identifier (the C Nix evaluator in lib2O9 does not yet parse
-quoted attrset keys; use `personal` not `"personal"`).
+bare identifier (e.g. `personal`) or a quoted string (e.g.
+`"personal-cache"`). String keys are needed when the key contains
+non-identifier characters; bare identifiers work for simple names.
 
 ```nix
 subs = {
@@ -406,6 +469,41 @@ each narinfo. Subscribers don't need this.
 `AllowUnsigned = true` accepts narinfos with no signature or with a
 signature from an unknown key. Use only for trusted local caches.
 Default is `false`.
+
+#### Cache index (`index.json`)
+
+Every time `209 share <path>` or `209 cache push <path>` uploads to a
+cache, it also appends an entry to the cache's `index.json` at the
+cache root. The index lists every share, package, and snapshot pushed
+to that cache:
+
+```json
+{
+  "version": 1,
+  "updated_at": 1735689600,
+  "items": [
+    {
+      "hash": "abc123share",
+      "name": "myapp-backup",
+      "type": "share",
+      "nar_size": 13000000,
+      "nar_hash": "sha256:...",
+      "pushed_at": 1735689600,
+      "signed_by": "personal-1"
+    }
+  ]
+}
+```
+
+The cache server (HTTP or S3) just serves files. 2O9 maintains the
+index by fetching the current one, appending the new entry, and
+re-uploading. If two publishers race, last-write-wins (acceptable for
+now; the NAR and narinfo files themselves are unaffected).
+
+`209 subs` and `209 subs <name>` fetch `index.json` from each URL in
+the sub and merge the items (deduped by hash) to display the sub's
+contents. A sub with multiple URLs shows the union of all URLs'
+indexes.
 
 #### Backward compat: `substituters`
 

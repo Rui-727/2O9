@@ -45,17 +45,28 @@ guaranteed byte-identical binaries across the fleet.
 
 Pick one machine as the publisher. It has the build tools, the signing
 key, and a public HTTPS endpoint. Configure `/etc/2O9/extra.nix` on it
-with `substituters.URLs = [ "https://cache.example.com" ];` plus the
+with `subs.personal.URLs = [ "https://cache.example.com" ];` plus the
 signing key. Run `209 sync && sudo 209 apply` there first, then
-`209 cache push <nix-store-path>` for the closure of the apply. Or, run
-a cron job that pushes the current generation's closure every night.
+`209 cache push /nix/store/<hash>-neovim-0.10.0` for the closure of the
+apply. Or, run a cron job that pushes the current generation's closure
+every night.
 
 On every other machine, configure
-`substituters.URLs = [ "https://cache.example.com" ];` with the
+`subs.personal.URLs = [ "https://cache.example.com" ];` with the
 publisher's public key. The next `209 -Su` on those machines hits the
 cache first. If the path is there and the Ed25519 signature verifies,
 the NAR is downloaded and streamed into the store. The Arch mirror is
 only consulted for paths the cache does not have.
+
+For ad-hoc file transfer that doesn't fit the package model (config
+trees, project snapshots, VM images), `209 share <path>` on the
+publisher NAR-hashes the path, copies it into
+`/nix/store/<hash>-share-<basename>/`, and pushes it to the cache. The
+publisher prints `nar://<hash>`. On any subscriber, `209 get
+nar://<hash> <dest>` fetches and extracts it. Both pushes append to
+the cache's `index.json`, and `209 subs` (interactive) or `209 subs
+<name>` (non-interactive) lists everything the cache has: shares,
+packages, and snapshots side by side.
 
 Day to day, the sysadmin edits `2O9.nix` on the publisher, applies it,
 pushes the new closure to the cache, then runs `209 -Su` on the
@@ -142,35 +153,59 @@ dependency resolution.
 
 Set up a normal Arch machine elsewhere as the publisher, with a binary
 cache configured. Push the closure you want to a `file://` URL pointing
-at a directory on a USB stick:
+at a directory on a USB stick. Configure `/nix/config/extra.nix` on the
+publisher:
 
-```ini
-[substituters]
-URLs = file:///mnt/usb/cache
-SigningKey = /etc/2O9/secret-key
-KeyName = airgap-1
+```nix
+subs = {
+  airgap = {
+    URLs = [ "file:///mnt/usb/cache" ];
+    SigningKey = "/etc/2O9/secret-key";
+    KeyName = "airgap-1";
+  };
+};
 ```
 
 ```sh
 $ sudo 209 cache push /nix/store/<hash>-neovim-0.10.0
 ```
 
+For files that don't fit the package model (dotfiles, project trees,
+config bundles), use `209 share`:
+
+```sh
+$ sudo 209 share /home/me/project
+shared: /nix/store/<hash>-share-project
+       nar://<hash>
+```
+
+The share is pushed to the same cache, signed with the same key, and
+appended to the cache's `index.json`.
+
 Then walk the USB stick over to the air-gapped machine. Configure it
 with:
 
-```ini
-[substituters]
-URLs = file:///mnt/usb/cache
-PublicKey = <from publisher's 209 keygen>
-AllowUnsigned = no
+```nix
+subs = {
+  airgap = {
+    URLs = [ "file:///mnt/usb/cache" ];
+    PublicKeys = [ "<from publisher's 209 keygen>" ];
+    AllowUnsigned = false;
+  };
+};
 ```
 
 Run `209 -S neovim` on the air-gapped machine. 2O9 reads the narinfo
 from the USB stick, verifies the Ed25519 signature, streams the NAR into
-the store. No internet needed. For a system that needs to be kept
-completely offline, this is the only safe way to install packages: the
-USB stick is a single trust root, signed by a key you control, and
-nothing on the air-gapped machine ever trusts the internet.
+the store. No internet needed. For a share, `209 get nar://<hash>
+/tmp/project` fetches and extracts it. To see what's on the stick
+without parsing JSON by hand, `209 subs airgap` lists every item with
+its hash, type, name, size, and when it was pushed.
+
+For a system that needs to be kept completely offline, this is the only
+safe way to install packages: the USB stick is a single trust root,
+signed by a key you control, and nothing on the air-gapped machine ever
+trusts the internet.
 
 The gotcha: the USB stick needs the full closure. `209 cache push`
 does this for you (it walks the refs graph), but if you forget and
