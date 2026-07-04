@@ -1219,7 +1219,57 @@ static int handle_stop(dyn_session_t *s, int status)
         }
 
         int sig = WSTOPSIG(status);
+        int event = (status >> 16) & 0xFFFF;
         s->last_sig = sig;
+
+        /* PTRACE_O_TRACEFORK/VFORK/CLONE/EXEC events. The kernel
+         * reports these as a SIGTRAP stop with the event encoded in
+         * status's high bits. Per the gdb-study doc, we just report
+         * the event and continue tracing the parent — we don't follow
+         * into the new child yet. For fork/vfork/clone, we also
+         * PTRACE_DETACH the new child so it runs untraced (otherwise
+         * it stays stopped at its initial SIGSTOP forever, which
+         * breaks fork+exec programs). */
+        if (event == PTRACE_EVENT_FORK || event == PTRACE_EVENT_VFORK ||
+            event == PTRACE_EVENT_CLONE || event == PTRACE_EVENT_EXEC) {
+            const char *ev_name =
+                event == PTRACE_EVENT_FORK  ? "fork"  :
+                event == PTRACE_EVENT_VFORK ? "vfork" :
+                event == PTRACE_EVENT_CLONE ? "clone" : "exec";
+            unsigned long new_pid = 0;
+            if (event != PTRACE_EVENT_EXEC)
+                ptrace(PTRACE_GETEVENTMSG, s->pid, NULL, &new_pid);
+            if (event == PTRACE_EVENT_EXEC) {
+                printf("[child exec'd]\n");
+            } else {
+                printf("[child %s: new pid=%lu]\n", ev_name, new_pid);
+                /* Reap the new child's initial SIGSTOP (the kernel
+                 * guarantees it's stopped before the parent's fork
+                 * event is reported) and PTRACE_DETACH it so it runs
+                 * untraced. If we can't (race with kernel bookkeeping),
+                 * skip — the child stays stopped, which is bad but not
+                 * fatal for the parent. */
+                if (new_pid > 0) {
+                    int cstatus;
+                    pid_t reaped = waitpid((pid_t)new_pid, &cstatus, __WALL);
+                    if (reaped > 0 && WIFSTOPPED(cstatus)) {
+                        ptrace(PTRACE_DETACH, (pid_t)new_pid, NULL, NULL);
+                    }
+                }
+            }
+            /* Continue the parent. Don't forward any signal — the
+             * fork/clone/exec event is synthetic, not a real signal. */
+            s->last_sig = 0;
+            if (ptrace(PTRACE_CONT, s->pid, NULL, NULL) < 0) {
+                perror("ptrace CONT (trace event)");
+                return -1;
+            }
+            if (waitpid(s->pid, &status, 0) < 0) {
+                perror("waitpid");
+                return -1;
+            }
+            continue;  /* loop back to interpret the next stop */
+        }
 
         /* SIGTRAP is always a debugger event (breakpoint or single-step).
          * Always stop here and let handle_sigtrap decide. */
@@ -2055,6 +2105,11 @@ static int cmd_info(dyn_session_t *s, char *args)
     if (s->pending_hw_exec >= 0)
         printf("pending hw exec: slot %d (RF will be set on next resume)\n",
                s->pending_hw_exec);
+    /* Show the ptrace options in effect. We always request
+     * TRACESYSGOOD + EXITKILL + TRACEFORK/VFORK/CLONE/EXEC; older
+     * kernels may downgrade silently, so this is informational only. */
+    printf("trace options: TRACESYSGOOD EXITKILL "
+           "TRACEFORK TRACEVFORK TRACECLONE TRACEEXEC\n");
     return 0;
 }
 
@@ -2656,11 +2711,25 @@ static int session_init(dyn_session_t *s, int argc, char **argv,
         return -1;
     }
 
-    /* Set ptrace options: TRACESYSGOOD so syscall traps (if any) get
-     * sig | 0x80, and EXITKILL so the child dies if we do. */
-    long opts = PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL;
+    /* Set ptrace options:
+     *   TRACESYSGOOD  - syscall traps (if any) get sig | 0x80, so we can
+     *                   distinguish them from real SIGTRAPs.
+     *   EXITKILL      - the child dies if we do (kernel auto-reaps).
+     *   TRACEFORK |
+     *   TRACEVFORK |   - the child's fork/vfork/clone/exec events report
+     *   TRACECLONE |     as PTRACE_EVENT_* stops to us, so forked
+     *   TRACEEXEC       children don't run untraced. Per the gdb-study
+     *                   doc, we report the event and continue the parent;
+     *                   we don't follow into the child yet (the new
+     *                   child is PTRACE_DETACHed so it runs untraced).
+     * Clean-room reimplementation; gdb's fork-tracking is GPL-3.0, 2O9
+     * is GPL-2.0-only. */
+    long opts = PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL |
+                PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK |
+                PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC;
     if (ptrace(PTRACE_SETOPTIONS, pid, NULL, (void *)opts) < 0) {
-        /* EXITKILL may be unsupported on older kernels; try without. */
+        /* TRACEFORK/CLONE/EXEC and EXITKILL may be unsupported on
+         * older kernels; try with just TRACESYSGOOD. */
         if (ptrace(PTRACE_SETOPTIONS, pid, NULL,
                    (void *)PTRACE_O_TRACESYSGOOD) < 0) {
             perror("ptrace SETOPTIONS");
