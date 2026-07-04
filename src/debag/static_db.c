@@ -934,18 +934,77 @@ static int pick_capstone(const debag_analysis_t *a, cs_arch *arch, cs_mode *mode
     return -1;
 }
 
+/* If `tgt` is a PLT entry (in the .plt / .plt.got / .plt.sec range)
+ * and its first instruction is `ff 25 <disp32>` (jmp [rip+disp32]),
+ * compute the GOT slot = tgt + 6 + (int32_t)disp and look it up in
+ * the reloc table. On a hit, returns the import name (borrowed from
+ * a->relocs[].sym_name) and writes the GOT slot address to *got_out.
+ * Returns NULL if `tgt` is not a PLT entry or the GOT slot has no
+ * matching reloc. Handles the CET .plt.sec layout where `ff 25` is
+ * at offset 4 (after endbr64) as well as the standard offset 0. */
+static const char *resolve_plt_call(const debag_analysis_t *a,
+                                    const repl_t *r,
+                                    uint64_t tgt,
+                                    uint64_t plt_lo, uint64_t plt_hi,
+                                    int have_plt,
+                                    uint64_t *got_out)
+{
+    if (!have_plt || tgt < plt_lo || tgt >= plt_hi) return NULL;
+    uint8_t plt_entry[8];
+    read_at(r, tgt, plt_entry, sizeof(plt_entry));
+    /* Standard PLT: `ff 25 <disp32>` at offset 0.
+     * CET .plt.sec: `f3 0f 1e fb` (endbr64) then `ff 25 <disp32>` at
+     * offset 4. Accept either layout. */
+    int disp_off = -1;
+    if (plt_entry[0] == 0xff && plt_entry[1] == 0x25) disp_off = 0;
+    else if (plt_entry[0] == 0xf3 && plt_entry[1] == 0x0f &&
+             plt_entry[2] == 0x1e && plt_entry[3] == 0xfb &&
+             plt_entry[4] == 0xff && plt_entry[5] == 0x25) disp_off = 4;
+    if (disp_off < 0) return NULL;
+
+    int32_t disp = (int32_t)(
+        (uint32_t)plt_entry[disp_off + 2] |
+        ((uint32_t)plt_entry[disp_off + 3] << 8) |
+        ((uint32_t)plt_entry[disp_off + 4] << 16) |
+        ((uint32_t)plt_entry[disp_off + 5] << 24));
+    /* The disp is relative to the end of the `ff 25` instruction,
+     * which is at tgt + disp_off + 6. */
+    uint64_t got = tgt + (uint64_t)disp_off + 6 + (int64_t)disp;
+    for (size_t k = 0; a->relocs && k < a->reloc_count; k++) {
+        if (a->relocs[k].vaddr == got && a->relocs[k].sym_name) {
+            if (got_out) *got_out = got;
+            return a->relocs[k].sym_name;
+        }
+    }
+    return NULL;
+}
+
 /* Disassemble up to `count` instructions starting at vaddr `addr`.
  * Format mirrors rizin's compact `pdi` output:
- *   0xADDR  <hex bytes>  mnemonic operands
+ *   0xADDR  <hex bytes>  mnemonic operands  ; <annotation>
  * Bytes are concatenated (no separator), right-justified to a 16-wide
- * column so the asm column lines up.
+ * column so the asm column lines up. Address column is fixed-width
+ * (`0x` + 16 hex chars + 2 spaces) so the per-line annotations line
+ * up vertically.
  *
- * PLT annotation: when a `call`/`jmp`/`jcc` instruction targets an
- * address inside `.plt` / `.plt.got` / `.plt.sec`, the corresponding
- * GOT slot is resolved by reading the PLT entry's first instruction
- * (`ff 25 <rel32>` = `jmp [rip+disp32]`), computing GOT_slot = target
- * + 6 + disp32, and looking that slot up in the reloc table. The
- * resolved symbol name is appended as `  ; -> 0xGOT (name)`. */
+ * Annotations (clean-room reimplementation of rizin's reflines
+ * logic at librz/arch/reflines.c:88-285; no rizin code copied,
+ * LGPL-3 vs GPL-2):
+ *
+ *   - Jumps (jmp, je, jne, jz, ...): if the operand is an immediate
+ *     `0x<target>`, append `  ; -> <symname>` (or `  ; -> <symname>+0xN`
+ *     if the target falls inside a symbol's range but not at its
+ *     start) when the target resolves to a known symbol, otherwise
+ *     `  ; -> 0x<target>`. If the target is outside the disassembly
+ *     window, also append ` (out)`. The simpler text-arrow form is
+ *     used in place of rizin's multi-line ASCII art.
+ *
+ *   - Calls: if the target is a PLT entry (in .plt / .plt.got /
+ *     .plt.sec), resolve the GOT slot via the entry's `jmp [rip+disp]`
+ *     and look the slot up in the reloc table; append `  ; <name>@plt`.
+ *     Otherwise, if the target resolves to a known symbol, append
+ *     `  ; <symname>` (or `  ; <symname>+0xN`). Direct calls to
+ *     unknown targets are not annotated. */
 static void do_disasm(repl_t *r, uint64_t addr, size_t count)
 {
     if (count == 0) count = 16;
@@ -1003,6 +1062,14 @@ static void do_disasm(repl_t *r, uint64_t addr, size_t count)
         fprintf(stderr, "debag: no instructions decoded at 0x%" PRIx64 "\n",
                 addr);
     } else {
+        /* Collect the in-window instruction addresses so we can tell
+         * whether a jump target lands inside the current `pd` window. */
+        uint64_t *window_addrs = malloc(n * sizeof(uint64_t));
+        if (window_addrs) {
+            for (size_t i = 0; i < n; i++)
+                window_addrs[i] = insns[i].address;
+        }
+
         for (size_t i = 0; i < n; i++) {
             printf("0x%016" PRIx64 "  ", insns[i].address);
             char hex[64] = "";
@@ -1012,44 +1079,73 @@ static void do_disasm(repl_t *r, uint64_t addr, size_t count)
                                        "%02x", insns[i].bytes[j]);
             printf("%-16s %s %s", hex, insns[i].mnemonic, insns[i].op_str);
 
-            /* PLT call annotation. Only `call`/`jmp`/`jcc` with a
-             * `0x...` immediate operand can target the PLT. */
-            if (have_plt && insns[i].op_str[0] == '0' &&
-                insns[i].op_str[1] == 'x') {
+            /* Classify by mnemonic. Capstone emits lowercase mnemonics
+             * for x86. `j` covers jmp/je/jne/jz/jg/jl/... and the
+             * jcxz/jecxz/jrcxz family. `call` is matched exactly so
+             * we don't accidentally pick up e.g. "callf" (far call). */
+            const char *m = insns[i].mnemonic;
+            int is_jump = (m[0] == 'j' && m[1] != '\0');
+            int is_call = (m[0] == 'c' && m[1] == 'a' && m[2] == 'l' &&
+                           m[3] == 'l' && m[4] == '\0');
+
+            /* Extract the immediate target if op_str is `0x...`. */
+            uint64_t tgt = 0;
+            int have_tgt = 0;
+            if (insns[i].op_str[0] == '0' && insns[i].op_str[1] == 'x') {
                 char *end = NULL;
                 errno = 0;
-                unsigned long long tgt =
+                unsigned long long v =
                     strtoull(insns[i].op_str + 2, &end, 16);
-                if (errno == 0 && end && *end == '\0' &&
-                    tgt >= plt_lo && tgt < plt_hi) {
-                    /* Read the first 6 bytes of the PLT entry: expect
-                     * `ff 25 <rel32>` (jmp [rip+disp32]). The GOT
-                     * slot is tgt + 6 + (int32_t)disp. */
-                    uint8_t plt_entry[6];
-                    read_at(r, (uint64_t)tgt, plt_entry, sizeof(plt_entry));
-                    if (plt_entry[0] == 0xff && plt_entry[1] == 0x25) {
-                        int32_t disp = (int32_t)(
-                            (uint32_t)plt_entry[2] |
-                            ((uint32_t)plt_entry[3] << 8) |
-                            ((uint32_t)plt_entry[4] << 16) |
-                            ((uint32_t)plt_entry[5] << 24));
-                        uint64_t got = (uint64_t)tgt + 6 + (int64_t)disp;
-                        /* Look up the GOT slot in the reloc table. */
-                        for (size_t k = 0;
-                             r->a->relocs && k < r->a->reloc_count;
-                             k++) {
-                            if (r->a->relocs[k].vaddr == got &&
-                                r->a->relocs[k].sym_name) {
-                                printf("  ; -> 0x%016" PRIx64 " (%s)",
-                                       got, r->a->relocs[k].sym_name);
-                                break;
-                            }
+                if (errno == 0 && end && *end == '\0') {
+                    tgt = (uint64_t)v;
+                    have_tgt = 1;
+                }
+            }
+
+            if (is_jump && have_tgt) {
+                /* Is the target inside the disassembly window? */
+                int in_window = 0;
+                if (window_addrs) {
+                    for (size_t k = 0; k < n; k++) {
+                        if (window_addrs[k] == tgt) {
+                            in_window = 1;
+                            break;
                         }
                     }
+                }
+                uint64_t off = 0;
+                const char *name = sym_containing(r->a, tgt, &off);
+                if (name && off == 0)
+                    printf("  ; -> %s", name);
+                else if (name)
+                    printf("  ; -> %s+0x%" PRIx64, name, off);
+                else
+                    printf("  ; -> 0x%" PRIx64, tgt);
+                if (!in_window)
+                    printf(" (out)");
+            } else if (is_call && have_tgt) {
+                /* Try PLT first: PLT calls have a known import name
+                 * via the reloc table. Format: `; <name>@plt`. */
+                uint64_t got = 0;
+                const char *plt_name = resolve_plt_call(r->a, r, tgt,
+                                                        plt_lo, plt_hi,
+                                                        have_plt, &got);
+                if (plt_name) {
+                    printf("  ; %s@plt", plt_name);
+                } else {
+                    /* Direct call: try to resolve to a known symbol.
+                     * No annotation if the target doesn't resolve. */
+                    uint64_t off = 0;
+                    const char *name = sym_containing(r->a, tgt, &off);
+                    if (name && off == 0)
+                        printf("  ; %s", name);
+                    else if (name)
+                        printf("  ; %s+0x%" PRIx64, name, off);
                 }
             }
             printf("\n");
         }
+        free(window_addrs);
         cs_free(insns, n);
     }
     free(buf);

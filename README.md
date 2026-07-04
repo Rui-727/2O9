@@ -322,10 +322,13 @@ modelled on rizin. It drops you at a `0xADDR>` prompt where you can
 inspect the parsed ELF: list sections (`iS`), segments (`iSS`), symbols
 (`is`), imports (`ii`, with GOT slot addresses resolved from the
 dynamic relocation table), strings (`iz`); hex-dump any virtual address
-(`px`, `pxw`, `pxq`); seek to sections / symbols / imports / `entry0`
+(`px`, `pxw`, `pxq`, with sparse-collapse of long zero runs);
+pointer-chase dump for `.got`/vtables (`pxr`, annotates each non-zero
+word with `-> symname`); seek to sections / symbols / imports / `entry0`
 (`s`) and undo/redo seeks (`u`, `U`, `sh`); and disassemble with
-libcapstone (`pd`, `pdd`, with `call <plt>` annotations). Type `?`
-inside the REPL for the full command table.
+libcapstone (`pd`, `pdd`) where jumps get `; -> <sym>` / `; -> 0x<tgt>
+(out)` annotations and calls get `; <name>@plt` (PLT) or `; <symname>`
+(direct). Type `?` inside the REPL for the full command table.
 
 For live debugging, `--dynamic-db` forks the target under `ptrace`,
 stops it at the entry point, and drops you at a `(209-db)` prompt

@@ -167,6 +167,7 @@ Each maps to the equivalent 2O9 command.
   | `px <addr> <len>` | Hex dump at virtual address (sparse-collapse: 3+ identical rows collapse to first, `...`, last) |
   | `pxw <addr> <len>` | Hex dump as 32-bit little-endian words (sparse-collapse) |
   | `pxq <addr> <len>` | Hex dump as 64-bit little-endian words (sparse-collapse) |
+  | `pxr [addr] [len]` | Pointer-chase dump: 8-byte words, zeros suppressed, non-zero words annotated `-> symname` / `-> symname+0xN` / `-> (no symbol)` |
   | `ps <addr> <len>` | Print string at address |
   | `s <addr>` | Seek to address |
   | `s <section>` | Seek to section start (by name) |
@@ -176,8 +177,8 @@ Each maps to the equivalent 2O9 command.
   | `sh` | Show seek history stack (oldest to newest, current marked) |
   | `u` | Undo seek (pop seek history; prints `no seek history` if empty) |
   | `U` | Redo seek (pop redo stack; prints `no seek redo history` if empty) |
-  | `pd <n>` | Disassemble `<n>` instructions at current seek (annotates PLT calls with `; -> 0xGOT (name)`) |
-  | `pdd <addr> <n>` | Disassemble `<n>` instructions at `<addr>` (PLT-annotated) |
+  | `pd <n>` | Disassemble `<n>` instructions at current seek (annotates jumps with `; -> <sym>`/`; -> 0x<tgt>` and ` (out)` when the target is outside the window; annotates PLT calls with `; <name>@plt` and direct calls with `; <symname>`) |
+  | `pdd <addr> <n>` | Disassemble `<n>` instructions at `<addr>` (same annotation as `pd`) |
   | `?` | Show command table |
   | `q` / `quit` / `exit` | Quit |
 
@@ -199,10 +200,27 @@ Each maps to the equivalent 2O9 command.
   prints each import with its GOT slot address and relocation type
   (`R_X86_64_JUMP_SLOT`, `R_X86_64_GLOB_DAT`, `R_X86_64_COPY`). For
   an import with a GOT slot, `s <import_name>` seeks to that slot, so
-  `px <import_name> 8` reads the 8-byte function pointer. `pd`/`pdd`
-  annotate `call <plt_entry>` instructions with `; -> 0xGOT (name)`
-  by reading the PLT entry's `jmp [rip+disp32]` and looking up the
-  GOT slot in the relocation table.
+  `px <import_name> 8` reads the 8-byte function pointer. `pxr` walks
+  8-byte words at the current seek and annotates each non-zero word
+  with `-> <symname>` if the value falls inside a defined symbol's
+  `[vaddr, vaddr+size)` range, or `-> <symname>+0xN` for an in-range
+  non-exact match; all-zero words are suppressed. Useful for dumping
+  `.got.plt`, `.data.rel.ro`, and vtables.
+
+  Disassembly annotations: `pd`/`pdd` annotate each instruction with
+  a trailing `; ...` comment. Jump instructions (`jmp`, `je`, `jne`,
+  `jz`, ...) with an immediate `0x<target>` operand get `; ->
+  <symname>` (or `; -> <symname>+0xN`, or `; -> 0x<target>` if no
+  symbol contains the target); jumps whose target is outside the
+  disassembly window are marked ` (out)`. Calls get `; <name>@plt`
+  if the target is a PLT entry (the GOT slot is resolved by reading
+  the PLT's `jmp [rip+disp32]` and looking it up in the reloc
+  table, handling both standard `.plt` and CET `.plt.sec` layouts),
+  or `; <symname>` (or `; <symname>+0xN`) for direct calls to a
+  known symbol. Direct calls to unknown targets are not annotated.
+  Indirect jumps/calls (e.g. `call qword ptr [rip + 0x...]`) are not
+  annotated. The simpler text-arrow form is used in place of rizin's
+  multi-line ASCII art reflines.
 
   Sparse hex dump: `px`/`pxw`/`pxq` collapse runs of 3 or more
   byte-identical rows (all-zero `.bss`, repeated fill patterns) into
