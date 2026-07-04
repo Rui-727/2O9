@@ -6,18 +6,18 @@ we touched and why.
 
 ## The three modifications
 
-1. **Install backend**: dispatch to the store adapter instead of
-   libalpm's builtin extractor
-2. **Installed-set query**: the solver reads from the generation DB,
-   not `/var/lib/pacman/local/`
-3. **Config entrypoint**: lib2O9 is configured programmatically from
-   a manifest, never from `pacman.conf`
+1. Install backend: dispatch to the store adapter instead of libalpm's
+   builtin extractor.
+2. Installed-set query: the solver reads from the generation DB, not
+   `/var/lib/pacman/local/`.
+3. Config entrypoint: lib2O9 is configured programmatically from a
+   manifest, never from `pacman.conf`.
 
 ## Change log
 
 ### Applied: Modification 1, Install backend dispatch
 
-**Files**: `lib/2O9/alpm/handle.h`, `lib/2O9/alpm/package.h`,
+Files: `lib/2O9/alpm/handle.h`, `lib/2O9/alpm/package.h`,
 `lib/2O9/alpm/package.c`, `lib/2O9/alpm/add.c`
 
 A function pointer `install_backend` is added to `alpm_handle_t` in
@@ -50,12 +50,12 @@ auditable.
 `_alpm_pkg_free()` in `package.c` was updated to free
 `two9_store_path`.
 
-**Marking**: Every changed line in `add.c`, `handle.h`, `package.h`,
-and `package.c` has a `/* 2O9: ... */` comment.
+Marking: every changed line in `add.c`, `handle.h`, `package.h`, and
+`package.c` has a `/* 2O9: ... */` comment.
 
 ### Applied: Modification 2, Installed-set query from generation DB
 
-**Files**: `lib/2O9/alpm/handle.h`, `lib/2O9/alpm/be_local.c`
+Files: `lib/2O9/alpm/handle.h`, `lib/2O9/alpm/be_local.c`
 
 A function pointer `installed_set_loader` is added to `alpm_handle_t`:
 
@@ -78,12 +78,12 @@ just sourced from a different place. No changes to the solver itself.
 When `installed_set_loader` is NULL, pacman's default
 `/var/lib/pacman/local/` read is preserved.
 
-**Marking**: The dispatch block in `be_local.c` has a
-`/* 2O9: ... */` comment.
+Marking: the dispatch block in `be_local.c` has a `/* 2O9: ... */`
+comment.
 
 ### Applied: Modification 3, Programmatic config entrypoint
 
-**Files**: `lib/2O9/alpm/two9_init.c`, `lib/2O9/alpm/two9_init.h` (new)
+Files: `lib/2O9/alpm/two9_init.c`, `lib/2O9/alpm/two9_init.h` (new)
 
 A new file `two9_init.c` provides the 2O9-specific entrypoint:
 
@@ -108,22 +108,22 @@ reads `/etc/pacman.conf`. The manifest (output of evaluating
 bit. The parsed level is applied via
 `alpm_option_set_default_siglevel` +
 `alpm_option_set_local_file_siglevel` +
-`alpm_option_set_remote_file_siglevel`, AND passed as the third arg
+`alpm_option_set_remote_file_siglevel`, and passed as the third arg
 to `alpm_register_syncdb` (was hardcoded to 0 before Phase 0).
 
 `two9_alpm_register_backends()` wires the `install_backend` and
 `installed_set_loader` callbacks onto an existing handle, activating
-2O9 mode. After this call, modifications #1 and #2 take effect.
+2O9 mode. After this call, modifications 1 and 2 take effect.
 
 The manifest JSON is parsed with cJSON, which is vendored at
 `lib/2O9/common/cJSON.{c,h}`.
 
-**Marking**: The new file is wholly 2O9 code. No `/* 2O9: */` markers
+Marking: the new file is wholly 2O9 code. No `/* 2O9: */` markers
 needed in vendored source for this modification.
 
 ### Applied: Transaction wiring in `cmd_install`
 
-**Files**: `src/cli/main.c` (the 2O9 CLI, not vendored libalpm)
+Files: `src/cli/main.c` (the 2O9 CLI, not vendored libalpm)
 
 The CLI now calls `alpm_trans_init(handle, ALPM_TRANS_FLAG_NOLOCK)`
 plus `alpm_add_pkg(handle, pkg)` plus `alpm_trans_prepare(handle,
@@ -143,11 +143,11 @@ The `ALPM_TRANS_FLAG_NOLOCK` flag is used because 2O9 takes its own
 `flock()` on the generation DB, and `alpm_trans_commit` would assert
 that `NOLOCK` isn't set. We sidestep that by not calling commit.
 
-**Marking**: Documented in a multi-line comment in `cmd_install`.
+Marking: documented in a multi-line comment in `cmd_install`.
 
 ### Applied: Package signature verification
 
-**Files**: `src/cli/main.c`, `lib/2O9/alpm/two9_init.c`
+Files: `src/cli/main.c`, `lib/2O9/alpm/two9_init.c`
 
 When the manifest's `SigLevel` includes `ALPM_SIG_PACKAGE`, the CLI
 fetches `<filename>.sig` alongside `<filename>` from the mirror. If
@@ -164,11 +164,11 @@ For DB sync (`209 sync`): no extra code needed. `alpm_db_update()`
 verifies `.db.sig` automatically now that `alpm_register_syncdb` got
 the real siglevel.
 
-**Marking**: Documented in `cmd_install` and `two9_init.c`.
+Marking: documented in `cmd_install` and `two9_init.c`.
 
 ## What "no fork" still means
 
-- We are **not** publishing a competing pacman binary or maintaining
+- We are not publishing a competing pacman binary or maintaining
   pacman as a separate project. lib2O9 is an internal build artifact
   of 2O9, consumed only by 2O9.
 - The vendored pacman source advances upstream independently. We
