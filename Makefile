@@ -129,11 +129,11 @@ ALPM_SRC = $(wildcard lib/2O9/alpm/*.c) $(wildcard lib/2O9/common/*.c)
 ALPM_OBJ = $(patsubst lib/2O9/%.c,lib/2O9/%.o,$(ALPM_SRC))
 
 # ── 209 binary source ──
-CLI_SRC   = src/cli/main.c
+CLI_SRC   = src/cli/main.c src/cli/subs_ui.c
 STORE_SRC = src/store/store.c src/store/symlinks.c src/store/nar.c src/store/optimise.c \
-            src/store/narinfo.c src/store/binary-cache.c src/store/signing.c
+            src/store/narinfo.c src/store/binary-cache.c src/store/signing.c src/store/share.c
 ifeq ($(HAVE_SQLITE3),yes)
-STORE_SRC += src/store/db.c
+STORE_SRC += src/store/db.c src/store/snapshot.c
 endif
 DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/reconcile_execute.c src/declarative/activation.c src/declarative/gen_index.c
 AUR_SRC   = src/aur/aur_rpc.c src/aur/aur_build.c src/aur/aur_resolve.c \

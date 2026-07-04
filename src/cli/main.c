@@ -30,10 +30,12 @@
 #include "store/store.h"
 #include "store/nar.h"
 #include "store/db.h"
+#include "store/snapshot.h"
 #include "store/optimise.h"
 #include "store/narinfo.h"
 #include "store/binary-cache.h"
 #include "store/signing.h"
+#include "store/share.h"
 #include "declarative/gen.h"
 #include "store/symlinks.h"
 #include "aur/aur_rpc.h"
@@ -46,6 +48,7 @@
 #include "declarative/gen_index.h"
 #include "trakker/trakker.h"
 #include "debag/debag.h"
+#include "subs_ui.h"
 #include "nix_eval.h"
 #include "alpm.h"
 #include "two9_init.h"
@@ -352,7 +355,21 @@ static int cmd_usage(void)
         printf("  why <pkg>          Show why a package is installed (reverse deps)\n");
         printf("  lock --export <f>  Write a lockfile (pin exact versions)\n");
         printf("  lock --import <f>  Apply a lockfile (reproduce exact state)\n");
-        printf("  upgrade [--sandbox=debag]  Upgrade all packages\n\n");
+        printf("  upgrade [--sandbox=debag]  Upgrade all packages\n");
+        printf("  snapshot take <p>     Take a snapshot of a declared path\n");
+        printf("  snapshot list [p]     List snapshots (all or filtered by path)\n");
+        printf("  snapshot restore <id> Restore a snapshot by ID\n");
+        printf("  snapshot diff <a> <b> Diff two snapshots of the same path\n");
+        printf("  snapshot rm <id>      Remove a snapshot from the DB\n");
+        printf("  share <path>       Share a file or folder as a NAR blob\n");
+        printf("  share ls           List local shares\n");
+        printf("  share rm <hash>    Remove a share from the store\n");
+        printf("  get <uri> [dest]   Fetch a share by nar://<hash> URI\n");
+        printf("  get pkg <name>     Explicitly fetch a package from caches\n");
+        printf("  subs               Interactive subscription picker (TUI)\n");
+        printf("  subs <name>        Print one sub's details + contents\n");
+        printf("  subs add <name>    Interactively add a sub\n");
+        printf("  subs rm <name>     Remove a sub from config\n\n");
         printf("SOV patterns (2O9-native):\n");
         printf("  209 <pkg> install  Install package from repo\n");
         printf("  209 <pkg> remove   Remove package\n");
@@ -394,6 +411,22 @@ static void register_target_in_store_db(const char *db_root,
                                         const char *store_path,
                                         const char *nar_hash,
                                         int64_t nar_size);
+
+/* ── Snapshot helpers (forward decls, defined later) ──────────────
+ * Used by cmd_apply to install/remove systemd timers for declared
+ * snapshot paths. The full implementations live alongside the snapshot
+ * CLI commands further down. */
+typedef struct snapshot_decl {
+        char *path;          /* absolute, resolved */
+        char *auto_schedule; /* "hourly"/"daily"/"weekly"/"manual", or NULL */
+        int   keep;          /* 0 = keep all */
+        int   is_system;     /* 1 = came from 2O9.nix, 0 = <user>.nix */
+        struct snapshot_decl *next;
+} snapshot_decl_t;
+
+static snapshot_decl_t *collect_snapshot_decls(const char *manifest_json,
+                                               int is_system);
+static void snapshot_decl_list_free(snapshot_decl_t *head);
 
 /* ── Generations ─────────────────────────────────────────────────── */
 
@@ -2163,6 +2196,116 @@ static int cmd_apply(void)
          * Steps that aren't fully implemented log a stub message and
          * continue (non-fatal). */
         activation_run(txn);
+
+        /* Step 7.6: Snapshot timers. Walk the new manifest's snapshots
+         * block. For each path with auto != "manual", install/refresh
+         * a systemd timer + service that runs `209 snapshot take
+         * <path>` on the schedule. For paths in the previous
+         * generation's manifest but not the new one, remove the timer.
+         * System paths run as root; user paths run as the calling
+         * user. Skipped silently if no snapshots block is present. */
+        {
+                char *user_json2 = NULL, *global_json2 = NULL, *err2 = NULL;
+                struct stat st2;
+                if (user_nix[0] && stat(user_nix, &st2) == 0)
+                        user_json2 = eval_nix_config(user_nix, &err2);
+                if (stat(system_nix, &st2) == 0)
+                        global_json2 = eval_nix_config(system_nix, &err2);
+                free(err2);
+
+                snapshot_decl_t *new_sys = collect_snapshot_decls(global_json2, 1);
+                snapshot_decl_t *new_usr = collect_snapshot_decls(user_json2, 0);
+                free(global_json2);
+                free(user_json2);
+
+                /* Install/refresh timers for new paths. */
+                int timers_installed = 0;
+                const char *caller_user = get_current_username();
+                for (snapshot_decl_t *d = new_sys; d; d = d->next) {
+                        if (!d->auto_schedule) continue;
+                        if (strcmp(d->auto_schedule, "manual") == 0) continue;
+                        if (snapshot_install_timer(d->path, d->auto_schedule,
+                                                   "root") == 0)
+                                timers_installed++;
+                }
+                for (snapshot_decl_t *d = new_usr; d; d = d->next) {
+                        if (!d->auto_schedule) continue;
+                        if (strcmp(d->auto_schedule, "manual") == 0) continue;
+                        if (snapshot_install_timer(d->path, d->auto_schedule,
+                                                   caller_user) == 0)
+                                timers_installed++;
+                }
+
+                /* Read the previous generation's manifest to find paths
+                 * whose timers should be removed. The previous
+                 * generation is new_id - 1 (or whatever current pointed
+                 * at before this commit). */
+                int prev_id = new_id - 1;
+                if (prev_id > 0) {
+                        char prev_manifest[PATH_MAX];
+                        snprintf(prev_manifest, sizeof(prev_manifest),
+                                 "%s/generations/%d/manifest.json",
+                                 db_root, prev_id);
+                        FILE *pf = fopen(prev_manifest, "r");
+                        if (pf) {
+                                fseek(pf, 0, SEEK_END);
+                                long psize = ftell(pf);
+                                fseek(pf, 0, SEEK_SET);
+                                char *pbuf = malloc(psize + 1);
+                                if (pbuf) {
+                                        size_t nrd = fread(pbuf, 1, psize, pf);
+                                        pbuf[nrd] = '\0';
+                                        cJSON *pjson = cJSON_Parse(pbuf);
+                                        free(pbuf);
+                                        if (pjson) {
+                                                cJSON *pout = cJSON_GetObjectItem(pjson, "nix_output");
+                                                const char *prev_nix_json = NULL;
+                                                if (cJSON_IsString(pout))
+                                                        prev_nix_json = pout->valuestring;
+                                                else if (cJSON_IsObject(pout))
+                                                        prev_nix_json = cJSON_PrintUnformatted(pout);
+                                                if (prev_nix_json) {
+                                                        /* Walk prev's snapshots for both scopes. */
+                                                        snapshot_decl_t *p_sys = collect_snapshot_decls(prev_nix_json, 1);
+                                                        snapshot_decl_t *p_usr = collect_snapshot_decls(prev_nix_json, 0);
+                                                        int timers_removed = 0;
+                                                        for (snapshot_decl_t *p = p_sys; p; p = p->next) {
+                                                                int still_present = 0;
+                                                                for (snapshot_decl_t *n = new_sys; n; n = n->next)
+                                                                        if (strcmp(n->path, p->path) == 0) { still_present = 1; break; }
+                                                                if (!still_present) {
+                                                                        snapshot_remove_timer(p->path);
+                                                                        timers_removed++;
+                                                                }
+                                                        }
+                                                        for (snapshot_decl_t *p = p_usr; p; p = p->next) {
+                                                                int still_present = 0;
+                                                                for (snapshot_decl_t *n = new_usr; n; n = n->next)
+                                                                        if (strcmp(n->path, p->path) == 0) { still_present = 1; break; }
+                                                                if (!still_present) {
+                                                                        snapshot_remove_timer(p->path);
+                                                                        timers_removed++;
+                                                                }
+                                                        }
+                                                        if (timers_removed > 0)
+                                                                printf("  snapshots: removed %d stale timer(s)\n",
+                                                                       timers_removed);
+                                                        snapshot_decl_list_free(p_sys);
+                                                        snapshot_decl_list_free(p_usr);
+                                                }
+                                                cJSON_Delete(pjson);
+                                        }
+                                }
+                                fclose(pf);
+                        }
+                }
+                if (timers_installed > 0)
+                        printf("  snapshots: installed/refreshed %d timer(s)\n",
+                               timers_installed);
+
+                snapshot_decl_list_free(new_sys);
+                snapshot_decl_list_free(new_usr);
+        }
 
         /* Step 9: Report services that need attention */
         if (txn->svc_enable_count > 0) {
@@ -5518,6 +5661,921 @@ static int cmd_lockfile_import(const char *lockfile_path)
         return 0;
 }
 
+/* ── Snapshot helpers ──────────────────────────────────────────────
+ *
+ * Snapshots are content-addressed copies of paths declared under the
+ * `snapshots` attrset in 2O9.nix. The take/list/restore/diff/rm ops
+ * live in src/store/snapshot.c; this section wires them to the CLI:
+ * re-evaluates the config to verify a path is managed, picks the
+ * right DB root (system vs per-user based on uid), formats output. */
+
+/* Re-evaluate the merged 2O9.nix manifest so we can check whether a
+ * path is declared under `snapshots`. Returns a malloc'd JSON string
+ * or NULL on error (message printed). Caller frees. */
+static char *eval_merged_manifest(void)
+{
+        char user_nix[PATH_MAX] = {0};
+        char system_nix[PATH_MAX] = {0};
+        const char *user = get_current_username();
+        if (user)
+                snprintf(user_nix, sizeof(user_nix), "%s/%s.nix",
+                         two9_config_dir(), user);
+        snprintf(system_nix, sizeof(system_nix), "%s/2O9.nix",
+                 two9_config_dir());
+
+        char *user_json = NULL, *global_json = NULL, *err = NULL;
+        struct stat st;
+        if (user_nix[0] && stat(user_nix, &st) == 0)
+                user_json = eval_nix_config(user_nix, &err);
+        if (stat(system_nix, &st) == 0)
+                global_json = eval_nix_config(system_nix, &err);
+        free(err);
+
+        if (!user_json && !global_json) return NULL;
+        if (!user_json)  return global_json;
+        if (!global_json) return user_json;
+
+        char *merged = merge_manifests(user_json, global_json, &err);
+        free(user_json);
+        free(global_json);
+        free(err);
+        return merged;
+}
+
+/* Build a snapshot scope string for the current caller. "system" if
+ * running as root, otherwise the username. Caller frees. */
+static char *snapshot_scope_for_caller(void)
+{
+        if (getuid() == 0) return strdup("system");
+        const char *u = get_current_username();
+        return strdup(u ? u : "user");
+}
+
+/* Resolve a relative snapshot path against the current user's home.
+ * The caller passes the path as declared in <user>.nix (no leading
+ * slash, no leading ~). Writes the resolved absolute path to out.
+ * Returns 0 on success, -1 on error. */
+static int resolve_user_snap_path(const char *declared, char *out, size_t outsz)
+{
+        if (!declared || declared[0] == '/' || declared[0] == '~') {
+                errno = EINVAL; return -1;
+        }
+        const char *home = getenv("HOME");
+        if (!home) {
+                /* Fall back to getpwuid. */
+                struct passwd *pw = getpwuid(getuid());
+                home = pw ? pw->pw_dir : NULL;
+        }
+        if (!home) { errno = EINVAL; return -1; }
+        if (snprintf(out, outsz, "%s/%s", home, declared) >= (int)outsz) {
+                errno = ENAMETOOLONG; return -1;
+        }
+        return 0;
+}
+
+/* Collect every snapshot path declared in the manifest, resolving
+ * relative paths against the current user's home. Each entry remembers
+ * which scope it came from (system if in global config, user
+ * otherwise) and the schedule string. Returns a linked list (caller
+ * frees with snapshot_decl_list_free). */
+static snapshot_decl_t *snapshot_decl_create(const char *path,
+                                             const char *sched,
+                                             int keep, int is_system)
+{
+        snapshot_decl_t *d = calloc(1, sizeof(*d));
+        if (!d) return NULL;
+        d->path = strdup(path);
+        d->auto_schedule = sched ? strdup(sched) : NULL;
+        d->keep = keep;
+        d->is_system = is_system;
+        return d;
+}
+
+static void snapshot_decl_list_free(snapshot_decl_t *head)
+{
+        while (head) {
+                snapshot_decl_t *next = head->next;
+                free(head->path);
+                free(head->auto_schedule);
+                free(head);
+                head = next;
+        }
+}
+
+/* Walk the `snapshots` attrset in a single manifest JSON. `is_system`
+ * selects how paths are interpreted: 1 means the manifest is the
+ * global 2O9.nix (paths must be absolute), 0 means it's the user
+ * config (paths are relative to the user's home). Returns a linked
+ * list (may be empty = NULL). On parse error, returns NULL. */
+static snapshot_decl_t *collect_snapshot_decls(const char *manifest_json,
+                                               int is_system)
+{
+        if (!manifest_json) return NULL;
+        cJSON *root = cJSON_Parse(manifest_json);
+        if (!root) return NULL;
+        cJSON *snaps = cJSON_GetObjectItem(root, "snapshots");
+        if (!snaps || !cJSON_IsObject(snaps)) {
+                cJSON_Delete(root);
+                return NULL;
+        }
+
+        snapshot_decl_t *head = NULL, **tail = &head;
+        cJSON *entry;
+        cJSON_ArrayForEach(entry, snaps) {
+                const char *declared = entry->string;
+                if (!declared) continue;
+
+                char abs_path[PATH_MAX];
+                if (is_system) {
+                        if (declared[0] != '/') {
+                                fprintf(stderr, "209: snapshot: %s: 2O9.nix "
+                                        "snapshot paths must be absolute "
+                                        "(skipping)\n", declared);
+                                continue;
+                        }
+                        snprintf(abs_path, sizeof(abs_path), "%s", declared);
+                } else {
+                        if (declared[0] == '/' || declared[0] == '~') {
+                                fprintf(stderr, "209: snapshot: %s: <user>.nix "
+                                        "snapshot paths must be relative "
+                                        "(skipping)\n", declared);
+                                continue;
+                        }
+                        if (resolve_user_snap_path(declared,
+                                                   abs_path, sizeof(abs_path)) < 0) {
+                                fprintf(stderr, "209: snapshot: cannot resolve "
+                                        "%s (skipping)\n", declared);
+                                continue;
+                        }
+                }
+
+                const char *sched = "manual";
+                int keep = 0;
+                if (cJSON_IsObject(entry)) {
+                        cJSON *ja = cJSON_GetObjectItem(entry, "auto");
+                        if (cJSON_IsString(ja)) sched = ja->valuestring;
+                        cJSON *jk = cJSON_GetObjectItem(entry, "keep");
+                        if (cJSON_IsNumber(jk)) keep = jk->valueint;
+                }
+
+                snapshot_decl_t *d = snapshot_decl_create(abs_path, sched,
+                                                          keep, is_system);
+                if (!d) continue;
+                *tail = d; tail = &d->next;
+        }
+        cJSON_Delete(root);
+        return head;
+}
+
+/* ── 209 snapshot take <path> ────────────────────────────────────── */
+static int cmd_snapshot_take(const char *path_arg)
+{
+        /* Re-evaluate the config to verify the path is managed. The
+         * path on the command line must be the absolute resolved path
+         * (system paths are absolute in 2O9.nix; user paths are
+         * relative in <user>.nix but the user is expected to pass the
+         * absolute path to `209 snapshot take`). */
+        char *manifest = eval_merged_manifest();
+        if (!manifest) {
+                fprintf(stderr, "209: snapshot: cannot evaluate 2O9.nix "
+                        "(no config found, or evaluation failed)\n");
+                return 1;
+        }
+
+        /* Build the resolved set of declared snapshot paths and look
+         * for an exact match against path_arg. */
+        char *user_json = NULL, *global_json = NULL, *err = NULL;
+        char user_nix[PATH_MAX] = {0}, system_nix[PATH_MAX] = {0};
+        const char *user = get_current_username();
+        if (user)
+                snprintf(user_nix, sizeof(user_nix), "%s/%s.nix",
+                         two9_config_dir(), user);
+        snprintf(system_nix, sizeof(system_nix), "%s/2O9.nix",
+                 two9_config_dir());
+        struct stat st;
+        if (user_nix[0] && stat(user_nix, &st) == 0)
+                user_json = eval_nix_config(user_nix, &err);
+        if (stat(system_nix, &st) == 0)
+                global_json = eval_nix_config(system_nix, &err);
+        free(err);
+
+        snapshot_decl_t *sys_decls = collect_snapshot_decls(global_json, 1);
+        snapshot_decl_t *usr_decls = collect_snapshot_decls(user_json, 0);
+        free(global_json);
+        free(user_json);
+
+        int managed = 0;
+        for (snapshot_decl_t *d = sys_decls; d; d = d->next)
+                if (strcmp(d->path, path_arg) == 0) { managed = 1; break; }
+        if (!managed)
+                for (snapshot_decl_t *d = usr_decls; d; d = d->next)
+                        if (strcmp(d->path, path_arg) == 0) { managed = 1; break; }
+        snapshot_decl_list_free(sys_decls);
+        snapshot_decl_list_free(usr_decls);
+
+        if (!managed) {
+                fprintf(stderr, "209: snapshot: %s is not declared under "
+                        "`snapshots` in 2O9.nix or %s.nix\n",
+                        path_arg, user ? user : "<user>");
+                free(manifest);
+                return 1;
+        }
+        free(manifest);
+
+        char db_root[PATH_MAX];
+        get_db_root(db_root, sizeof(db_root));
+        snapshot_db_t *sdb = snapshot_db_open(db_root);
+        if (!sdb) {
+                fprintf(stderr, "209: snapshot: cannot open snapshot DB at %s "
+                        "(rebuilt without sqlite?)\n", db_root);
+                return 1;
+        }
+
+        char *scope = snapshot_scope_for_caller();
+        int64_t id = snapshot_take(sdb, path_arg, scope, NULL);
+        free(scope);
+        snapshot_db_close(sdb);
+        if (id < 0) return 1;
+
+        printf("  snapshot %lld of %s\n", (long long)id, path_arg);
+        return 0;
+}
+
+/* ── 209 snapshot list [path] ────────────────────────────────────── */
+static int cmd_snapshot_list(const char *path_filter)
+{
+        char db_root[PATH_MAX];
+        get_db_root(db_root, sizeof(db_root));
+        snapshot_db_t *sdb = snapshot_db_open(db_root);
+        if (!sdb) {
+                fprintf(stderr, "209: snapshot: cannot open snapshot DB at %s\n",
+                        db_root);
+                return 1;
+        }
+
+        snapshot_record_t *list = NULL;
+        size_t count = 0;
+        if (snapshot_list(sdb, path_filter, &list, &count) < 0) {
+                fprintf(stderr, "209: snapshot: list failed\n");
+                snapshot_db_close(sdb);
+                return 1;
+        }
+        snapshot_db_close(sdb);
+
+        if (count == 0) {
+                printf("No snapshots%s%s.\n",
+                       path_filter ? " of " : "",
+                       path_filter ? path_filter : "");
+                return 0;
+        }
+
+        printf("  ID  Path                              Taken              NAR          Parent  Scope\n");
+        printf("  --  ----                              ----              ---          ------  -----\n");
+        for (size_t i = 0; i < count; i++) {
+                char timebuf[32];
+                time_t t = (time_t)list[i].taken_at;
+                struct tm tm;
+                localtime_r(&t, &tm);
+                strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M", &tm);
+
+                char nar_short[13] = "?";
+                if (list[i].nar_hash) {
+                        memcpy(nar_short, list[i].nar_hash, 12);
+                        nar_short[12] = '\0';
+                }
+
+                printf("  %3lld  %-33s %-17s  %s...  %6lld  %s\n",
+                       (long long)list[i].id,
+                       list[i].path ? list[i].path : "?",
+                       timebuf, nar_short,
+                       (long long)list[i].parent_id,
+                       list[i].scope ? list[i].scope : "?");
+
+                if (list[i].message)
+                        printf("        message: %s\n", list[i].message);
+        }
+        snapshot_record_list_free(list, count);
+        return 0;
+}
+
+/* ── 209 snapshot restore <id> ───────────────────────────────────── */
+static int cmd_snapshot_restore(int64_t id)
+{
+        char db_root[PATH_MAX];
+        get_db_root(db_root, sizeof(db_root));
+        snapshot_db_t *sdb = snapshot_db_open(db_root);
+        if (!sdb) {
+                fprintf(stderr, "209: snapshot: cannot open snapshot DB at %s\n",
+                        db_root);
+                return 1;
+        }
+        int rc = snapshot_restore(sdb, id);
+        snapshot_db_close(sdb);
+        return rc == 0 ? 0 : 1;
+}
+
+/* ── 209 snapshot diff <id1> <id2> ───────────────────────────────── */
+static int cmd_snapshot_diff(int64_t id1, int64_t id2)
+{
+        char db_root[PATH_MAX];
+        get_db_root(db_root, sizeof(db_root));
+        snapshot_db_t *sdb = snapshot_db_open(db_root);
+        if (!sdb) {
+                fprintf(stderr, "209: snapshot: cannot open snapshot DB at %s\n",
+                        db_root);
+                return 1;
+        }
+
+        snapshot_diff_t *diffs = NULL;
+        size_t count = 0;
+        int rc = snapshot_diff(sdb, id1, id2, &diffs, &count);
+        snapshot_db_close(sdb);
+        if (rc < 0) return 1;
+
+        if (count == 0) {
+                printf("No differences between snapshots %lld and %lld.\n",
+                       (long long)id1, (long long)id2);
+                return 0;
+        }
+
+        printf("  diff: snapshot %lld -> %lld\n", (long long)id1, (long long)id2);
+        printf("  %-10s  %s\n", "Kind", "Path");
+        printf("  %-10s  %s\n", "----", "----");
+        for (size_t i = 0; i < count; i++) {
+                const char *kind = "?";
+                switch (diffs[i].kind) {
+                case SNAP_DIFF_ADDED:    kind = "added";    break;
+                case SNAP_DIFF_REMOVED:  kind = "removed";  break;
+                case SNAP_DIFF_MODIFIED: kind = "modified"; break;
+                }
+                printf("  %-10s  %s\n", kind, diffs[i].rel_path);
+                if (diffs[i].kind == SNAP_DIFF_MODIFIED) {
+                        printf("             was: %s\n",
+                               diffs[i].hash_a ? diffs[i].hash_a : "?");
+                        printf("             now: %s\n",
+                               diffs[i].hash_b ? diffs[i].hash_b : "?");
+                }
+        }
+        snapshot_diff_list_free(diffs, count);
+        return 0;
+}
+
+/* ── 209 snapshot rm <id> ────────────────────────────────────────── */
+static int cmd_snapshot_rm(int64_t id)
+{
+        char db_root[PATH_MAX];
+        get_db_root(db_root, sizeof(db_root));
+        snapshot_db_t *sdb = snapshot_db_open(db_root);
+        if (!sdb) {
+                fprintf(stderr, "209: snapshot: cannot open snapshot DB at %s\n",
+                        db_root);
+                return 1;
+        }
+        int rc = snapshot_remove(sdb, id);
+        snapshot_db_close(sdb);
+        if (rc < 0) {
+                fprintf(stderr, "209: snapshot: cannot remove id %lld\n",
+                        (long long)id);
+                return 1;
+        }
+        printf("  removed snapshot %lld (store path will be reaped by `209 gc` "
+               "if unreferenced)\n", (long long)id);
+        return 0;
+}
+
+/* ── 209 snapshot <subcommand> [args...] ─────────────────────────── */
+static int cmd_snapshot(int argc, char **argv)
+{
+        if (argc < 1) {
+                fprintf(stderr, "usage: 209 snapshot take <path>\n");
+                fprintf(stderr, "       209 snapshot list [path]\n");
+                fprintf(stderr, "       209 snapshot restore <id>\n");
+                fprintf(stderr, "       209 snapshot diff <id1> <id2>\n");
+                fprintf(stderr, "       209 snapshot rm <id>\n");
+                return 1;
+        }
+        const char *sub = argv[0];
+
+        if (strcmp(sub, "take") == 0) {
+                if (argc < 2) {
+                        fprintf(stderr, "usage: 209 snapshot take <path>\n");
+                        return 1;
+                }
+                return cmd_snapshot_take(argv[1]);
+        }
+        if (strcmp(sub, "list") == 0) {
+                return cmd_snapshot_list(argc >= 2 ? argv[1] : NULL);
+        }
+        if (strcmp(sub, "restore") == 0) {
+                if (argc < 2) {
+                        fprintf(stderr, "usage: 209 snapshot restore <id>\n");
+                        return 1;
+                }
+                int64_t id = (int64_t)atoll(argv[1]);
+                if (id <= 0) {
+                        fprintf(stderr, "209 snapshot: invalid id %s\n", argv[1]);
+                        return 1;
+                }
+                return cmd_snapshot_restore(id);
+        }
+        if (strcmp(sub, "diff") == 0) {
+                if (argc < 3) {
+                        fprintf(stderr, "usage: 209 snapshot diff <id1> <id2>\n");
+                        return 1;
+                }
+                int64_t id1 = (int64_t)atoll(argv[1]);
+                int64_t id2 = (int64_t)atoll(argv[2]);
+                if (id1 <= 0 || id2 <= 0) {
+                        fprintf(stderr, "209 snapshot: invalid ids\n");
+                        return 1;
+                }
+                return cmd_snapshot_diff(id1, id2);
+        }
+        if (strcmp(sub, "rm") == 0 || strcmp(sub, "remove") == 0) {
+                if (argc < 2) {
+                        fprintf(stderr, "usage: 209 snapshot rm <id>\n");
+                        return 1;
+                }
+                int64_t id = (int64_t)atoll(argv[1]);
+                if (id <= 0) {
+                        fprintf(stderr, "209 snapshot: invalid id %s\n", argv[1]);
+                        return 1;
+                }
+                return cmd_snapshot_rm(id);
+        }
+        if (strcmp(sub, "--help") == 0 || strcmp(sub, "-h") == 0 ||
+            strcmp(sub, "help") == 0) {
+                printf("209 snapshot take <path>      - take a snapshot of a declared path now\n");
+                printf("209 snapshot list [path]      - list snapshots (all, or filtered by path)\n");
+                printf("209 snapshot restore <id>     - restore a snapshot by ID\n");
+                printf("209 snapshot diff <id1> <id2> - diff two snapshots of the same path\n");
+                printf("209 snapshot rm <id>          - remove a snapshot from the DB\n");
+                return 0;
+        }
+
+        fprintf(stderr, "209 snapshot: unknown subcommand '%s'\n", sub);
+        fprintf(stderr, "    try: 209 snapshot --help\n");
+        return 1;
+}
+
+/* ── NAR sharing: 209 share, 209 get, 209 subs ────────────────────── */
+
+/* 209 share <path>          - NAR-hash, copy to store, push, print URI
+ * 209 share ls              - list local shares
+ * 209 share rm <hash>       - remove a share from the store
+ * 209 share --help          - usage */
+static int cmd_share(int argc, char **argv)
+{
+        if (argc < 1) {
+                fprintf(stderr, "usage: 209 share <path>\n");
+                fprintf(stderr, "       209 share ls\n");
+                fprintf(stderr, "       209 share rm <hash>\n");
+                return 1;
+        }
+
+        if (strcmp(argv[0], "--help") == 0 || strcmp(argv[0], "-h") == 0) {
+                printf("209 share <path>          - share a file or folder as a NAR blob\n");
+                printf("209 share ls              - list local shares\n");
+                printf("209 share rm <hash>       - remove a share from the store\n");
+                printf("\nA share is stored as /nix/store/<hash>-share-<basename>/\n");
+                printf("and pushed to every configured sub that has a SigningKey.\n");
+                printf("The URI is nar://<hash>.\n");
+                return 0;
+        }
+
+        if (strcmp(argv[0], "ls") == 0) {
+                share_entry_t *list = share_list_local();
+                if (!list) {
+                        printf("(no local shares)\n");
+                        return 0;
+                }
+                printf("%-34s %-20s %10s  %s\n", "HASH", "NAME", "SIZE", "SHARED");
+                printf("%-34s %-20s %10s  %s\n",
+                       "----", "----", "----", "------");
+                for (share_entry_t *e = list; e; e = e->next) {
+                        char sz[16];
+                        if (e->nar_size < 1024) {
+                                snprintf(sz, sizeof(sz), "%lld B",
+                                         (long long)e->nar_size);
+                        } else if (e->nar_size < 1024 * 1024) {
+                                snprintf(sz, sizeof(sz), "%.1f KB",
+                                         e->nar_size / 1024.0);
+                        } else {
+                                snprintf(sz, sizeof(sz), "%.1f MB",
+                                         e->nar_size / (1024.0 * 1024));
+                        }
+                        char tbuf[32];
+                        struct tm tm;
+                        time_t t = (time_t)e->shared_at;
+                        if (localtime_r(&t, &tm))
+                                strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", &tm);
+                        else
+                                snprintf(tbuf, sizeof(tbuf), "%lld",
+                                         (long long)e->shared_at);
+                        printf("%-34s %-20s %10s  %s\n",
+                               e->hash, e->name, sz, tbuf);
+                }
+                share_entry_list_free(list);
+                return 0;
+        }
+
+        if (strcmp(argv[0], "rm") == 0 || strcmp(argv[0], "remove") == 0) {
+                if (argc < 2) {
+                        fprintf(stderr, "usage: 209 share rm <hash>\n");
+                        return 1;
+                }
+                if (share_remove(argv[1]) != 0) {
+                        fprintf(stderr, "209: no share with hash %s\n", argv[1]);
+                        return 1;
+                }
+                printf("removed share %s\n", argv[1]);
+                return 0;
+        }
+
+        /* Otherwise: 209 share <path> */
+        const char *path = argv[0];
+
+        /* Take the share. share_take validates the path is absolute. */
+        char *store_path = share_take(path);
+        if (!store_path) return 1;
+
+        /* Extract the hash from the store path. */
+        size_t hlen = 0;
+        const char *h = narinfo_path_hash(store_path, &hlen);
+        char hash_buf[64];
+        if (h && hlen > 0 && hlen < sizeof(hash_buf)) {
+                memcpy(hash_buf, h, hlen);
+                hash_buf[hlen] = '\0';
+        } else {
+                fprintf(stderr, "209: cannot parse share hash from %s\n", store_path);
+                free(store_path);
+                return 1;
+        }
+
+        printf("shared: %s\n", store_path);
+        printf("       nar://%s\n", hash_buf);
+
+        /* Push to every configured sub with a SigningKey. */
+        two9_config_t *cfg = two9_config_load();
+        if (!cfg) {
+                fprintf(stderr, "209: warning: cannot load config; share not pushed\n");
+                free(store_path);
+                return 0;
+        }
+        if (!cfg->subs) {
+                fprintf(stderr, "209: no subs configured; share kept locally\n");
+                two9_config_free(cfg);
+                free(store_path);
+                return 0;
+        }
+        int pushed = 0;
+        int failed = 0;
+        for (two9_sub_t *s = cfg->subs; s; s = s->next) {
+                if (!s->signing_key_file) {
+                        fprintf(stderr,
+                                "209: sub '%s' has no SigningKey, skipping push\n",
+                                s->name ? s->name : "(unnamed)");
+                        continue;
+                }
+                if (share_push_to_sub(store_path, s) == 0) {
+                        pushed = 1;
+                } else {
+                        failed = 1;
+                }
+        }
+        two9_config_free(cfg);
+        free(store_path);
+
+        if (failed && !pushed) {
+                fprintf(stderr, "209: push failed on all subs\n");
+                return 1;
+        }
+        return 0;
+}
+
+/* 209 get <uri> [dest]      - fetch a share by URI (nar://<hash> or <hash>)
+ * 209 get pkg <name>        - explicitly fetch a package from configured subs
+ * 209 get --help            - usage */
+static int cmd_get(int argc, char **argv)
+{
+        if (argc < 1) {
+                fprintf(stderr, "usage: 209 get <uri> [dest]\n");
+                fprintf(stderr, "       209 get pkg <name>\n");
+                return 1;
+        }
+
+        if (strcmp(argv[0], "--help") == 0 || strcmp(argv[0], "-h") == 0) {
+                printf("209 get <uri> [dest]      - fetch a share by URI (nar://<hash> or just <hash>)\n");
+                printf("209 get pkg <name>        - explicitly fetch a package from configured subs\n");
+                printf("\nFor <uri>, walks each configured sub in order. If found and the signature\n");
+                printf("verifies against ANY of the sub's PublicKeys, the NAR is downloaded and\n");
+                printf("extracted to <dest> (or the current directory).\n");
+                return 0;
+        }
+
+        if (strcmp(argv[0], "pkg") == 0) {
+                /* 209 get pkg <name> - same as `209 cache pull` but takes a
+                 * package name and resolves it via the store DB. */
+                if (argc < 2) {
+                        fprintf(stderr, "usage: 209 get pkg <name>\n");
+                        return 1;
+                }
+                const char *pkg_name = argv[1];
+                char db_root_buf[PATH_MAX];
+                get_db_root(db_root_buf, sizeof(db_root_buf));
+                store_db_t *db = store_db_open(db_root_buf);
+                if (!db) {
+                        fprintf(stderr, "209: cannot open store DB\n");
+                        return 1;
+                }
+                char *store_path = store_db_find_by_name(db, pkg_name);
+                store_db_close(db);
+                if (!store_path) {
+                        fprintf(stderr, "209: no store path found for '%s'\n", pkg_name);
+                        return 1;
+                }
+                /* Reuse cmd_cache_pull's logic. */
+                char *new_argv[1] = { store_path };
+                int rc = cmd_cache_pull(1, new_argv);
+                free(store_path);
+                return rc;
+        }
+
+        /* 209 get <uri> [dest] */
+        const char *uri = argv[0];
+        const char *dest = (argc >= 2) ? argv[1] : NULL;
+        return share_fetch_from_sub(uri, dest) == 0 ? 0 : 1;
+}
+
+/* 209 subs                     - interactive TUI picker
+ * 209 subs <name>              - print one sub's details non-interactively
+ * 209 subs add <name>          - interactive prompt to add a sub
+ * 209 subs rm <name>           - remove a sub from config
+ * 209 subs --help              - usage
+ *
+ * For `add` and `rm`, the config file is /nix/config/<user>.extra.nix
+ * (or /nix/config/extra.nix if running as root). We append/rewrite the
+ * subs block. The Nix evaluator handles re-reading on the next load. */
+static int cmd_subs(int argc, char **argv)
+{
+        if (argc < 1 || strcmp(argv[0], "--help") == 0 ||
+            strcmp(argv[0], "-h") == 0) {
+                if (argc < 1) {
+                        /* No args: launch interactive. */
+                        return subs_ui_run();
+                }
+                printf("209 subs                       - interactive sub picker\n");
+                printf("209 subs <name>                - print one sub's details\n");
+                printf("209 subs add <name>            - add a sub interactively\n");
+                printf("209 subs rm <name>             - remove a sub from config\n");
+                return 0;
+        }
+
+        if (strcmp(argv[0], "add") == 0) {
+                if (argc < 2) {
+                        fprintf(stderr, "usage: 209 subs add <name>\n");
+                        return 1;
+                }
+                const char *name = argv[1];
+                /* Read URLs. */
+                printf("Enter URLs for sub '%s' (one per line, blank line to finish):\n", name);
+                char urls_buf[4096] = "";
+                char line[1024];
+                size_t urls_len = 0;
+                while (fgets(line, sizeof(line), stdin)) {
+                        if (line[0] == '\n' || line[0] == '\0') break;
+                        size_t l = strlen(line);
+                        if (line[l - 1] == '\n') line[--l] = '\0';
+                        if (urls_len + l + 4 < sizeof(urls_buf)) {
+                                urls_buf[urls_len++] = '"';
+                                memcpy(urls_buf + urls_len, line, l);
+                                urls_len += l;
+                                urls_buf[urls_len++] = '"';
+                                urls_buf[urls_len++] = ' ';
+                        }
+                }
+                if (urls_len == 0) {
+                        fprintf(stderr, "209: no URLs entered\n");
+                        return 1;
+                }
+                urls_buf[urls_len] = '\0';
+
+                /* Read PublicKeys. */
+                printf("Enter public keys (one per line, blank line to finish):\n");
+                char keys_buf[4096] = "";
+                size_t keys_len = 0;
+                while (fgets(line, sizeof(line), stdin)) {
+                        if (line[0] == '\n' || line[0] == '\0') break;
+                        size_t l = strlen(line);
+                        if (line[l - 1] == '\n') line[--l] = '\0';
+                        if (keys_len + l + 4 < sizeof(keys_buf)) {
+                                keys_buf[keys_len++] = '"';
+                                memcpy(keys_buf + keys_len, line, l);
+                                keys_len += l;
+                                keys_buf[keys_len++] = '"';
+                                keys_buf[keys_len++] = ' ';
+                        }
+                }
+                keys_buf[keys_len] = '\0';
+
+                /* AllowUnsigned. */
+                printf("AllowUnsigned? [y/N]: ");
+                fflush(stdout);
+                int allow = 0;
+                if (fgets(line, sizeof(line), stdin)) {
+                        allow = (line[0] == 'y' || line[0] == 'Y');
+                }
+
+                /* SigningKey path. */
+                printf("SigningKey file path (blank for none): ");
+                fflush(stdout);
+                char signing_key[PATH_MAX] = "";
+                if (fgets(line, sizeof(line), stdin)) {
+                        size_t l = strlen(line);
+                        if (l > 0 && line[l - 1] == '\n') line[--l] = '\0';
+                        if (l > 0 && l < sizeof(signing_key))
+                                memcpy(signing_key, line, l + 1);
+                }
+
+                /* KeyName. */
+                printf("KeyName (blank for none): ");
+                fflush(stdout);
+                char key_name[256] = "";
+                if (fgets(line, sizeof(line), stdin)) {
+                        size_t l = strlen(line);
+                        if (l > 0 && line[l - 1] == '\n') line[--l] = '\0';
+                        if (l > 0 && l < sizeof(key_name))
+                                memcpy(key_name, line, l + 1);
+                }
+
+                /* Build the Nix snippet to append. */
+                char snippet[8192];
+                int n = snprintf(snippet, sizeof(snippet),
+                        "\n  %s = {\n"
+                        "    URLs = [ %s];\n"
+                        "    PublicKeys = [ %s];\n"
+                        "    AllowUnsigned = %s;\n",
+                        name, urls_buf, keys_buf, allow ? "true" : "false");
+                if (signing_key[0]) {
+                        n += snprintf(snippet + n, sizeof(snippet) - n,
+                                "    SigningKey = \"%s\";\n", signing_key);
+                }
+                if (key_name[0]) {
+                        n += snprintf(snippet + n, sizeof(snippet) - n,
+                                "    KeyName = \"%s\";\n", key_name);
+                }
+                n += snprintf(snippet + n, sizeof(snippet) - n, "  };\n");
+
+                /* Resolve the config file path. */
+                const char *dir = two9_config_dir();
+                const char *user = get_current_username();
+                char path[PATH_MAX];
+                if (getuid() == 0) {
+                        snprintf(path, sizeof(path), "%s/extra.nix", dir);
+                } else if (user) {
+                        snprintf(path, sizeof(path), "%s/%s.extra.nix", dir, user);
+                } else {
+                        snprintf(path, sizeof(path), "%s/extra.nix", dir);
+                }
+
+                /* If the file exists, append before the closing brace of
+                 * the top-level attrset. If not, create it fresh. */
+                FILE *f = fopen(path, "r");
+                if (f) {
+                        /* Read the whole file. */
+                        fseek(f, 0, SEEK_END);
+                        long sz = ftell(f);
+                        rewind(f);
+                        char *buf = malloc((size_t)sz + 1);
+                        if (!buf) { fclose(f); return 1; }
+                        size_t nread = fread(buf, 1, (size_t)sz, f);
+                        buf[nread] = '\0';
+                        fclose(f);
+
+                        /* Find the last '}' (closing the top-level attrset). */
+                        char *last = strrchr(buf, '}');
+                        if (!last) {
+                                /* No closing brace - just append. */
+                                char *new = malloc(nread + strlen(snippet) + 1);
+                                if (!new) { free(buf); return 1; }
+                                memcpy(new, buf, nread);
+                                memcpy(new + nread, snippet, strlen(snippet) + 1);
+                                f = fopen(path, "w");
+                                if (!f) { free(buf); free(new); return 1; }
+                                fputs(new, f);
+                                fclose(f);
+                                free(buf); free(new);
+                        } else {
+                                /* Insert snippet before the last '}'. */
+                                size_t prefix_len = (size_t)(last - buf);
+                                char *new = malloc(nread + strlen(snippet) + 1);
+                                if (!new) { free(buf); return 1; }
+                                memcpy(new, buf, prefix_len);
+                                memcpy(new + prefix_len, snippet, strlen(snippet));
+                                memcpy(new + prefix_len + strlen(snippet),
+                                       last, nread - prefix_len + 1);
+                                f = fopen(path, "w");
+                                if (!f) { free(buf); free(new); return 1; }
+                                fputs(new, f);
+                                fclose(f);
+                                free(buf); free(new);
+                        }
+                } else {
+                        /* Create new file. */
+                        f = fopen(path, "w");
+                        if (!f) {
+                                fprintf(stderr, "209: cannot write %s: %s\n",
+                                        path, strerror(errno));
+                                return 1;
+                        }
+                        fprintf(f, "{\n  subs = {%s  };\n}\n", snippet);
+                        fclose(f);
+                }
+                printf("added sub '%s' to %s\n", name, path);
+                return 0;
+        }
+
+        if (strcmp(argv[0], "rm") == 0 || strcmp(argv[0], "remove") == 0) {
+                if (argc < 2) {
+                        fprintf(stderr, "usage: 209 subs rm <name>\n");
+                        return 1;
+                }
+                const char *name = argv[1];
+                const char *dir = two9_config_dir();
+                const char *user = get_current_username();
+                char path[PATH_MAX];
+                if (getuid() == 0) {
+                        snprintf(path, sizeof(path), "%s/extra.nix", dir);
+                } else if (user) {
+                        snprintf(path, sizeof(path), "%s/%s.extra.nix", dir, user);
+                } else {
+                        snprintf(path, sizeof(path), "%s/extra.nix", dir);
+                }
+
+                /* Read the file, find and remove the sub block. */
+                FILE *f = fopen(path, "r");
+                if (!f) {
+                        fprintf(stderr, "209: cannot open %s: %s\n",
+                                path, strerror(errno));
+                        return 1;
+                }
+                fseek(f, 0, SEEK_END);
+                long sz = ftell(f);
+                rewind(f);
+                char *buf = malloc((size_t)sz + 1);
+                if (!buf) { fclose(f); return 1; }
+                size_t nread = fread(buf, 1, (size_t)sz, f);
+                buf[nread] = '\0';
+                fclose(f);
+
+                /* Find "<name> = {" within the subs block. Naive: look
+                 * for the substring, then drop everything until the
+                 * matching closing brace. */
+                char needle[256];
+                snprintf(needle, sizeof(needle), "%s = {", name);
+                char *p = strstr(buf, needle);
+                if (!p) {
+                        fprintf(stderr, "209: no sub named '%s' in %s\n",
+                                name, path);
+                        free(buf);
+                        return 1;
+                }
+                /* Walk forward to find the matching closing '}' at
+                 * the same brace depth. */
+                int depth = 0;
+                char *q = p;
+                while (*q) {
+                        if (*q == '{') depth++;
+                        else if (*q == '}') {
+                                depth--;
+                                if (depth == 0) {
+                                        q++;
+                                        /* Skip trailing newline. */
+                                        if (*q == '\n') q++;
+                                        break;
+                                }
+                        }
+                        q++;
+                }
+                /* Splice out [p, q). */
+                memmove(p, q, strlen(q) + 1);
+                f = fopen(path, "w");
+                if (!f) {
+                        fprintf(stderr, "209: cannot write %s\n", path);
+                        free(buf);
+                        return 1;
+                }
+                fputs(buf, f);
+                fclose(f);
+                free(buf);
+                printf("removed sub '%s' from %s\n", name, path);
+                return 0;
+        }
+
+        /* 209 subs <name> - non-interactive print. */
+        return subs_ui_print_sub(argv[0]);
+}
+
 int main(int argc, char *argv[])
 {
         /* Handle options */
@@ -5862,6 +6920,33 @@ int main(int argc, char *argv[])
                 if (argc >= 3 && strcmp(argv[2], "--sandbox=debag") == 0)
                         use_sandbox = 1;
                 return cmd_upgrade(use_sandbox);
+        }
+        if (strcmp(argv[1], "snapshot") == 0) {
+                /* 209 snapshot take <path>
+                 * 209 snapshot list [path]
+                 * 209 snapshot restore <id>
+                 * 209 snapshot diff <id1> <id2>
+                 * 209 snapshot rm <id> */
+                return cmd_snapshot(argc - 2, &argv[2]);
+        }
+        if (strcmp(argv[1], "share") == 0) {
+                /* 209 share <path>          - take+push a share
+                 * 209 share ls              - list local shares
+                 * 209 share rm <hash>       - remove a share
+                 * 209 share --help          - usage */
+                return cmd_share(argc - 2, &argv[2]);
+        }
+        if (strcmp(argv[1], "get") == 0) {
+                /* 209 get <uri> [dest]      - fetch a share by URI
+                 * 209 get pkg <name>        - explicitly fetch a package */
+                return cmd_get(argc - 2, &argv[2]);
+        }
+        if (strcmp(argv[1], "subs") == 0) {
+                /* 209 subs                  - interactive picker
+                 * 209 subs <name>           - print one sub's details
+                 * 209 subs add <name>       - add a sub
+                 * 209 subs rm <name>        - remove a sub */
+                return cmd_subs(argc - 2, &argv[2]);
         }
 
         /* SOV pattern: need at least subject + verb */

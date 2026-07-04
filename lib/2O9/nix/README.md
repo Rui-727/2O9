@@ -10,7 +10,10 @@ builtins.
 
 The features `2O9.nix` actually needs:
 
-- Attribute sets: `{ key = value; ... }` and recursive `rec { ... }`
+- Attribute sets: `{ key = value; ... }` and recursive `rec { ... }`.
+  Both bare-identifier keys (`foo = 1;`) and quoted-string keys
+  (`"/var/lib/pg" = { ... };`) are supported. Interpolated strings
+  (`"hello ${name}"`) cannot be used as attrset keys.
 - Lists: `[ elem1 elem2 ... ]`
 - Let-bindings: `let ... in ...`
 - String interpolation: `"hello ${name}"`

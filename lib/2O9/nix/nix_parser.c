@@ -110,19 +110,34 @@ static attr_path_t parse_attrpath(nix_parser_t *p)
     size_t cap = 8;
     ap.parts = calloc(cap, sizeof(char *));
 
-    /* First part: identifier */
-    if (peek_type(p) != NIX_TOK_IDENT) {
-        parser_error(p, "expected identifier in attrpath");
+    /* First part: identifier or string literal. String keys are needed
+     * for attrsets whose keys contain non-identifier characters (e.g.
+     * snapshot paths like "/var/lib/pg"). Interpolated strings are
+     * rejected; only literal strings may be attrset keys. */
+    nix_tok_type_t ft = peek_type(p);
+    if (ft != NIX_TOK_IDENT && ft != NIX_TOK_STRING) {
+        parser_error(p, "expected identifier or string in attrpath");
+        return ap;
+    }
+    if (ft == NIX_TOK_STRING && p->cur.text &&
+        strstr(p->cur.text, "${") != NULL) {
+        parser_error(p, "interpolated strings cannot be attrset keys");
         return ap;
     }
     ap.parts[ap.count++] = strdup(p->cur.text);
     advance(p);
 
-    /* Additional parts: . identifier */
+    /* Additional parts: . identifier-or-string */
     while (peek_type(p) == NIX_TOK_DOT) {
         advance(p);
-        if (peek_type(p) != NIX_TOK_IDENT) {
-            parser_error(p, "expected identifier after '.'");
+        nix_tok_type_t nt = peek_type(p);
+        if (nt != NIX_TOK_IDENT && nt != NIX_TOK_STRING) {
+            parser_error(p, "expected identifier or string after '.'");
+            break;
+        }
+        if (nt == NIX_TOK_STRING && p->cur.text &&
+            strstr(p->cur.text, "${") != NULL) {
+            parser_error(p, "interpolated strings cannot be attrset keys");
             break;
         }
         if (ap.count >= cap) { cap *= 2; ap.parts = realloc(ap.parts, cap * sizeof(char *)); }
@@ -436,21 +451,31 @@ static nix_ast_t *parse_base(nix_parser_t *p)
             return node;
         }
 
-        /* First item must be an identifier */
-        if (peek_type(p) != NIX_TOK_IDENT) {
-            parser_error(p, "expected identifier or '}' in attrset");
+        /* First item must be an identifier or a string literal.
+         * String first-tokens are always bindings (formals don't
+         * use string keys). */
+        nix_tok_type_t first_t = peek_type(p);
+        if (first_t != NIX_TOK_IDENT && first_t != NIX_TOK_STRING) {
+            parser_error(p, "expected identifier, string, or '}' in attrset");
+            return NULL;
+        }
+        if (first_t == NIX_TOK_STRING && p->cur.text &&
+            strstr(p->cur.text, "${") != NULL) {
+            parser_error(p, "interpolated strings cannot be attrset keys");
             return NULL;
         }
 
-        /* Consume the first identifier */
+        /* Consume the first identifier/string */
         char *first_name = strdup(p->cur.text);
-        advance(p); /* consume ident - now p->cur is the token after it */
+        advance(p); /* consume ident/string - now p->cur is the token after it */
 
-        /* Decide: formals or bindings? */
+        /* Decide: formals or bindings? String first-tokens go straight
+         * to bindings mode. */
         nix_tok_type_t after_first = peek_type(p);
 
-        if (after_first == NIX_TOK_COMMA || after_first == NIX_TOK_QUESTION ||
-            after_first == NIX_TOK_RBRACE) {
+        if (first_t == NIX_TOK_IDENT &&
+            (after_first == NIX_TOK_COMMA || after_first == NIX_TOK_QUESTION ||
+             after_first == NIX_TOK_RBRACE)) {
             /* ── FORMALS MODE ────────────────────────────────────────── */
             nix_ast_t *formals = ast_new(NIX_NODE_ATTR_SET, line, col);
             size_t fcap = 8, fcount = 0;
@@ -534,8 +559,16 @@ static nix_ast_t *parse_base(nix_parser_t *p)
 
             while (peek_type(p) == NIX_TOK_DOT) {
                 advance(p);
-                if (peek_type(p) != NIX_TOK_IDENT) {
-                    parser_error(p, "expected identifier after '.'");
+                nix_tok_type_t nt = peek_type(p);
+                if (nt != NIX_TOK_IDENT && nt != NIX_TOK_STRING) {
+                    parser_error(p, "expected identifier or string after '.'");
+                    attrpath_free(&ap);
+                    free(binds);
+                    return NULL;
+                }
+                if (nt == NIX_TOK_STRING && p->cur.text &&
+                    strstr(p->cur.text, "${") != NULL) {
+                    parser_error(p, "interpolated strings cannot be attrset keys");
                     attrpath_free(&ap);
                     free(binds);
                     return NULL;
