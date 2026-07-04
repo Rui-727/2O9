@@ -95,6 +95,68 @@ on `main`:
    description; gdb's `nat/x86-dregs.c` is GPL-3.0, 2O9 is
    GPL-2.0-only, so no gdb code was copied.
 
+5. **Close fds and reset signals in the child** (recommendation #5,
+   ~10 LOC). Commit `600d881`. The child branch of the fork now calls
+   `close_range(3, ~0U, 0)` (with a `sysconf(_SC_OPEN_MAX)` + `close()`
+   loop fallback for kernels < 5.9 / glibc < 2.34) before `execvp`, so
+   the child doesn't inherit 2O9's leaked fds. Also iterates 1..NSIG
+   calling `signal(i, SIG_DFL)` to reset ignored signals (SIGINT,
+   SIGQUIT, SIGPIPE, etc.) to default disposition. Mirrors
+   `gdb/nat/fork-inferior.c:319,353`.
+
+6. **C++ symbol demangling** (recommendation #6, ~20 LOC). Commit
+   `3a88814`. `dlopen("libstdc++.so.6", RTLD_LAZY)` at first use, dlsym
+   `__cxa_demangle`. Applied in `sym`, `bt`, and breakpoint-hit output.
+   The mangled name is shown alongside the demangled form so the user
+   can match against `nm` output. `--no-demangle` flag in
+   `debag_policy_t` disables. `-ldl` added to LIBS.
+
+7. **Stack-scan backtrace fallback** (recommendation #7, ~30 LOC).
+   Commit `e79535f`. When the rbp walk ends prematurely (frameless
+   function, stripped binary), scans from `rsp` upward for ~4 KB,
+   8 bytes at a time, looking for values that fall within an
+   executable section (`.text`, `.init`, `.fini`, `.plt`). Each
+   candidate is printed as `[0x<addr>] <nearest_symbol>`. Capped at
+   16 candidates. `bt scan` forces the scan even when the rbp walk
+   succeeded.
+
+8. **Breakpoint `hit_count` and `ignore_count`** (recommendation #8,
+   ~30 LOC). Commit `868634f`. Two new fields on `dyn_bp_t`:
+   `hit_count` (incremented each time the bp is hit) and `ignore_count`
+   (if > 0, decrement on each hit and auto-continue instead of
+   stopping). `db` (list) shows both. New commands: `db <addr> ignore
+   <N>` sets the ignore count; `db <addr> reset` zeroes the hit count.
+   When a bp is hit with `ignore_count > 0`, debag prints `breakpoint
+   0x<addr> hit (ignore count: N-1 remaining)` and auto-continues
+   via `PTRACE_CONT`.
+
+9. **`PTRACE_O_TRACEFORK/VFORK/CLONE/EXEC`** (recommendation #9, one
+   line + event handler). Commit `116a1b8`. The parent now sets
+   `PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK |
+   PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC`
+   after the initial execve stop. Fork/vfork/clone/exec events report
+   as `PTRACE_EVENT_*` stops; debag prints `[child fork: new pid=...]`
+   (or `vfork`/`clone`/`exec`), `PTRACE_DETACH`es the new child so it
+   runs untraced, and continues the parent without forwarding any
+   signal (the event is synthetic). `info` shows the trace options.
+   We don't follow into the child yet (that's a bigger lift).
+
+10. **Breakpoint conditions** (recommendation #10, ~60 LOC). Commit
+    `868634f`. New `cond <addr> <expr>` command attaches a condition
+    to a breakpoint. The evaluator is intentionally tiny, supporting
+    only `<reg> <op> <value>` where `<reg>` is one of `rax`, `rbx`,
+    `rcx`, `rdx`, `rsi`, `rdi`, `rbp`, `rsp`, `r8`-`r15`, `rip`;
+    `<op>` is `==`, `!=`, `<`, `<=`, `>`, `>=`; and `<value>` is a
+    hex (`0x...`) or decimal integer. When the bp is hit, debag
+    evaluates the condition via `PTRACE_GETREGS`; if true, stops and
+    returns to the REPL; if false, single-steps over the INT3,
+    re-inserts the bp, and `PTRACE_CONT`s. `cond <addr>` (no expr)
+    clears the condition. `db` (list) shows conditions inline.
+    Not a full expression evaluator; the study explicitly said
+    "Conditions should accept `reg OP value` only."
+
+All 10 recommendations from this study are now ported.
+
 ## What 2O9's --dynamic-db has today
 
 `src/debag/dynamic_db.c` is a 1460-line single-file live debugger REPL.

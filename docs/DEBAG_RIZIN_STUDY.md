@@ -5,7 +5,7 @@
 The top recommendations from this study have been implemented in the
 2O9 `--static-db` REPL. Each entry below lists the recommendation, the
 commit that shipped it, and any deviations from the original plan.
-Recommendations 6+ remain future work.
+All 10 items are now ported.
 
 | # | Recommendation | Commit | Notes |
 |---|---|---|---|
@@ -14,14 +14,13 @@ Recommendations 6+ remain future work.
 | 3 | Seek history `u`/`U` | `debag: add seek history (u/U/sh) to static-db REPL` | 32-entry history stack + 32-entry redo stack on `repl_t`. `s <addr>` pushes prior offset (no-op seeks don't touch history) and clears redo. `u` pops history -> restores, `U` pops redo -> restores, `sh` prints the stack. Added `sh` for printing the stack (rizin's `s-` equivalent). ~90 LOC in `static_db.c`. Clean-room reimplementation of `cmd_seek.c:154-176` + `rz_core_seek_undo` semantics. |
 | 4 | Sparse-mode hex dump | `7f5a08b` | `print_hexdump` rewritten as a row-walker that tracks the previous row's bytes; when 3+ consecutive rows are byte-identical, it prints the first row, `...`, and the last row (with its real address). Two identical rows print verbatim. Applies to `px` (byte mode), `pxw` (32-bit words), and `pxq` (64-bit words) uniformly. The previous row-print inline code was extracted into a `print_hexdump_row` helper to avoid duplicating the byte/word layout logic in the walker. ~70 LOC in `static_db.c`. Clean-room reimplementation of the `checkSparse` loop in `rz_print_hexdump_str` (`librz/util/print.c:763-782`); no rizin code copied. |
 | 5 | `pxr` pointer-chase dump | `b98f70a` | New `pxr [addr] [len]` command (default 128 bytes = 16 qwords at current seek). Walks the buffer as 8-byte little-endian words, suppresses all-zero words, and annotates each non-zero word with `-> <symname>` if the value falls inside a defined symbol's `[vaddr, vaddr+size)` range, `-> <symname>+0xN` for an in-range non-exact match, or `-> (no symbol)` otherwise. Uses a new `sym_containing(a, value, &off)` helper that iterates `a->symbols`, skips imports and vaddr=0 entries, and for size>0 symbols requires containment while for size==0 symbols requires an exact vaddr match (more conservative than rizin's "closest vaddr <= addr" to avoid false positives on stripped binaries with many size-0 symbols). ~100 LOC in `static_db.c`. Clean-room reimplementation of `librz/util/print.c:749, 863-883`; no rizin code copied. |
+| 6 | UTF-16LE string detection | `2dfab60` | `iz` now detects both ASCII and UTF-16LE strings. ASCII: runs of >= 4 printable bytes (0x20..0x7e). UTF-16LE: runs of >= 4 two-byte pairs where the low byte is printable and the high byte is 0. Output gains a type column: `0xADDR  ascii  "string"` or `0xADDR  utf16  "string"`. `iz ascii` / `iz utf16` filter to one encoding. |
+| 7 | `izz` whole-binary scan | `2dfab60` | `izz` scans all sections (not just `.rodata`/`.data`), including `.text`, `.comment`, `.note.*`, etc. Output includes the section name so the user can tell where strings in unusual places came from. For non-ALLOC sections the address column is the file offset. `izz ascii` / `izz utf16` filters work the same as `iz`. |
+| 8 | `axt <addr>` xref-to | `48df135` | One-shot scan (not a precomputed xref DB). Disassembles every executable section with Capstone in detail mode. For x86, `X86_OP_IMM` operands equal to `<addr>` are direct references (call/jmp targets, `mov reg, imm`, etc.); `X86_OP_MEM` with `base = X86_REG_RIP` is rip-relative, effective address = `insn.address + insn.size + disp`. For non-x86 or unmodeled operands, scans `op_str` for the literal hex with word-boundary check. Then scans data sections for pointer values (8-byte LE on 64-bit, 4-byte on 32-bit) equal to `<addr>`. Default cap 50 results; `axt <addr> <max>` overrides. If `<addr>` is a symbol name, resolves first. Mirrors the read-only variant of rizin's `axt` (`librz/arch/xrefs.c:164`). |
+| 9 | Basic `af` walk-to-RET | `48df135` | `af [addr]` walks forward from current seek (or `<addr>`) one instruction at a time until a `ret`, an `int3` (0xCC) padding byte, an out-of-range jump (target before start, or more than 4 KB past current position), or 4096 instructions. Stores the range `[start, end)` in REPL state. `pdf` disassembles exactly that range. Basic linear walk; does not handle jump tables, tail calls, or conditional branches. |
+| 10 | `$$`/`$s`/`$e` tokens | `515fb07` | `$$` = current seek, `$s` = binary size (via fstat), `$e` = entry point address. Resolved before symbol names so a symbol named `s` or `e` can't shadow them. Usable anywhere an address expression is accepted: `s $$`, `px $$ 16`, `pd $e`, `axt $e`, `af $e`, etc. |
 
-### Items not yet ported
-
-6. UTF-16LE string detection.
-7. `izz` whole-binary scan.
-8. `axt <addr>` xref-to.
-9. Basic `af` walk-to-RET.
-10. `$$`/`$s` tokens.
+All 10 recommendations from this study are now ported.
 
 ---
 
