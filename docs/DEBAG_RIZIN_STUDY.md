@@ -1,5 +1,31 @@
 # Debag Rizin Study
 
+## Ported
+
+The top recommendations from this study have been implemented in the
+2O9 `--static-db` REPL. Each entry below lists the recommendation, the
+commit that shipped it, and any deviations from the original plan.
+Recommendations 3 and 6+ remain future work.
+
+| # | Recommendation | Commit | Notes |
+|---|---|---|---|
+| 1 | PLT/GOT relocation parsing + import address resolution | `debag: parse PLT/GOT relocations for imports in static-db` | Parses `DT_JMPREL`/`DT_REL`/`DT_RELA` from `.dynamic` and walks each reloc table; `ii` now prints `idx got_addr type name` (e.g. `R_X86_64_JUMP_SLOT  printf`). `s <import_name>` resolves to the GOT slot via the reloc table. PLT calls in `pd`/`pdd` are annotated with `; -> 0xGOT (name)` by reading the PLT entry's `jmp [rip+disp32]` and matching the resulting GOT slot to a reloc. ~170 LOC across `static_analysis.c` (reloc parsing) and `static_db.c` (`ii`, `resolve_expr`, PLT annotation). Clean-room reimplementation of `elf_relocs.c:184-240` + `elf_imports.c:400-418`; no rizin code copied. |
+| 3 | Seek history `u`/`U` | `debag: add seek history (u/U/sh) to static-db REPL` | 32-entry history stack + 32-entry redo stack on `repl_t`. `s <addr>` pushes prior offset (no-op seeks don't touch history) and clears redo. `u` pops history -> restores, `U` pops redo -> restores, `sh` prints the stack. Added `sh` for printing the stack (rizin's `s-` equivalent). ~90 LOC in `static_db.c`. Clean-room reimplementation of `cmd_seek.c:154-176` + `rz_core_seek_undo` semantics. |
+
+### Items not yet ported
+
+2. Jump arrows + call-target annotation in `pd` (PLT call annotation
+   shipped as part of item 1; full reflines are not implemented).
+4. Sparse-mode hex dump (three-row `...` collapse).
+5. `pxr` pointer-chase dump.
+6. UTF-16LE string detection.
+7. `izz` whole-binary scan.
+8. `axt <addr>` xref-to.
+9. Basic `af` walk-to-RET.
+10. `$$`/`$s` tokens.
+
+---
+
 A surgical study of the rizin source tree (cloned at commit `ff4d660`,
 master branch, `https://github.com/rizinorg/rizin`) with the goal of
 telling the 2O9 `--static-db` REPL what to steal and what to leave

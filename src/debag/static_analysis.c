@@ -272,6 +272,47 @@ const char *debag_elf_segment_type_name(uint32_t p_type)
     }
 }
 
+/* Pretty-printer for ELF relocation type codes. Only the common
+ * x86-64 / x86 / aarch64 types are named; anything else falls through
+ * to "OTHER". Used by the static-db REPL's `ii` to label each GOT
+ * slot (e.g. R_X86_64_JUMP_SLOT, R_X86_64_GLOB_DAT). */
+const char *debag_elf_reloc_type_name(uint32_t r_type)
+{
+#if defined(R_X86_64_64)
+    switch (r_type) {
+    case R_X86_64_NONE:        return "R_X86_64_NONE";
+    case R_X86_64_64:          return "R_X86_64_64";
+    case R_X86_64_PC32:        return "R_X86_64_PC32";
+    case R_X86_64_GOT32:       return "R_X86_64_GOT32";
+    case R_X86_64_PLT32:       return "R_X86_64_PLT32";
+    case R_X86_64_COPY:        return "R_X86_64_COPY";
+    case R_X86_64_GLOB_DAT:    return "R_X86_64_GLOB_DAT";
+    case R_X86_64_JUMP_SLOT:   return "R_X86_64_JUMP_SLOT";
+    case R_X86_64_RELATIVE:    return "R_X86_64_RELATIVE";
+    case R_X86_64_GOTPCREL:    return "R_X86_64_GOTPCREL";
+    case R_X86_64_32:          return "R_X86_64_32";
+    case R_X86_64_32S:         return "R_X86_64_32S";
+    case R_X86_64_16:          return "R_X86_64_16";
+    case R_X86_64_PC16:        return "R_X86_64_PC16";
+    case R_X86_64_8:           return "R_X86_64_8";
+    case R_X86_64_PC8:         return "R_X86_64_PC8";
+    case R_X86_64_PC64:        return "R_X86_64_PC64";
+    default:                   break;
+    }
+#endif
+#if defined(R_AARCH64_NONE) && !defined(R_X86_64_64)
+    switch (r_type) {
+    case R_AARCH64_NONE:           return "R_AARCH64_NONE";
+    case R_AARCH64_ABS64:          return "R_AARCH64_ABS64";
+    case R_AARCH64_GLOB_DAT:       return "R_AARCH64_GLOB_DAT";
+    case R_AARCH64_JUMP_SLOT:      return "R_AARCH64_JUMP_SLOT";
+    case R_AARCH64_RELATIVE:       return "R_AARCH64_RELATIVE";
+    default:                       break;
+    }
+#endif
+    return "OTHER";
+}
+
 /* Resolve e_machine to a short arch name. Used by debag_analyze() to
  * populate analysis->arch_name, and by the static-db REPL to pick a
  * Capstone cs_arch. */
@@ -582,6 +623,159 @@ debag_analysis_t *debag_analyze(const char *binary_path)
         }
     }
 
+    /* Parse dynamic relocations (PLT + GOT) so `ii` can show GOT slot
+     * addresses and `s <import_name>` can seek to them. Walks .dynamic
+     * for DT_JMPREL/DT_REL/DT_RELA + DT_SYMTAB, then for each reloc
+     * entry resolves the symbol name via DT_SYMTAB[sym_idx] and stores
+     * {name, r_offset, type, is_rela, is_plt} in a->relocs. */
+    if (dynamic_sh && dynsym_sh && dynstr_sh) {
+        Elf64_Dyn *dyn = (Elf64_Dyn *)((char *)map + dynamic_sh->sh_offset);
+        size_t dyn_count = dynamic_sh->sh_size / sizeof(Elf64_Dyn);
+        Elf64_Phdr *phdrs = (Elf64_Phdr *)((char *)map + ehdr->e_phoff);
+
+        /* .dynsym symbols: needed to resolve sym_idx -> name. */
+        Elf64_Sym *dynsyms = (Elf64_Sym *)((char *)map + dynsym_sh->sh_offset);
+        size_t dynsym_count = dynsym_sh->sh_size / sizeof(Elf64_Sym);
+        const char *dynstr = (const char *)map + dynstr_sh->sh_offset;
+
+        /* Collect DT_ entries we care about. d_un.d_val is a vaddr for
+         * DT_JMPREL/DT_REL/DT_RELA/DT_SYMTAB, a byte size for the *SZ
+         * entries, and DT_REL/DT_RELA for DT_PLTREL. */
+        uint64_t jmprel_va = 0, rel_va = 0, rela_va = 0, symtab_va = 0;
+        uint64_t jmprel_sz = 0, rel_sz = 0, rela_sz = 0, syment = 0;
+        int pltrel_type = DT_RELA;   /* default per the gABI */
+        int have_jmprel = 0, have_rel = 0, have_rela = 0, have_symtab = 0;
+
+        for (size_t i = 0; i < dyn_count; i++) {
+            switch (dyn[i].d_tag) {
+            case DT_JMPREL:    jmprel_va = dyn[i].d_un.d_ptr; have_jmprel = 1; break;
+            case DT_PLTRELSZ:  jmprel_sz = dyn[i].d_un.d_val; break;
+            case DT_PLTREL:    pltrel_type = (int)dyn[i].d_un.d_val; break;
+            case DT_REL:       rel_va = dyn[i].d_un.d_ptr; have_rel = 1; break;
+            case DT_RELSZ:     rel_sz = dyn[i].d_un.d_val; break;
+            case DT_RELA:      rela_va = dyn[i].d_un.d_ptr; have_rela = 1; break;
+            case DT_RELASZ:    rela_sz = dyn[i].d_un.d_val; break;
+            case DT_SYMTAB:    symtab_va = dyn[i].d_un.d_ptr; have_symtab = 1; break;
+            case DT_SYMENT:    syment = dyn[i].d_un.d_val; break;
+            default:           break;
+            }
+        }
+        (void)syment;   /* informational; we use sizeof(Elf64_Sym) */
+
+        /* Translate a vaddr into a file offset via PT_LOAD segments.
+         * Mirrors the DT_STRTAB translation above; returns NULL on
+         * miss. We need this because DT_JMPREL/DT_REL/DT_RELA point
+         * at virtual addresses, not file offsets. */
+        const void *vaddr_to_ptr(uint64_t va) {
+            for (int j = 0; j < ehdr->e_phnum; j++) {
+                if (phdrs[j].p_type != PT_LOAD) continue;
+                if (va >= phdrs[j].p_vaddr &&
+                    va < phdrs[j].p_vaddr + phdrs[j].p_filesz)
+                    return (const char *)map + phdrs[j].p_offset +
+                           (va - phdrs[j].p_vaddr);
+            }
+            return NULL;
+        }
+
+        /* Resolve a symbol index to a name + st_value using DT_SYMTAB
+         * if available (handles stripped-section cases), else fall
+         * back to the .dynsym section we already located. */
+        const Elf64_Sym *resolve_sym(size_t idx, const char **name_out,
+                                     uint64_t *val_out) {
+            const Elf64_Sym *sym = NULL;
+            if (have_symtab) {
+                const char *base = (const char *)vaddr_to_ptr(symtab_va);
+                if (base) sym = (const Elf64_Sym *)base + idx;
+            }
+            if (!sym && idx < dynsym_count)
+                sym = &dynsyms[idx];
+            if (!sym) return NULL;
+            /* DT_STRTAB and .dynstr's sh_offset point at the same
+             * string table in normal binaries. Prefer the offset we
+             * already have on the section. */
+            *name_out = dynstr + sym->st_name;
+            *val_out = sym->st_value;
+            return sym;
+        }
+
+        /* Append one reloc to a->relocs (growing in 16-entry slabs,
+         * matching analysis_add_symbol's growth policy). */
+        void add_reloc(const char *name, uint64_t vaddr, uint64_t addend,
+                       uint32_t type, int is_rela, int is_plt) {
+            size_t cap = (a->relocs == NULL) ? 0 :
+                         ((a->reloc_count + 15) & ~(size_t)15);
+            if (a->reloc_count + 1 > cap) {
+                cap = a->reloc_count + 16;
+                debag_elf_reloc_t *nr = realloc(a->relocs,
+                                                cap * sizeof(*nr));
+                if (!nr) return;
+                a->relocs = nr;
+            }
+            debag_elf_reloc_t *r = &a->relocs[a->reloc_count++];
+            r->sym_name  = name ? strdup(name) : NULL;
+            r->vaddr     = vaddr;
+            r->addend    = addend;
+            r->type      = type;
+            r->is_rela   = is_rela;
+            r->is_plt    = is_plt;
+            r->sym_value = 0;
+        }
+
+        /* Walk one relocation table. `base` is the file-mapped start
+         * of the table, `count` is the number of entries, `is_rela`
+         * selects Elf64_Rela vs Elf64_Rel, `is_plt` tags the source
+         * (DT_JMPREL = PLT/GOT.PLT, DT_REL/DT_RELA = regular GOT). */
+        void walk_table(const void *base, size_t bytes, int is_rela,
+                        int is_plt) {
+            if (!base || bytes == 0) return;
+            size_t ent_sz = is_rela ? sizeof(Elf64_Rela) : sizeof(Elf64_Rel);
+            size_t count = bytes / ent_sz;
+            for (size_t i = 0; i < count; i++) {
+                uint64_t r_offset, r_info, r_addend = 0;
+                if (is_rela) {
+                    const Elf64_Rela *e = (const Elf64_Rela *)base + i;
+                    r_offset = e->r_offset;
+                    r_info   = e->r_info;
+                    r_addend = e->r_addend;
+                } else {
+                    const Elf64_Rel *e = (const Elf64_Rel *)base + i;
+                    r_offset = e->r_offset;
+                    r_info   = e->r_info;
+                }
+                size_t sym_idx = ELF64_R_SYM(r_info);
+                uint32_t type  = ELF64_R_TYPE(r_info);
+                const char *name = NULL;
+                uint64_t val = 0;
+                const Elf64_Sym *sym = resolve_sym(sym_idx, &name, &val);
+                (void)sym;
+                add_reloc(name && name[0] ? name : NULL,
+                          r_offset, r_addend, type, is_rela, is_plt);
+                /* Patch the sym_value into the just-added reloc. */
+                if (a->reloc_count > 0)
+                    a->relocs[a->reloc_count - 1].sym_value = val;
+            }
+        }
+
+        /* PLT relocations: type comes from DT_PLTREL (DT_REL or
+         * DT_RELA). */
+        if (have_jmprel) {
+            const void *base = vaddr_to_ptr(jmprel_va);
+            int is_rela = (pltrel_type == DT_RELA);
+            walk_table(base, jmprel_sz, is_rela, /*is_plt=*/1);
+        }
+        /* Regular relocations: DT_RELA (RELA form) and DT_REL (REL
+         * form) are mutually exclusive on x86-64 but both can appear
+         * on other arches; walk whichever are present. */
+        if (have_rela) {
+            const void *base = vaddr_to_ptr(rela_va);
+            walk_table(base, rela_sz, /*is_rela=*/1, /*is_plt=*/0);
+        }
+        if (have_rel) {
+            const void *base = vaddr_to_ptr(rel_va);
+            walk_table(base, rel_sz, /*is_rela=*/0, /*is_plt=*/0);
+        }
+    }
+
     munmap(map, st.st_size);
     return a;
 }
@@ -609,6 +803,11 @@ void debag_analysis_free(debag_analysis_t *a)
         for (size_t i = 0; i < a->symbol_count; i++)
             free(a->symbols[i].name);
         free(a->symbols);
+    }
+    if (a->relocs) {
+        for (size_t i = 0; i < a->reloc_count; i++)
+            free(a->relocs[i].sym_name);
+        free(a->relocs);
     }
     free(a);
 }

@@ -320,10 +320,12 @@ will probably use, then builds a seccomp filter from that.
 Debag also has an interactive static-analysis REPL, `--static-db`,
 modelled on rizin. It drops you at a `0xADDR>` prompt where you can
 inspect the parsed ELF: list sections (`iS`), segments (`iSS`), symbols
-(`is`), imports (`ii`), strings (`iz`); hex-dump any virtual address
-(`px`, `pxw`, `pxq`); seek to sections / symbols / `entry0` (`s`) and
-undo/redo seeks (`u`, `U`, `sh`); and disassemble with libcapstone
-(`pd`, `pdd`). Type `?` inside the REPL for the full command table.
+(`is`), imports (`ii`, with GOT slot addresses resolved from the
+dynamic relocation table), strings (`iz`); hex-dump any virtual address
+(`px`, `pxw`, `pxq`); seek to sections / symbols / imports / `entry0`
+(`s`) and undo/redo seeks (`u`, `U`, `sh`); and disassemble with
+libcapstone (`pd`, `pdd`, with `call <plt>` annotations). Type `?`
+inside the REPL for the full command table.
 
 For live debugging, `--dynamic-db` forks the target under `ptrace`,
 stops it at the entry point, and drops you at a `(209-db)` prompt

@@ -212,6 +212,35 @@ static int resolve_expr(repl_t *r, const char *s, uint64_t *out)
         }
     }
 
+    /* Import name? Resolve via the relocation table: the matching
+     * JUMP_SLOT / GLOB_DAT reloc's r_offset is the GOT slot address.
+     * This makes `s printf` seek to the GOT slot, so `px 8` shows the
+     * resolved function pointer. Mirrors rizin's get_import_addr
+     * (elf_imports.c:400-418). */
+    for (size_t i = 0; r->a->relocs && i < r->a->reloc_count; i++) {
+        const debag_elf_reloc_t *rl = &r->a->relocs[i];
+        if (!rl->sym_name || strcmp(rl->sym_name, s) != 0) continue;
+        int is_import_reloc = 0;
+#ifdef R_X86_64_JUMP_SLOT
+        if (rl->type == R_X86_64_JUMP_SLOT) is_import_reloc = 1;
+#endif
+#ifdef R_X86_64_GLOB_DAT
+        if (rl->type == R_X86_64_GLOB_DAT) is_import_reloc = 1;
+#endif
+#ifdef R_X86_64_COPY
+        if (rl->type == R_X86_64_COPY) is_import_reloc = 1;
+#endif
+#ifdef R_AARCH64_JUMP_SLOT
+        if (rl->type == R_AARCH64_JUMP_SLOT) is_import_reloc = 1;
+#endif
+#ifdef R_AARCH64_GLOB_DAT
+        if (rl->type == R_AARCH64_GLOB_DAT) is_import_reloc = 1;
+#endif
+        if (!is_import_reloc) continue;
+        *out = rl->vaddr;
+        return 0;
+    }
+
     /* Hex / decimal number. */
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
         char *end = NULL;
@@ -377,15 +406,84 @@ static void cmd_info_imports(repl_t *r, int argc, char **argv)
 {
     (void)argc; (void)argv;
     const debag_analysis_t *a = r->a;
-    printf("%-40s %-8s %s\n", "name", "type", "bind");
+
+    /* Two sources of "imports":
+     *  (a) Dynamic relocations whose symbol resolves to a name. These
+     *      are the imports with a real GOT slot (R_X86_64_JUMP_SLOT for
+     *      PLT imports, R_X86_64_GLOB_DAT for GOT imports). r_offset is
+     *      the GOT slot address. This is the rizin `ii` style.
+     *  (b) Undefined dynamic symbols with no corresponding reloc. Rare
+     *      (typically weak undefined symbols); shown with vaddr=0.
+     *
+     * Name-matching caveat: .symtab often stores version-suffixed names
+     * like "puts@GLIBC_2.2.5" while .dynstr (which the reloc sym_name
+     * is read from) stores bare "puts". So we compare with a helper
+     * that accepts either form.
+     */
+    int name_matches(const char *sym, const char *reloc) {
+        size_t rl = strlen(reloc);
+        if (strncmp(sym, reloc, rl) != 0) return 0;
+        char c = sym[rl];
+        return c == '\0' || c == '@';
+    }
+
+    printf("%-4s %-18s %-22s %s\n", "#", "vaddr", "type", "name");
+    size_t idx = 0;
+    int *covered = NULL;
+
+    /* Build a "covered" bitmap over a->symbols so we can show imports
+     * with no reloc at the bottom. Indexed by symbol array index. */
+    if (a->symbols && a->symbol_count > 0) {
+        covered = calloc(a->symbol_count, sizeof(int));
+        if (covered) {
+            for (size_t i = 0; i < a->symbol_count; i++) {
+                const debag_elf_symbol_t *s = &a->symbols[i];
+                if (!s->is_import || !s->name) continue;
+                for (size_t k = 0; a->relocs && k < a->reloc_count; k++) {
+                    if (a->relocs[k].sym_name &&
+                        name_matches(s->name, a->relocs[k].sym_name)) {
+                        covered[i] = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /* (a) imports with a GOT slot, from the relocation table. */
+    for (size_t k = 0; a->relocs && k < a->reloc_count; k++) {
+        const debag_elf_reloc_t *rl = &a->relocs[k];
+        if (!rl->sym_name || !rl->sym_name[0]) continue;
+        /* Only show meaningful reloc types: JUMP_SLOT (PLT call) and
+         * GLOB_DAT (GOT data). Skip R_X86_64_RELATIVE / _64 / _PC32
+         * etc. which are linker-internal, not imports. */
+        int is_import_reloc = 0;
+#ifdef R_X86_64_JUMP_SLOT
+        if (rl->type == R_X86_64_JUMP_SLOT) is_import_reloc = 1;
+#endif
+#ifdef R_X86_64_GLOB_DAT
+        if (rl->type == R_X86_64_GLOB_DAT) is_import_reloc = 1;
+#endif
+#ifdef R_X86_64_COPY
+        if (rl->type == R_X86_64_COPY) is_import_reloc = 1;
+#endif
+        if (!is_import_reloc) continue;
+        printf("%-4zu 0x%016" PRIx64 "  %-22s %s\n",
+               idx++, rl->vaddr,
+               debag_elf_reloc_type_name(rl->type),
+               rl->sym_name);
+    }
+
+    /* (b) undefined dynamic symbols with no GOT slot. */
     for (size_t i = 0; a->symbols && i < a->symbol_count; i++) {
         const debag_elf_symbol_t *s = &a->symbols[i];
-        if (!s->is_import) continue;
-        printf("%-40.40s %-8s %s\n",
-               s->name ? s->name : "",
-               debag_elf_symbol_type_name(s->type),
-               debag_elf_symbol_bind_name(s->bind));
+        if (!s->is_import || !s->name) continue;
+        if (covered && covered[i]) continue;
+        printf("%-4zu 0x%016" PRIx64 "  %-22s %s\n",
+               idx++, (uint64_t)0, "-",
+               s->name);
     }
+    free(covered);
 }
 
 static void cmd_info_entry(repl_t *r, int argc, char **argv)
@@ -674,7 +772,14 @@ static int pick_capstone(const debag_analysis_t *a, cs_arch *arch, cs_mode *mode
  * Format mirrors rizin's compact `pdi` output:
  *   0xADDR  <hex bytes>  mnemonic operands
  * Bytes are concatenated (no separator), right-justified to a 16-wide
- * column so the asm column lines up. */
+ * column so the asm column lines up.
+ *
+ * PLT annotation: when a `call`/`jmp`/`jcc` instruction targets an
+ * address inside `.plt` / `.plt.got` / `.plt.sec`, the corresponding
+ * GOT slot is resolved by reading the PLT entry's first instruction
+ * (`ff 25 <rel32>` = `jmp [rip+disp32]`), computing GOT_slot = target
+ * + 6 + disp32, and looking that slot up in the reloc table. The
+ * resolved symbol name is appended as `  ; -> 0xGOT (name)`. */
 static void do_disasm(repl_t *r, uint64_t addr, size_t count)
 {
     if (count == 0) count = 16;
@@ -693,6 +798,29 @@ static void do_disasm(repl_t *r, uint64_t addr, size_t count)
     if (cs_open(arch, mode, &handle) != CS_ERR_OK) {
         fprintf(stderr, "debag: cs_open failed\n");
         return;
+    }
+
+    /* Cache the .plt* section ranges so we can recognise call targets
+     * that land in the PLT. NULL range_start means "not present". */
+    uint64_t plt_lo = 0, plt_hi = 0;
+    int have_plt = 0;
+    for (size_t i = 0; r->a->sections && i < r->a->section_count; i++) {
+        const debag_elf_section_t *s = &r->a->sections[i];
+        if (!s->name) continue;
+        if (strcmp(s->name, ".plt") == 0 ||
+            strcmp(s->name, ".plt.got") == 0 ||
+            strcmp(s->name, ".plt.sec") == 0) {
+            if (!have_plt) {
+                plt_lo = s->vaddr;
+                plt_hi = s->vaddr + s->size;
+                have_plt = 1;
+            } else {
+                /* Expand the range to cover all .plt* sections. */
+                if (s->vaddr < plt_lo) plt_lo = s->vaddr;
+                if (s->vaddr + s->size > plt_hi)
+                    plt_hi = s->vaddr + s->size;
+            }
+        }
     }
 
     /* Capstone may need a slightly larger buffer than count * 15 (max
@@ -716,8 +844,45 @@ static void do_disasm(repl_t *r, uint64_t addr, size_t count)
             for (size_t j = 0; j < insns[i].size && hl < sizeof(hex) - 2; j++)
                 hl += (size_t)snprintf(hex + hl, sizeof(hex) - hl,
                                        "%02x", insns[i].bytes[j]);
-            printf("%-16s %s %s\n",
-                   hex, insns[i].mnemonic, insns[i].op_str);
+            printf("%-16s %s %s", hex, insns[i].mnemonic, insns[i].op_str);
+
+            /* PLT call annotation. Only `call`/`jmp`/`jcc` with a
+             * `0x...` immediate operand can target the PLT. */
+            if (have_plt && insns[i].op_str[0] == '0' &&
+                insns[i].op_str[1] == 'x') {
+                char *end = NULL;
+                errno = 0;
+                unsigned long long tgt =
+                    strtoull(insns[i].op_str + 2, &end, 16);
+                if (errno == 0 && end && *end == '\0' &&
+                    tgt >= plt_lo && tgt < plt_hi) {
+                    /* Read the first 6 bytes of the PLT entry: expect
+                     * `ff 25 <rel32>` (jmp [rip+disp32]). The GOT
+                     * slot is tgt + 6 + (int32_t)disp. */
+                    uint8_t plt_entry[6];
+                    read_at(r, (uint64_t)tgt, plt_entry, sizeof(plt_entry));
+                    if (plt_entry[0] == 0xff && plt_entry[1] == 0x25) {
+                        int32_t disp = (int32_t)(
+                            (uint32_t)plt_entry[2] |
+                            ((uint32_t)plt_entry[3] << 8) |
+                            ((uint32_t)plt_entry[4] << 16) |
+                            ((uint32_t)plt_entry[5] << 24));
+                        uint64_t got = (uint64_t)tgt + 6 + (int64_t)disp;
+                        /* Look up the GOT slot in the reloc table. */
+                        for (size_t k = 0;
+                             r->a->relocs && k < r->a->reloc_count;
+                             k++) {
+                            if (r->a->relocs[k].vaddr == got &&
+                                r->a->relocs[k].sym_name) {
+                                printf("  ; -> 0x%016" PRIx64 " (%s)",
+                                       got, r->a->relocs[k].sym_name);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            printf("\n");
         }
         cs_free(insns, n);
     }

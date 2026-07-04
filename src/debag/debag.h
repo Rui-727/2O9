@@ -66,6 +66,21 @@ typedef struct debag_elf_symbol {
     int is_import;          /* 1 if undefined (from .dynsym, imported) */
 } debag_elf_symbol_t;
 
+/* ELF relocation descriptor, populated from the dynamic section's
+ * DT_JMPREL (PLT) / DT_REL / DT_RELA tables. The `vaddr` field is
+ * r_offset, i.e. the GOT slot address. Used by the static-db REPL's
+ * `ii` (to show import GOT addresses) and `s <import_name>` (to seek
+ * to the GOT slot). */
+typedef struct debag_elf_reloc {
+    char *sym_name;        /* resolved name from DT_SYMTAB[sym_idx], or NULL */
+    uint64_t vaddr;        /* r_offset, the GOT slot address */
+    uint64_t sym_value;    /* st_value of the resolved symbol */
+    uint64_t addend;       /* Elf64_Rela.r_addend (0 for Elf64_Rel) */
+    uint32_t type;         /* ELF64_R_TYPE(r_info), e.g. R_X86_64_JUMP_SLOT */
+    int is_rela;           /* 1 if Elf64_Rela, 0 if Elf64_Rel */
+    int is_plt;            /* 1 if from DT_JMPREL, 0 if from DT_REL/DT_RELA */
+} debag_elf_reloc_t;
+
 typedef struct debag_analysis {
     char *binary_path;
     int is_dynamic;         /* 1 if dynamically linked */
@@ -99,6 +114,8 @@ typedef struct debag_analysis {
     size_t segment_count;
     debag_elf_symbol_t   *symbols;   /* .dynsym + .symtab merged, deduped */
     size_t symbol_count;
+    debag_elf_reloc_t   *relocs;     /* DT_JMPREL/DT_REL/DT_RELA, dyn-only */
+    size_t reloc_count;
 } debag_analysis_t;
 
 /* ── Policy ───────────────────────────────────────────────────────── */
@@ -181,5 +198,6 @@ void debag_elf_section_flags_str(uint64_t flags, char *buf, size_t bufsz);
 const char *debag_elf_symbol_type_name(int st_type);
 const char *debag_elf_symbol_bind_name(int st_bind);
 const char *debag_elf_segment_type_name(uint32_t p_type);
+const char *debag_elf_reloc_type_name(uint32_t r_type);
 
 #endif /* TWO9_DEBAG_H */

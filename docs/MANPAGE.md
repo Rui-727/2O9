@@ -163,26 +163,29 @@ Each maps to the equivalent 2O9 command.
   | `is` | List symbols (name, vaddr, size, type, bind) |
   | `ie` | List entry points (`entry0`) |
   | `iz` | List printable strings (>= 4 chars) in `.rodata` / `.data` |
-  | `ii` | List imports (undefined dynamic symbols) |
+  | `ii` | List imports (undefined dynamic symbols, with GOT slot addresses) |
   | `px <addr> <len>` | Hex dump at virtual address |
   | `pxw <addr> <len>` | Hex dump as 32-bit little-endian words |
   | `pxq <addr> <len>` | Hex dump as 64-bit little-endian words |
   | `ps <addr> <len>` | Print string at address |
   | `s <addr>` | Seek to address |
   | `s <section>` | Seek to section start (by name) |
+  | `s <symbol>` | Seek to symbol |
+  | `s <import>` | Seek to import's GOT slot (resolved via the dynamic relocation table) |
   | `s entry0` | Seek to entry point |
   | `sh` | Show seek history stack (oldest to newest, current marked) |
   | `u` | Undo seek (pop seek history; prints `no seek history` if empty) |
   | `U` | Redo seek (pop redo stack; prints `no seek redo history` if empty) |
-  | `pd <n>` | Disassemble `<n>` instructions at current seek |
-  | `pdd <addr> <n>` | Disassemble `<n>` instructions at `<addr>` |
+  | `pd <n>` | Disassemble `<n>` instructions at current seek (annotates PLT calls with `; -> 0xGOT (name)`) |
+  | `pdd <addr> <n>` | Disassemble `<n>` instructions at `<addr>` (PLT-annotated) |
   | `?` | Show command table |
   | `q` / `quit` / `exit` | Quit |
 
-  Addresses accept decimal, `0x`-hex, `entry0`, a section name, or a
-  symbol name. Disassembly (`pd` / `pdd`) requires libcapstone; without
-  it, those two commands print a hint and return. The prompt shows the
-  current seek: `0x0000000000401000> `.
+  Addresses accept decimal, `0x`-hex, `entry0`, a section name, a
+  symbol name, or an import name (resolved to its GOT slot via the
+  dynamic relocation table). Disassembly (`pd` / `pdd`) requires
+  libcapstone; without it, those two commands print a hint and return.
+  The prompt shows the current seek: `0x0000000000401000> `.
 
   Seek history: every successful `s <addr>` (where `addr` differs from
   the current seek) pushes the prior position onto a 32-entry history
@@ -190,6 +193,16 @@ Each maps to the equivalent 2O9 command.
   `u`. Any new `s` clears the redo stack (rizin semantics). `sh` prints
   the stack with `<= current` next to the live position and `(redo)`
   next to positions available via `U`.
+
+  PLT/GOT resolution: `ii` walks the dynamic relocation table
+  (`DT_JMPREL` for PLT, `DT_REL`/`DT_RELA` for the regular GOT) and
+  prints each import with its GOT slot address and relocation type
+  (`R_X86_64_JUMP_SLOT`, `R_X86_64_GLOB_DAT`, `R_X86_64_COPY`). For
+  an import with a GOT slot, `s <import_name>` seeks to that slot, so
+  `px <import_name> 8` reads the 8-byte function pointer. `pd`/`pdd`
+  annotate `call <plt_entry>` instructions with `; -> 0xGOT (name)`
+  by reading the PLT entry's `jmp [rip+disp32]` and looking up the
+  GOT slot in the relocation table.
 
 `209 debag --dynamic-db --` `<cmd>` `[args...]`
 : Drop into an interactive gdb-style live debugger REPL on `<cmd>`.
