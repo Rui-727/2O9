@@ -46,7 +46,7 @@ on `main`:
    installed across signal stops and is hit when the handler returns.
 
 4. **Hardware watchpoints via DR0-DR7** (recommendation #6, ~200 LOC).
-   Commit `<pending>`. Adds `hw_watchpoint_t` (slot, addr, len, rw,
+   Commit `3fbb67c`. Adds `hw_watchpoint_t` (slot, addr, len, rw,
    enabled) and a 4-slot `hw_wps[]` array on `dyn_session_t`, plus a
    `pending_hw_exec` int for execute-watchpoint RF handling. DR7 is
    encoded by `compute_dr7()` with LE+GE set for precise (trap-after
