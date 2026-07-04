@@ -1690,12 +1690,75 @@ static int cmd_ps(dyn_session_t *s, char *args)
     return 0;
 }
 
+/* Return non-zero if `runtime_addr' falls inside any executable section
+ * of the loaded binary (.text, .init, .fini, .plt, etc.). Used by the
+ * `bt' stack-scan fallback to decide whether a stack word looks like a
+ * return address. SHF_EXECINSTR is the ELF flag for executable sections,
+ * so we don't have to enumerate section names. */
+static int addr_in_executable(dyn_session_t *s, uintptr_t runtime_addr)
+{
+    if (!s->analysis || s->analysis->section_count == 0) return 0;
+    uint64_t file_addr = (uint64_t)runtime_addr - s->load_offset;
+    for (size_t i = 0; i < s->analysis->section_count; i++) {
+        const debag_elf_section_t *sec = &s->analysis->sections[i];
+        if (!(sec->flags & SHF_EXECINSTR)) continue;
+        if (sec->size == 0) continue;
+        if (file_addr >= sec->vaddr && file_addr < sec->vaddr + sec->size)
+            return 1;
+    }
+    return 0;
+}
+
+/* Stack-scan backtrace fallback: when the rbp-chain walk terminates
+ * prematurely (frameless function compiled with -fomit-frame-pointer,
+ * or corrupted rbp), scan the stack page above rsp looking for 8-byte
+ * values that point into an executable section. Each such value is a
+ * candidate return address. Caps at 16 candidates to avoid spam.
+ *
+ * Mirrors the heuristic used by gdb's frame-scan fallback (clean-room
+ * reimplementation; gdb is GPL-3.0, 2O9 is GPL-2.0-only). Prints
+ * results as `  [stack_addr]  ret_addr  <nearest_symbol>'. */
+static void bt_stack_scan(dyn_session_t *s)
+{
+    uintptr_t rsp = (uintptr_t)s->regs.rsp;
+    printf("  (stack scan from rsp=0x%016lx, looking for return "
+           "addresses)\n", (unsigned long)rsp);
+    int found = 0;
+    /* Scan 4 KB above rsp, 8 bytes at a time. */
+    for (uintptr_t p = rsp; p < rsp + 4096 && found < 16; p += 8) {
+        uint64_t val = 0;
+        if (mem_read(s, p, &val, 8) < 8) break;
+        if (val == 0) continue;
+        if (!addr_in_executable(s, (uintptr_t)val)) continue;
+        uint64_t off = 0;
+        const char *name = sym_for_addr(s, (uintptr_t)val, &off);
+        printf("  [0x%016lx] 0x%016llx",
+               (unsigned long)p, (unsigned long long)val);
+        print_sym_name(s, name, off, /*always_off=*/0);
+        printf("\n");
+        found++;
+    }
+    if (found == 0)
+        printf("  (no candidate return addresses found in 4 KB stack window)\n");
+}
+
 static int cmd_bt(dyn_session_t *s, char *args)
 {
-    (void)args;
     if (!s->alive) {
         fprintf(stderr, "child is not running\n");
         return -1;
+    }
+    /* `bt scan' forces the stack-scan fallback even if the rbp walk
+     * produced frames. Useful for cross-checking. */
+    int force_scan = 0;
+    if (args && *args) {
+        char *tok = strtok(args, " \t");
+        if (tok && (strcasecmp(tok, "scan") == 0 || strcasecmp(tok, "--scan") == 0))
+            force_scan = 1;
+        else {
+            fprintf(stderr, "usage: bt [scan]\n");
+            return -1;
+        }
     }
     if (refresh_regs(s) < 0) return -1;
 
@@ -1725,8 +1788,15 @@ static int cmd_bt(dyn_session_t *s, char *args)
         level++;
     }
     if (level == 0) {
-        printf("  (no frames walked; rbp = 0x%lx may be invalid - "
+        printf("  (no frames walked; rbp = 0x%016lx may be invalid - "
                "frameless function?)\n", (unsigned long)rbp);
+    }
+    /* Stack-scan fallback: when the rbp walk ended at frame 0 (the
+     * current PC frame only, meaning the walk never produced a single
+     * return address), or the user asked for it explicitly with
+     * `bt scan', scan the stack for candidate return addresses. */
+    if (force_scan || level == 0) {
+        bt_stack_scan(s);
     }
     return 0;
 }
@@ -2091,6 +2161,7 @@ static int cmd_help(dyn_session_t *s, char *args)
     printf("  ps <a> <len>    string at memory\n");
     printf("  bt              backtrace (rbp chain, max %d frames)\n",
            MAX_FRAMES);
+    printf("  bt scan         force stack-scan fallback (frameless funcs)\n");
     printf("  sym <addr>      find nearest symbol at or before address\n");
     printf("  info            process status (incl. hw watchpoint count)\n");
     printf("  handle          list signal dispositions (stop/print/pass)\n");
