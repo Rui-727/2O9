@@ -24,6 +24,7 @@
 
 #include "narinfo.h"
 #include "db.h"
+#include "cJSON.h"
 
 typedef struct binary_cache {
         char *base_url;         /* e.g. https://cache.example.com or s3://my-bucket */
@@ -69,5 +70,32 @@ int binary_cache_fetch(binary_cache_t *bc, const narinfo_t *ni,
 int binary_cache_push(binary_cache_t *bc, const char *store_path,
                       store_db_t *db, const char *signing_key_name,
                       const unsigned char *signing_secret_key);
+
+/* Look up a narinfo by its 32-char base32 hash (the prefix of the
+ * store path). Same semantics as binary_cache_lookup but skips the
+ * store-path parsing. Returns NULL if not found or sig verification
+ * fails. Caller frees with narinfo_free(). */
+narinfo_t *binary_cache_lookup_by_hash(binary_cache_t *bc, const char *hash);
+
+/* Download + decompress the NAR referenced by a narinfo. Writes a
+ * malloc'd buffer of decompressed NAR bytes to *out_buf and the byte
+ * count to *out_len. Caller frees *out_buf. Returns 0 on success,
+ * -1 on error. */
+int binary_cache_download_nar(binary_cache_t *bc, const narinfo_t *ni,
+                              char **out_buf, size_t *out_len);
+
+/* Fetch the cache's index.json. Returns a cJSON object (caller frees
+ * with cJSON_Delete) or NULL if the index doesn't exist, fetch
+ * failed, or parse failed. The returned object has the shape:
+ *   { "version": 1, "updated_at": <ts>, "items": [ ... ] } */
+cJSON *binary_cache_fetch_index(binary_cache_t *bc);
+
+/* Append an item to the cache's index.json and re-upload. The item
+ * is a cJSON object the caller built. The caller retains ownership
+ * of item_json (this function copies it).
+ * Returns 0 on success, -1 on error. Last-write-wins on race: two
+ * publishers pushing at the same time may clobber each other's
+ * index entries; the narinfo+nar files themselves are not affected. */
+int binary_cache_push_index_item(binary_cache_t *bc, const cJSON *item_json);
 
 #endif /* TWO9_BINARY_CACHE_H */

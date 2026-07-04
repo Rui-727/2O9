@@ -193,10 +193,19 @@ int b64_decode(const char *str, unsigned char *out, size_t *out_len)
 char *signing_sign(const char *fingerprint, const unsigned char *secret_key)
 {
         if (!fingerprint || !secret_key) { errno = EINVAL; return NULL; }
+        /* secret_key is the 32-byte seed (TWO9_ED25519_SECKEY_LEN).
+         * libsodium's crypto_sign_detached expects the full 64-byte
+         * secret key (seed || public key). Derive it on the fly via
+         * crypto_sign_seed_keypair, which is cheap and avoids storing
+         * the public half in the keyfile. */
+        unsigned char pub[crypto_sign_PUBLICKEYBYTES];
+        unsigned char sk64[crypto_sign_SECRETKEYBYTES];
+        if (crypto_sign_seed_keypair(pub, sk64, secret_key) != 0)
+                return NULL;
         unsigned char sig[TWO9_ED25519_SIG_LEN];
         if (crypto_sign_detached(sig, NULL,
                                  (const unsigned char *)fingerprint,
-                                 strlen(fingerprint), secret_key) != 0)
+                                 strlen(fingerprint), sk64) != 0)
                 return NULL;
         return b64_encode(sig, sizeof(sig));
 }
@@ -217,7 +226,22 @@ int signing_keygen(unsigned char *public_key, unsigned char *secret_key)
 {
         if (!public_key || !secret_key) { errno = EINVAL; return -1; }
         if (sodium_init() < 0) return -1;
-        return crypto_sign_keypair(public_key, secret_key) == 0 ? 0 : -1;
+        /* Generate a 32-byte seed, then derive pub + full 64-byte sk
+         * via crypto_sign_seed_keypair. The on-disk format stores only
+         * the 32-byte seed as the secret key (matching Nix's format);
+         * the public half is re-derived on the fly when signing. */
+        unsigned char seed[crypto_sign_SEEDBYTES];
+        unsigned char sk64[crypto_sign_SECRETKEYBYTES];
+        randombytes_buf(seed, sizeof(seed));
+        if (crypto_sign_seed_keypair(public_key, sk64, seed) != 0)
+                return -1;
+        /* The on-disk format stores the 32-byte seed as the secret key.
+         * crypto_sign_SEEDBYTES is 32 by definition of Ed25519; the
+         * _Static_assert documents the assumption. */
+        _Static_assert(crypto_sign_SEEDBYTES == 32,
+                       "expected 32-byte Ed25519 seed");
+        memcpy(secret_key, seed, 32);
+        return 0;
 }
 
 #else /* OpenSSL Ed25519 fallback */
@@ -372,9 +396,13 @@ int signing_load_keyfile(const char *path, char **out_name,
                     publen != TWO9_ED25519_PUBKEY_LEN)
                         return -1;
         } else {
-                /* Derive public from secret. */
+                /* Derive public from secret. The on-disk format stores
+                 * the 32-byte seed; libsodium's crypto_sign_seed_keypair
+                 * takes a 32-byte seed and produces both pub and the
+                 * full 64-byte sk. We only need the pub here. */
 #ifdef HAVE_SODIUM
-                if (crypto_sign_ed25519_sk_to_pk(out_pub, out_sec) != 0)
+                unsigned char sk64[crypto_sign_SECRETKEYBYTES];
+                if (crypto_sign_seed_keypair(out_pub, sk64, out_sec) != 0)
                         return -1;
 #else
                 EVP_PKEY *pkey = EVP_PKEY_new_raw_private_key(

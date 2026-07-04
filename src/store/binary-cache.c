@@ -36,6 +36,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <time.h>
 
 #include <curl/curl.h>
 #include <archive.h>
@@ -343,13 +344,20 @@ narinfo_t *binary_cache_lookup(binary_cache_t *bc, const char *store_path)
 
         char *hash = path_hash_copy(store_path);
         if (!hash) return NULL;
+        narinfo_t *ni = binary_cache_lookup_by_hash(bc, hash);
+        free(hash);
+        return ni;
+}
+
+narinfo_t *binary_cache_lookup_by_hash(binary_cache_t *bc, const char *hash)
+{
+        if (!bc || !hash) { errno = EINVAL; return NULL; }
 
         /* <base>/<hash>.narinfo */
         size_t slen = strlen(hash) + strlen(".narinfo") + 1;
         char *suffix = malloc(slen);
-        if (!suffix) { free(hash); return NULL; }
+        if (!suffix) return NULL;
         snprintf(suffix, slen, "%s.narinfo", hash);
-        free(hash);
 
         char *url = url_join(bc->base_url, suffix);
         free(suffix);
@@ -658,5 +666,157 @@ int binary_cache_push(binary_cache_t *bc, const char *store_path,
                 return -1;
         }
 
+        return 0;
+}
+
+/* ── Phase 4: cache index (index.json) ──────────────────────────────
+ *
+ * The cache index is a small JSON file at <base>/index.json listing
+ * everything pushed to this cache. Format:
+ *
+ *   {
+ *     "version": 1,
+ *     "updated_at": <unix-ts>,
+ *     "items": [
+ *       { "hash": "...", "name": "...", "type": "share",
+ *         "nar_size": <n>, "nar_hash": "sha256:...",
+ *         "pushed_at": <ts>, "signed_by": "<key-name>" }
+ *     ]
+ *   }
+ *
+ * The cache server just serves files. 2O9 maintains the index by
+ * fetching the current one, appending the new item, and re-uploading.
+ * Last-write-wins on race.
+ */
+
+cJSON *binary_cache_fetch_index(binary_cache_t *bc)
+{
+        if (!bc) { errno = EINVAL; return NULL; }
+
+        char *url = url_join(bc->base_url, "index.json");
+        if (!url) return NULL;
+
+        struct membuf buf;
+        membuf_init(&buf);
+        int rc = cache_get(url, &buf);
+        free(url);
+
+        if (rc != 0) { membuf_free(&buf); return NULL; }
+        if (!buf.data || buf.len == 0) { membuf_free(&buf); return NULL; }
+
+        cJSON *root = cJSON_Parse(buf.data);
+        membuf_free(&buf);
+        return root;
+}
+
+int binary_cache_push_index_item(binary_cache_t *bc, const cJSON *item_json)
+{
+        if (!bc || !item_json) { errno = EINVAL; return -1; }
+
+        /* Fetch the current index (may be NULL if not yet created). */
+        cJSON *root = binary_cache_fetch_index(bc);
+        cJSON *items = NULL;
+        if (root) {
+                items = cJSON_GetObjectItemCaseSensitive(root, "items");
+        }
+        if (!items || !cJSON_IsArray(items)) {
+                /* No existing index, or items is missing/wrong type.
+                 * Build a fresh one. */
+                if (root) cJSON_Delete(root);
+                root = cJSON_CreateObject();
+                if (!root) return -1;
+                cJSON_AddNumberToObject(root, "version", 1);
+                items = cJSON_CreateArray();
+                if (!items) { cJSON_Delete(root); return -1; }
+                cJSON_AddItemToObject(root, "items", items);
+        }
+
+        /* Append a copy of the item. */
+        cJSON *item_copy = cJSON_Duplicate(item_json, 1);
+        if (!item_copy) { cJSON_Delete(root); return -1; }
+        cJSON_AddItemToArray(items, item_copy);
+
+        /* Update the timestamp. */
+        cJSON *ts = cJSON_GetObjectItemCaseSensitive(root, "updated_at");
+        if (ts) {
+                cJSON_ReplaceItemInObject(root, "updated_at",
+                                cJSON_CreateNumber((double)time(NULL)));
+        } else {
+                cJSON_AddNumberToObject(root, "updated_at", (double)time(NULL));
+        }
+
+        /* Serialise. */
+        char *text = cJSON_Print(root);
+        cJSON_Delete(root);
+        if (!text) return -1;
+
+        /* Write to a temp file. */
+        char tmp[] = "/tmp/2O9-idx-XXXXXX";
+        int fd = mkstemp(tmp);
+        if (fd < 0) { free(text); return -1; }
+        FILE *f = fdopen(fd, "w");
+        if (!f) { close(fd); unlink(tmp); free(text); return -1; }
+        fputs(text, f);
+        fclose(f);
+        free(text);
+
+        /* Upload to <base>/index.json. */
+        char *url = url_join(bc->base_url, "index.json");
+        int rc = cache_put_file(url, tmp);
+        free(url);
+        unlink(tmp);
+        return rc;
+}
+
+/* Download + decompress the NAR referenced by a narinfo into a
+ * malloc'd buffer. The caller frees *out_buf. */
+int binary_cache_download_nar(binary_cache_t *bc, const narinfo_t *ni,
+                              char **out_buf, size_t *out_len)
+{
+        if (!bc || !ni || !out_buf || !out_len || !ni->url) {
+                errno = EINVAL; return -1;
+        }
+        *out_buf = NULL;
+        *out_len = 0;
+
+        char *nar_url = url_join(bc->base_url, ni->url);
+        if (!nar_url) return -1;
+
+        struct membuf buf;
+        membuf_init(&buf);
+        int rc = cache_get(nar_url, &buf);
+        free(nar_url);
+        if (rc != 0) { membuf_free(&buf); return -1; }
+        if (!buf.data || buf.len == 0) { membuf_free(&buf); return -1; }
+
+        /* Decompress to a temp file, then read back into a buffer. */
+        char tmp_nar[] = "/tmp/2O9-nar-XXXXXX";
+        int fd = mkstemp(tmp_nar);
+        if (fd < 0) { membuf_free(&buf); return -1; }
+        close(fd);
+        unlink(tmp_nar);  /* let decompress_to_file create it */
+
+        if (decompress_to_file(tmp_nar, buf.data, buf.len) != 0) {
+                membuf_free(&buf);
+                unlink(tmp_nar);
+                return -1;
+        }
+        membuf_free(&buf);
+
+        FILE *f = fopen(tmp_nar, "rb");
+        unlink(tmp_nar);
+        if (!f) return -1;
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+        long sz = ftell(f);
+        if (sz < 0) { fclose(f); return -1; }
+        rewind(f);
+        char *data = malloc((size_t)sz);
+        if (!data) { fclose(f); return -1; }
+        size_t nread = fread(data, 1, (size_t)sz, f);
+        fclose(f);
+        if (nread != (size_t)sz) { free(data); return -1; }
+
+        *out_buf = data;
+        *out_len = (size_t)sz;
         return 0;
 }
