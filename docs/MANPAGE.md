@@ -89,9 +89,15 @@ Each maps to the equivalent 2O9 command.
 `209 news`
 : Fetch and display the latest Arch Linux news from the RSS feed.
 
-`209 init` [`--system`]
-: Create a starter `2O9.nix` in `~/.config/2O9/` (or `/etc/2O9/` with
-  `--system`). Refuses to overwrite an existing file.
+`209 init` [`--system`|`--all`]
+: Create starter configs in `/nix/config/`. With no flag, creates
+  `/nix/config/<user>.nix` and `/nix/config/<user>.extra.nix` for the
+  current user, chowned to that user. With `--system`, creates
+  `/nix/config/2O9.nix` and `/nix/config/extra.nix` as root. With
+  `--all`, scans `/etc/passwd` for every user with uid >= 1000 and a
+  `/home/*` home dir (excluding root and nobody) and creates a config
+  pair for each, chowned to each user. Refuses to overwrite existing
+  files.
 
 ### SOV patterns (Subject-Object-Verb)
 
@@ -376,21 +382,22 @@ Each maps to the equivalent 2O9 command.
 
 `209 keygen`
 : Generate a new Ed25519 keypair for signing narinfos. Prints the
-  public key (to put in `extra.nix` on subscriber machines) and a
-  `KeyName:PublicKey:SecretKey` triple (to put on the publishing
-  machine).
+  public key (to put in `extra.nix` under `subs.<name>.PublicKeys` on
+  subscriber machines) and a `KeyName:PublicKey:SecretKey` triple (to
+  put on the publishing machine).
 
 `209 cache push` `<store-path>`
 : Upload a store path and its full closure (computed from the refs
-  graph) to all configured substituters. For each path: compute the
-  NAR hash, build a narinfo, sign it with the configured Ed25519 key,
-  upload both. Idempotent.
+  graph) to every configured sub that has a `SigningKey`. Each sub
+  signs with its own key. For each path: compute the NAR hash, build a
+  narinfo, sign it with the sub's Ed25519 key, upload both. Idempotent.
 
 `209 cache pull` `<store-path>`
-: Explicitly fetch a store path from configured substituters. Normally
-  not needed: the install path consults substituters automatically
-  before falling through to the Arch mirror. Useful for debugging or
-  for pre-populating a machine.
+: Explicitly fetch a store path from configured subs. Tries each sub
+  in config order, then each URL within the sub. Normally not needed:
+  the install path consults subs automatically before falling through
+  to the Arch mirror. Useful for debugging or for pre-populating a
+  machine.
 
 ### Multi-subject
 
@@ -408,38 +415,45 @@ Each maps to the equivalent 2O9 command.
 
 ## CONFIGURATION
 
-Two config files, different jobs.
+Two config files per scope, both Nix. All config lives under
+`/nix/config/`.
 
-`2O9.nix` is the declarative config. Nix syntax. Says what your system
-should look like. Two scopes:
+`<scope>.nix` is the declarative config. Nix syntax. Says what your
+system or user should look like. Two scopes:
 
-- User: `~/.config/2O9/home.nix`
-- System: `/etc/2O9/2O9.nix`
+- User: `/nix/config/<user>.nix`
+- System: `/nix/config/2O9.nix`
 
 Both are evaluated and merged per `DESIGN.md` section 7: global wins on
 conflict, packages concatenate. See [`docs/CONFIG.md`](./CONFIG.md) for
 the full schema reference.
 
-`extra.nix` is the imperative side config. Also Nix syntax (per
-locked decision #7: "One declarative config format: Nix"). Holds
-stuff that doesn't belong in the declarative config: substituter URLs,
-signing keys, AUR build flags, chroot settings. Lives at
-`~/.config/2O9/extra.nix` (or `/etc/2O9/extra.nix` for system-wide).
-See [`docs/CONFIG.md`](./CONFIG.md) for the schema.
+`<scope>.extra.nix` is the imperative side config. Also Nix syntax
+(per locked decision #7: "One declarative config format: Nix").
+Holds stuff that doesn't belong in the declarative config: binary-cache
+subs, signing keys, AUR build flags, chroot settings. Lives at
+`/nix/config/<user>.extra.nix` (or `/nix/config/extra.nix` for
+system-wide). See [`docs/CONFIG.md`](./CONFIG.md) for the schema.
+
+If 2O9 detects a pre-v2 config layout (`~/.config/2O9/`, `/etc/2O9/`),
+it prints the exact `mv` commands to migrate and exits 1. No
+auto-migration. See [`docs/MIGRATION.md`](./MIGRATION.md).
 
 ## FILES
 
-`/etc/2O9/2O9.nix`
-: System-wide declarative config.
+`/nix/config/2O9.nix`
+: System-wide declarative config (root:root 0644).
 
-`/etc/2O9/extra.nix`
-: System-wide imperative side config (substituters, signing keys).
+`/nix/config/extra.nix`
+: System-wide imperative side config (root:root 0644). Holds binary
+  cache subs, signing keys, build flags.
 
-`~/.config/2O9/home.nix`
-: Per-user declarative config (overlaid on the system config).
+`/nix/config/<user>.nix`
+: Per-user declarative config (`<user>:<user>` 0644). Overlaid on the
+  system config.
 
-`~/.config/2O9/extra.nix`
-: Per-user imperative side config.
+`/nix/config/<user>.extra.nix`
+: Per-user imperative side config (`<user>:<user>` 0644).
 
 `/var/lib/2O9/`
 : System generation DB. One subdirectory per generation, each
@@ -472,12 +486,19 @@ See [`docs/CONFIG.md`](./CONFIG.md) for the schema.
 ## ENVIRONMENT
 
 `HOME`
-: Determines the user config and state directories.
+: Determines the user state directory (generation DB at
+  `~/.local/state/2O9`).
 
 `SUDO_USER`
-: When 2O9 runs as root via sudo, this is used to resolve the original
-  user's home directory. Ensures that `209 apply` (running as root)
-  reads the same sync DB that `209 sync` (running as the user) wrote.
+: When 2O9 runs as root via sudo, this is used to resolve the
+  original user's name. Ensures that `209 apply` (running as root)
+  reads `/nix/config/<user>.nix` for the original user, not root's, and
+  reads the same generation DB that `209 sync` (running as the user)
+  wrote.
+
+`TWO9_CONFIG_DIR`
+: Overrides the config directory (default `/nix/config`). Used by the
+  test suite to isolate configs into a temp directory.
 
 `TWO09_DEBUG`
 : If set, prints extra debug output during install, apply, and store

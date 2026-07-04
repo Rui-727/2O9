@@ -45,11 +45,14 @@ and 2O9 will fall back to OpenSSL Ed25519, but the other deps are required.
 ## 2. First config
 
 Run `209 init` to create a starter config. It writes to
-`~/.config/2O9/2O9.nix` and refuses to clobber an existing file.
+`/nix/config/<user>.nix` and `/nix/config/<user>.extra.nix` and refuses
+to clobber an existing file. (The directory `/nix/config` is created if
+missing, root:root 0755.)
 
 ```sh
 $ 209 init
-created: /home/you/.config/2O9/2O9.nix
+created: /nix/config/you.nix
+created: /nix/config/you.extra.nix
 ```
 
 Open the file in your editor. The starter has `vim`, `curl`, `git`, `htop`
@@ -124,7 +127,7 @@ You only need to sync when you want to see new packages or new versions.
 
 Now make the system match the config. `209 apply` needs root because it
 writes to `/nix/store/` and `/var/lib/2O9/`. Run it via `sudo`. 2O9
-respects `SUDO_USER`, so it will still read your `~/.config/2O9/2O9.nix`
+respects `SUDO_USER`, so it will still read your `/nix/config/<user>.nix`
 and write to your `~/.local/state/2O9/` generation DB, not root's.
 
 ```sh
@@ -348,20 +351,22 @@ On machine A (the publisher), generate an Ed25519 keypair:
 
 ```sh
 $ 209 keygen
-public key (add to extra.nix substituters.PublicKey on subscribers):
+public key (add to extra.nix subs.<name>.PublicKeys on subscribers):
   r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
 
 cache.example.com-1:r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=:TakyhFMCwVcOjdPUJurMrgEQeyuuGukyL+/wWYoCFQ8=
 ```
 
 Save the second line (the `name:public:secret` triple) to a file with
-mode 0600. Add to `/etc/2O9/extra.nix`:
+mode 0600. Add to `/nix/config/extra.nix`:
 
 ```nix
-substituters = {
-  URLs = [ "https://cache.example.com" ];
-  SigningKey = "/etc/2O9/secret-key";
-  KeyName = "cache.example.com-1";
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" ];
+    SigningKey = "/etc/2O9/secret-key";
+    KeyName = "cache.example.com-1";
+  };
 };
 ```
 
@@ -377,19 +382,21 @@ Push a path and its closure:
 ```
 
 On machine B (the subscriber), add the public key to its
-`/etc/2O9/extra.nix`:
+`/nix/config/extra.nix`:
 
 ```nix
-substituters = {
-  URLs = [ "https://cache.example.com" ];
-  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
-  AllowUnsigned = false;
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" ];
+    PublicKeys = [ "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=" ];
+    AllowUnsigned = false;
+  };
 };
 ```
 
 Now when machine B runs `209 -S cpufetch`, 2O9 first asks
 `https://cache.example.com/0v4v8....narinfo`. If found and the signature
-verifies against the configured `PublicKey`, it downloads the NAR,
+verifies against any of the listed `PublicKeys`, it downloads the NAR,
 decompresses it, streams it into the store path, and never touches the
 Arch mirror. If the cache does not have the path, or the signature fails,
 2O9 falls through to the mirror as if no cache were configured.

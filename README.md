@@ -49,7 +49,7 @@ from the mirror.
 | | Form | Where |
 |---|---|---|
 | Binary / command | `209` (numeric) | what you type |
-| Project / branding | `2O9` (letter O) | docs, repo name, on-disk paths (`/etc/2O9/`, `/var/lib/2O9/`) |
+| Project / branding | `2O9` (letter O) | docs, repo name, on-disk paths (`/nix/config/`, `/var/lib/2O9/`) |
 | Merged internal library | `lib2O9` | static `lib2O9.a`, modified libalpm plus own C Nix evaluator |
 
 ## Build
@@ -93,7 +93,9 @@ make test-nix-eval  # just the Nix evaluator unit tests (49 tests)
 First, create a config:
 
 ```sh
-209 init                    # creates ~/.config/2O9/home.nix
+209 init                    # creates /nix/config/<user>.nix + <user>.extra.nix
+sudo 209 init --system     # creates /nix/config/2O9.nix + extra.nix (system-wide)
+sudo 209 init --all        # creates configs for every detected user in /etc/passwd
 ```
 
 Edit the config to list what you want, then apply it:
@@ -146,7 +148,7 @@ Binary cache (share packages between machines):
 209 keygen                  # generate an Ed25519 keypair, print to stdout
 209 cache push /nix/store/<hash>-neovim-0.10.0   # upload a path + closure
 209 cache pull /nix/store/<hash>-neovim-0.10.0   # explicitly fetch from cache
-# normal install path also consults substituters automatically
+# normal install path also consults subs automatically
 ```
 
 Trakker (sandbox, command resolved via `$PATH`):
@@ -198,18 +200,26 @@ sits beside all of it as an on-demand sandbox. The full diagram is in
 ## Configuration
 
 There is no `config.toml`, no `paru.conf`, no `pacman.conf`. One file
-format for everything: Nix. Two scopes:
+format for everything: Nix. All config lives under `/nix/config/`:
 
-| Scope | Config file | Profile symlink | Generation DB |
-|---|---|---|---|
-| **Global (system)** | `/etc/2O9/2O9.nix` | `/nix/var/nix/profiles/per-user/2O9-system` | `/var/lib/2O9` |
-| **Per-user** | `~/.config/2O9/home.nix` | `~/.local/state/2O9/profile` | `~/.local/state/2O9` |
+| File | Owner | Scope |
+|---|---|---|
+| `/nix/config/2O9.nix` | root:root | system-wide declarative (packages, services, repos) |
+| `/nix/config/extra.nix` | root:root | system-wide runtime (bin paths, subs, chroot) |
+| `/nix/config/<user>.nix` | `<user>:<user>` 0644 | per-user declarative |
+| `/nix/config/<user>.extra.nix` | `<user>:<user>` 0644 | per-user runtime |
+
+`<user>` is the Unix username (from `getpwuid(getuid())`, or `SUDO_USER`
+when running under sudo). When running as root, `209 init --all`
+scans `/etc/passwd` for every user with uid >= 1000 and a `/home/*`
+home dir (excluding root and nobody) and creates a config pair for each,
+chowned to that user.
 
 Merge order, lowest to highest precedence:
 
 1. Built-in defaults (compiled into `209`)
-2. `~/.config/2O9/home.nix`
-3. `/etc/2O9/2O9.nix`
+2. `/nix/config/<user>.nix`
+3. `/nix/config/2O9.nix`
 4. CLI flags
 
 `~/.local/bin` is in `$PATH`. That is the visibility mechanism: binaries
@@ -217,11 +227,15 @@ from the store are symlinked there. Libraries go to `~/.local/lib/`.
 Config files stay at their real paths: `/etc/` is `/etc/`, never
 `~/.local/etc/`.
 
-There is also an optional Nix file at `~/.config/2O9/extra.nix` for
-stuff that doesn't belong in the declarative config: substituter URLs,
-signing keys, AUR build flags. Per locked decision #7 in DESIGN.md
-("One declarative config format: Nix"), there is no INI file. See
-[`docs/CONFIG.md`](./docs/CONFIG.md) for the full schema.
+The `extra.nix` file is for stuff that doesn't belong in the declarative
+config: substituter URLs, signing keys, AUR build flags. Per locked
+decision #7 in DESIGN.md ("One declarative config format: Nix"), there
+is no INI file. See [`docs/CONFIG.md`](./docs/CONFIG.md) for the full
+schema.
+
+If 2O9 detects a pre-v2 config layout (`~/.config/2O9/`, `/etc/2O9/`),
+it prints the exact `mv` commands to migrate and exits 1. No
+auto-migration. See [`docs/MIGRATION.md`](./docs/MIGRATION.md).
 
 Services are managed with `systemctl enable`/`disable`. There is no
 2O9 service manager. After `209 apply` changes which systemd units are
@@ -383,22 +397,33 @@ regular file, and hardlinks identical files into
 `/nix/store/.links/<sha256>`. Two packages shipping the same 50 MB
 locale file cost 50 MB on disk instead of 100 MB.
 
-**Binary cache substitution**. Configure one or more cache URLs in
-`~/.config/2O9/extra.nix`:
+**Binary cache substitution**. Configure one or more named subs in
+`/nix/config/<user>.extra.nix` (or `/nix/config/extra.nix` for
+system-wide):
 
 ```nix
-substituters = {
-  URLs = [ "https://cache.example.com" ];
-  PublicKey = "<from 209 keygen>";
-  AllowUnsigned = false;
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" "s3://backup-bucket" ];
+    PublicKeys = [ "<from 209 keygen>" ];
+    AllowUnsigned = false;
+    SigningKey = "/etc/2O9/personal-secret-key";
+    KeyName = "personal-1";
+  };
+  friend = {
+    URLs = [ "https://friend.example.org/cache" ];
+    PublicKeys = [ "<friend's pubkey>" ];
+    AllowUnsigned = false;
+  };
 };
 ```
 
-On install, 2O9 first checks each cache for `<hash>.narinfo`. If found
-and the signature verifies, it downloads the NAR, decompresses it, and
-streams it into the store path. Falls through to the Arch mirror only
-if no cache has it. Use `209 cache push <path>` to upload a path and
-its closure to all configured caches.
+A narinfo is accepted if any of the listed `PublicKeys` verifies its
+signature. `209 cache push` pushes to every sub that has a `SigningKey`,
+signed with that sub's own key. `209 cache pull` (and install-time
+substitution) pulls from every sub in config order. The old flat
+`substituters` block still parses as a single sub named `legacy` with a
+`PublicKey` (singular) field; a deprecation warning is printed.
 
 ## Documentation
 
@@ -442,7 +467,8 @@ What works and what's left.
   lambdas (curried and formal), imports, fixed-point recursion for
   `{ config, ... }`, `inherit`, all 9 binary operator precedence
   levels, 19 builtins. 49/49 tests pass. `209 apply` evaluates
-  `2O9.nix`, merges `home.nix` + `2O9.nix`, reconciles, commits.
+  `/nix/config/<user>.nix`, merges it with `/nix/config/2O9.nix`,
+  reconciles, commits.
 
 - **Phase 4 (Trakker + Debag): DONE.** ptrace sandbox with all four
   restriction flags, JSON trace output. Debag hybrid sandbox with

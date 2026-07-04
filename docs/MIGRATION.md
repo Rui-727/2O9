@@ -185,7 +185,7 @@ declarativeness for Arch's package set and simplicity.
 | `nixos-rebuild switch` | `sudo 209 apply` (then reboot for full effect) |
 | `nixos-rebuild rollback` | `sudo 209 <N> rollback` (then reboot) |
 | `nixos-rebuild list-generations` | `209 generations` |
-| `/etc/nixos/configuration.nix` | `~/.config/2O9/home.nix` + `/etc/2O9/2O9.nix` |
+| `/etc/nixos/configuration.nix` | `/nix/config/<user>.nix` + `/nix/config/2O9.nix` |
 | `nix.gc.automatic` | cron `209 gc` |
 | `nix.optimise.automatic` | cron `209 optimise` |
 | `services.openssh.enable = true;` | `services.sshd.enable = true;` |
@@ -202,3 +202,66 @@ signing. They will fight. Pick one. If you want both package sets
 (NixOS's and Arch's), run NixOS as the host and use a container or VM
 for Arch, or vice versa. 2O9 is designed for Arch users who want
 generations, not for NixOS users who want Arch packages.
+
+## From earlier 2O9 (pre-v2 config layout)
+
+Before the v2 config relocation, 2O9 stored config under
+`~/.config/2O9/` (per-user) and `/etc/2O9/` (system-wide). The
+filenames were `home.nix`, `2O9.nix`, `extra.nix`, and `2O9.conf` (the
+very old INI form). All of these moved to `/nix/config/` in the v2
+layout.
+
+| Old path | New path |
+|---|---|
+| `/etc/2O9/2O9.nix` | `/nix/config/2O9.nix` |
+| `/etc/2O9/extra.nix` | `/nix/config/extra.nix` |
+| `~/.config/2O9/home.nix` | `/nix/config/<user>.nix` |
+| `~/.config/2O9/extra.nix` | `/nix/config/<user>.extra.nix` |
+| `/etc/2O9/2O9.conf` (old INI) | removed; rewrite as Nix in `/nix/config/extra.nix` |
+| `~/.config/2O9/`, `/etc/2O9/` (the dirs) | removed after moving the files out |
+
+There is no auto-migration. When 2O9 detects any of the old paths, it
+prints the exact `mv` commands and exits 1 without doing anything else:
+
+```
+209: old config layout detected. Move your config:
+  sudo mkdir -p /nix/config
+  sudo mv /etc/2O9/2O9.nix /nix/config/2O9.nix
+  sudo mv /etc/2O9/extra.nix /nix/config/extra.nix
+  mv ~/.config/2O9/home.nix /nix/config/$USER.nix
+  mv ~/.config/2O9/extra.nix /nix/config/$USER.extra.nix
+  rm -rf ~/.config/2O9 /etc/2O9
+Then re-run 209 apply.
+```
+
+After moving the files, also rename the `substituters` block in your
+`extra.nix` to `subs.legacy` and convert `PublicKey` (a string) to
+`PublicKeys` (a list of strings). The old form still parses (as a
+single sub named `legacy`) with a deprecation warning, but the new form
+is the going-forward shape:
+
+```nix
+# old
+substituters = {
+  URLs = [ "https://cache.example.com" ];
+  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
+  SigningKey = "/etc/2O9/secret-key";
+  KeyName = "cache.example.com-1";
+  AllowUnsigned = false;
+};
+
+# new
+subs = {
+  legacy = {
+    URLs = [ "https://cache.example.com" ];
+    PublicKeys = [ "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=" ];
+    SigningKey = "/etc/2O9/secret-key";
+    KeyName = "cache.example.com-1";
+    AllowUnsigned = false;
+  };
+};
+```
+
+The new `subs` form also supports multiple named subs and multiple
+`PublicKeys` per sub. See [`docs/CONFIG.md`](./CONFIG.md) for the full
+schema.

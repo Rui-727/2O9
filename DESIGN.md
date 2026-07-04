@@ -23,7 +23,7 @@ That is the entire rollback story.
 
 > Command vs name. The binary you type is `209` (numeric). The project name
 > 2O9 (with the letter O) is the stylized form, used for branding, docs, and
-> on-disk paths: `/etc/2O9/`, `/var/lib/2O9/`, `~/.config/2O9/`.
+> on-disk paths: `/nix/config/`, `/var/lib/2O9/`.
 
 ## 2. Locked decisions
 
@@ -54,15 +54,21 @@ These were settled up front and constrain the design:
    system state to take full effect. This is the explicit tradeoff of not
    having boot-time rollback machinery: simpler code, but manual reboot.
 6. Two config scopes: global and per-user. Global wins on conflict. Both
-   are first-class, but when `2O9.nix` and `home.nix` conflict on the same
-   setting, `/etc/2O9/2O9.nix` takes precedence. The sysadmin's declaration is
-   authoritative.
+   are first-class, but when `2O9.nix` and `<user>.nix` conflict on the same
+   setting, `/nix/config/2O9.nix` takes precedence. The sysadmin's declaration is
+   authoritative. All config lives under `/nix/config/` (root:root 0755).
+   Multi-user is supported: `209 init --all` scans `/etc/passwd` for every
+   user with uid >= 1000 and a `/home/*` home dir (excluding root and nobody)
+   and creates a `<user>.nix` + `<user>.extra.nix` pair for each, chowned to
+   that user. The old `home.nix` filename is renamed to `<user>.nix` where
+   `<user>` is the Unix username.
 7. One declarative config format: Nix. Everything that says what your
-   system should look like lives in `2O9.nix`. No `config.toml`, no
+   system should look like lives in `<scope>.nix`. No `config.toml`, no
    `pacman.conf`, no `paru.conf`. One file, one format, one source of truth.
-   (There is also a small Nix file `extra.nix` for imperative side config:
-   substituter URLs, signing keys, AUR build flags. Both files are Nix,
-   evaluated by the same C Nix evaluator. See `docs/CONFIG.md`.)
+   (There is also a small Nix file `<scope>.extra.nix` for imperative side
+   config: named binary-cache subs, signing keys, AUR build flags. Both
+   files are Nix, evaluated by the same C Nix evaluator. See
+   `docs/CONFIG.md`.)
 8. Own C Nix evaluator. The Nix expression evaluator is written from
    scratch in C as part of lib2O9. No vendored C++ nix source. The evaluator
    supports the function form (`{ config, pkgs, ... }: { ... }`) with
@@ -144,7 +150,7 @@ across reinstalls.
 The user's shell includes `~/.local/bin` in `$PATH`. That's it. No system-wide
 `/usr/bin` symlinks. Every user gets their own symlink farm in their own
 `~/.local/`. Global packages from `2O9.nix` and per-user packages from
-`home.nix` all land in the same place, the user's `~/.local/`.
+`<user>.nix` all land in the same place, the user's `~/.local/`.
 
 `/etc` files are symlinked at their real paths, `/etc/foo` → store. Programs
 expect `/etc/foo` to be at `/etc/foo`, and that's where they find it. Only
@@ -281,13 +287,14 @@ files visible at their conventional paths.
   locale file cost 50 MB on disk instead of 100 MB. Can also be invoked
   via `209 gc --optimise`.
 
-- Binary cache substitution. Configure one or more cache URLs in
-  `extra.nix` under `substituters.URLs`. On install, 2O9 first checks
-  each cache for `<hash>.narinfo`. If found and the Ed25519 signature
-  verifies, it downloads the NAR, decompresses it, and streams it into
-  the store path. Falls through to the Arch mirror only if no cache has
-  it. `209 cache push <path>` uploads a path and its closure to all
-  configured caches.
+- Binary cache substitution. Configure one or more named subs in
+  `extra.nix` under `subs.<name>.URLs`. On install, 2O9 first checks
+  each sub's URLs for `<hash>.narinfo`. If found and the Ed25519
+  signature verifies against any of the sub's `PublicKeys`, it
+  downloads the NAR, decompresses it, and streams it into the store
+  path. Falls through to the Arch mirror only if no sub has it.
+  `209 cache push <path>` uploads a path and its closure to every sub
+  that has a `SigningKey`, signed with each sub's own key.
 
 - No Nix toolchain dependency. 2O9 has its own NAR serialiser
   (`src/store/nar.c`), its own refs graph (`src/store/db.c`), its own
@@ -373,7 +380,7 @@ up the optimization automatically. Packages that hardcode their own flags don't
 
 ### 5.3 Declarative Engine (C)
 
-The user writes `2O9.nix` (global) and/or `home.nix` (user scope). This is a
+The user writes `2O9.nix` (global) and/or `<user>.nix` (user scope). This is a
 real Nix file, the language, the evaluator, the store, all of it.
 
 The engine evaluates the file and produces a JSON manifest. The Nix
@@ -409,7 +416,7 @@ reading the referenced file and evaluating it in the current scope. The
 evaluator packs everything into one evaluation unit. Example:
 
 ```nix
-# /etc/2O9/2O9.nix
+# /nix/config/2O9.nix
 { config, ... }:
 let
   packages = import ./packages.nix;
@@ -426,16 +433,16 @@ in
 ```
 
 ```nix
-# /etc/2O9/packages.nix
+# /nix/config/packages.nix
 [ "firefox" "neovim" "curl" ]
 ```
 
 ```nix
-# /etc/2O9/services.nix
+# /nix/config/services.nix
 { sshd.enable = true; }
 ```
 
-What the user writes (`/etc/2O9/2O9.nix`):
+What the user writes (`/nix/config/2O9.nix`):
 
 ```nix
 { config, ... }:
@@ -593,15 +600,20 @@ The modification targets (refined in Phase 1, recorded in MODIFICATIONS.md):
 
 ## 7. Configuration: one file, one format
 
-### Everything in `2O9.nix`
+### Everything under `/nix/config/`
 
-There is no `config.toml`, no `paru.conf`, no `pacman.conf`. One file format
-for everything:
+There is no `config.toml`, no `paru.conf`, no `pacman.conf`. One file
+format for everything. All config lives under `/nix/config/`
+(root:root 0755):
 
-| Scope | Config file | Profile symlink | Generation DB |
+| File | Owner | Profile symlink | Generation DB |
 |---|---|---|---|
-| **Global (system)** | `/etc/2O9/2O9.nix` | `/nix/var/nix/profiles/per-user/2O9-system` | `/var/lib/2O9` |
-| **Per-user** | `~/.config/2O9/home.nix` | `~/.local/state/2O9/profile` (user-owned Nix profile) | `~/.local/state/2O9` |
+| **Global (system)** `/nix/config/2O9.nix` + `extra.nix` | root:root | `/nix/var/nix/profiles/per-user/2O9-system` | `/var/lib/2O9` |
+| **Per-user** `/nix/config/<user>.nix` + `<user>.extra.nix` | `<user>:<user>` 0644 | `~/.local/state/2O9/profile` (user-owned Nix profile) | `~/.local/state/2O9` |
+
+Multi-user is supported: `209 init --all` scans `/etc/passwd` for every
+user with uid >= 1000 and a `/home/*` home dir (excluding root and
+nobody) and creates a config pair for each, chowned to that user.
 
 ### How profiles work
 
@@ -614,7 +626,7 @@ evaluates the Nix file and produces one manifest for the whole system. Then it
 builds the symlink farm:
 
 ```
-/etc/2O9/2O9.nix
+/nix/config/2O9.nix
         │
         ▼  209 apply (one manifest for everyone)
         │
@@ -631,13 +643,13 @@ directly. Each user's `~/.local/` gets their symlinks. System paths (`/etc/`,
 new binaries are visible in the next shell session. If you want them
 immediately: `source /etc/profile.d/2O9.sh`.
 
-A user's `home.nix` overlays on top of the global config, packages and
-settings in `home.nix` are added to that user's `~/.local/` only, without
+A user's `<user>.nix` overlays on top of the global config, packages and
+settings in `<user>.nix` are added to that user's `~/.local/` only, without
 affecting anyone else. The merge order (below) determines what wins.
 
 ### Merge order (global wins)
 
-When `2O9.nix` and `home.nix` conflict on the same setting, global wins.
+When `2O9.nix` and `<user>.nix` conflict on the same setting, global wins.
 The sysadmin's declaration is authoritative. This is the opposite of the
 conventional "most-specific wins" pattern, and it's deliberate: on a managed
 system, the sysadmin's intent overrides individual users. The user scope adds
@@ -646,9 +658,9 @@ precedence.
 
 ```
 built-in defaults
-  → ~/.config/2O9/home.nix (user)   ← adds user packages/settings
-    → /etc/2O9/2O9.nix        (global)  ← wins on conflict
-      → CLI flags                        ← wins on everything
+  → /nix/config/<user>.nix (user)   ← adds user packages/settings
+    → /nix/config/2O9.nix   (global)  ← wins on conflict
+      → CLI flags                      ← wins on everything
 ```
 
 ### Imperative installs are temporary

@@ -1,27 +1,42 @@
 # Configuration Reference
 
-2O9 has two config files, both Nix. `2O9.nix` is the declarative
-config (Nix syntax, says what your system should look like).
-`extra.nix` is the imperative side config (also Nix, holds
-substituters, signing keys, and AUR build flags).
+2O9 has two config files per scope, both Nix. `<scope>.nix` is the
+declarative config (Nix syntax, says what your system or user should
+look like). `<scope>.extra.nix` is the imperative side config (also
+Nix, holds binary-cache subs, signing keys, and AUR build flags).
 
 Per locked decision #7 in DESIGN.md: "One declarative config format:
 Nix." There is no INI file anymore.
 
-# Part 1: `2O9.nix`
+# Part 1: locations and multi-user
+
+All config lives under `/nix/config/`. The directory is root:root 0755.
+Four kinds of file:
+
+| File | Owner | Mode | Purpose |
+|---|---|---|---|
+| `/nix/config/2O9.nix` | root:root | 0644 | System-wide declarative (packages, services, repos). Wins on conflict |
+| `/nix/config/extra.nix` | root:root | 0644 | System-wide runtime (bin paths, subs, chroot) |
+| `/nix/config/<user>.nix` | `<user>:<user>` | 0644 | Per-user declarative |
+| `/nix/config/<user>.extra.nix` | `<user>:<user>` | 0644 | Per-user runtime |
+
+`<user>` is the Unix username. When running under `sudo`, `SUDO_USER`
+is used so `sudo 209 apply` reads the original user's config.
+
+## Multi-user
+
+`209 init --all` (run as root) scans `/etc/passwd` for every user with
+uid >= 1000 and a home dir under `/home/*`, excluding root and nobody.
+For each detected user, it creates `/nix/config/<user>.nix` and
+`/nix/config/<user>.extra.nix`, chowned to that user (mode 0644). This
+is the recommended setup for shared machines: each user edits their own
+config, `sudo 209 apply` reconciles them all with the system config.
+
+## `2O9.nix` schema
 
 A Nix expression that evaluates to an attrset describing what your
-system should look like. One file, one format, one source of truth.
-
-## Locations
-
-| Scope | File | Notes |
-|---|---|---|
-| User | `~/.config/2O9/home.nix` | Per-user packages and settings |
-| System | `/etc/2O9/2O9.nix` | System-wide. Wins on conflict |
-
-Both files are evaluated on `209 apply` and merged. The system config
-takes precedence on conflicts; package lists concatenate.
+system or user should look like. One file, one format, one source of
+truth.
 
 ## The function form
 
@@ -148,7 +163,7 @@ state to take effect.
 Configs can be split across multiple files using `import`:
 
 ```nix
-# /etc/2O9/2O9.nix
+# /nix/config/2O9.nix
 { config, ... }:
 let
   packages = import ./packages.nix;
@@ -161,12 +176,12 @@ in
 ```
 
 ```nix
-# /etc/2O9/packages.nix
+# /nix/config/packages.nix
 [ "firefox" "neovim" "curl" ]
 ```
 
 ```nix
-# /etc/2O9/services.nix
+# /nix/config/services.nix
 { sshd.enable = true; }
 ```
 
@@ -217,13 +232,13 @@ Not supported (not needed for `2O9.nix`):
 
 ## Merge order
 
-When both `home.nix` and `2O9.nix` exist:
+When both `/nix/config/<user>.nix` and `/nix/config/2O9.nix` exist:
 
 ```
 built-in defaults
-  → ~/.config/2O9/home.nix (user)
-    → /etc/2O9/2O9.nix (system)  ← wins on conflict
-      → CLI flags                  ← wins on everything
+  → /nix/config/<user>.nix (user)
+    → /nix/config/2O9.nix (system)  ← wins on conflict
+      → CLI flags                      ← wins on everything
 ```
 
 For list values (e.g. `packages`), the lists concatenate. Both user
@@ -275,13 +290,14 @@ can concatenate them plus conditionally add `openssh` based on
 # Part 2: `extra.nix`
 
 An optional Nix file for stuff that doesn't belong in the declarative
-config. Lives at `~/.config/2O9/extra.nix` (or `/etc/2O9/extra.nix`
+config. Lives at `/nix/config/<user>.extra.nix` (or `/nix/config/extra.nix`
 for system-wide).
 
 Format: a Nix attrset (or `{ config, ... }: { ... }` function form, but
 plain attrset is recommended since extra.nix has no need for the
 `config` self-reference that 2O9.nix uses). The evaluator handles both.
-List values (`MFlags`, `GitFlags`, `URLs`) are Nix lists of strings.
+List values (`MFlags`, `GitFlags`, `URLs`, `PublicKeys`) are Nix lists
+of strings.
 
 ```nix
 {
@@ -299,12 +315,14 @@ List values (`MFlags`, `GitFlags`, `URLs`) are Nix lists of strings.
     Dir = "/var/lib/2O9/chroot";
   };
 
-  substituters = {
-    URLs = [ "https://cache.example.com" ];
-    PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
-    SigningKey = "/etc/2O9/secret-key";
-    KeyName = "cache.example.com-1";
-    AllowUnsigned = false;
+  subs = {
+    personal = {
+      URLs = [ "https://cache.example.com" ];
+      PublicKeys = [ "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=" ];
+      SigningKey = "/etc/2O9/secret-key";
+      KeyName = "cache.example.com-1";
+      AllowUnsigned = false;
+    };
   };
 }
 ```
@@ -348,27 +366,35 @@ When enabled, AUR builds run inside an `arch-nspawn` chroot via
 Set `Enabled = false` to run makepkg in your user environment. Not
 recommended for untrusted PKGBUILDs.
 
-### `substituters`
+### `subs`
 
-Binary cache configuration. Lets 2O9 pull packages from caches other
-than the Arch mirror, and push to them.
+Named binary-cache substituters. Each sub is an attrset keyed by a
+bare identifier (the C Nix evaluator in lib2O9 does not yet parse
+quoted attrset keys; use `personal` not `"personal"`).
 
 ```nix
-substituters = {
-  URLs = [ "https://cache.example.com" "s3://my-bucket" ];
-  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
-  SigningKey = "/etc/2O9/secret-key";
-  KeyName = "cache.example.com-1";
-  AllowUnsigned = false;
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" "s3://my-bucket" ];
+    PublicKeys = [ "key1base64==" "key2base64==" ];
+    SigningKey = "/etc/2O9/personal-secret-key";
+    KeyName = "personal-1";
+    AllowUnsigned = false;
+  };
+  friend = {
+    URLs = [ "https://friend.example.org/cache" ];
+    PublicKeys = [ "friendkeybase64==" ];
+    AllowUnsigned = false;
+  };
 };
 ```
 
-`URLs` is a Nix list of strings. Each URL is consulted in order on
-install. `http://` and `https://` URLs use libcurl. `s3://` URLs shell
-out to the `aws` CLI.
+`URLs` is a Nix list of strings. `http://` and `https://` URLs use
+libcurl. `s3://` URLs shell out to the `aws` CLI.
 
-`PublicKey` is the base64 Ed25519 public key to verify narinfo
-signatures against. Get it from `209 keygen` on the publishing machine.
+`PublicKeys` is a Nix list of base64 Ed25519 public keys. A narinfo is
+accepted if ANY of the listed keys verifies its signature. This lets
+you rotate keys or accept packages signed by multiple publishers.
 
 `SigningKey` is the path to a file containing the 32-byte Ed25519
 secret key. Used by `209 cache push` to sign narinfos. Only needs to
@@ -381,6 +407,14 @@ each narinfo. Subscribers don't need this.
 signature from an unknown key. Use only for trusted local caches.
 Default is `false`.
 
+#### Backward compat: `substituters`
+
+The pre-v2 flat `substituters` block is still parsed as a single sub
+named `legacy`. Its singular `PublicKey` field (a string) is folded
+into the `PublicKeys` list as a single entry. A deprecation warning is
+printed. To migrate, rename `substituters` to `subs.legacy` and
+convert `PublicKey` (string) to `PublicKeys` (list of strings).
+
 ## Worked example: two machines sharing a cache
 
 On machine A (the publisher):
@@ -388,18 +422,20 @@ On machine A (the publisher):
 ```sh
 209 keygen
 # Output:
-#   public key (add to extra.nix substituters.PublicKey): r634rsy7nIo/...
+#   public key (add to extra.nix subs.<name>.PublicKeys): r634rsy7nIo/...
 #   cache.example.com-1:r634rsy7nIo/...:TakyhFMCwVcOjdPUJurMrgEQeyuuGukyL+/wWYoCFQ8=
 ```
 
 Save the second line to `/etc/2O9/secret-key` (mode 0600). Add to
-`/etc/2O9/extra.nix`:
+`/nix/config/extra.nix`:
 
 ```nix
-substituters = {
-  URLs = [ "https://cache.example.com" ];
-  SigningKey = "/etc/2O9/secret-key";
-  KeyName = "cache.example.com-1";
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" ];
+    SigningKey = "/etc/2O9/secret-key";
+    KeyName = "cache.example.com-1";
+  };
 };
 ```
 
@@ -410,13 +446,15 @@ Install a package and push it:
 209 cache push /nix/store/<hash>-neovim-0.10.0
 ```
 
-On machine B (the subscriber), add to `/etc/2O9/extra.nix`:
+On machine B (the subscriber), add to `/nix/config/extra.nix`:
 
 ```nix
-substituters = {
-  URLs = [ "https://cache.example.com" ];
-  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
-  AllowUnsigned = false;
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" ];
+    PublicKeys = [ "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=" ];
+    AllowUnsigned = false;
+  };
 };
 ```
 

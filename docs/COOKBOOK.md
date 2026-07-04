@@ -24,7 +24,8 @@ matches `pacman -S ripgrep` behavior, just with a generation recorded.
 
 ## 2. Install a package permanently
 
-Edit `~/.config/2O9/2O9.nix` and add the package to the `packages` list:
+Edit `/nix/config/<user>.nix` (or `/nix/config/2O9.nix` for system-wide)
+and add the package to the `packages` list:
 
 ```nix
   packages = [
@@ -177,7 +178,7 @@ deciding whether a rollback is safe.
 ```sh
 $ 209 why openssl
 openssl is installed because:
-  - it is in /etc/2O9/2O9.nix: packages
+  - it is in /nix/config/2O9.nix: packages
   - curl depends on it (closure)
   - git depends on it (closure)
 ```
@@ -260,13 +261,15 @@ r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=
 # chmod 0600 /etc/2O9/secret-key
 ```
 
-Add to `/etc/2O9/extra.nix` on machine A:
+Add to `/nix/config/extra.nix` on machine A:
 
 ```nix
-substituters = {
-  URLs = [ "https://cache.example.com" ];
-  SigningKey = "/etc/2O9/secret-key";
-  KeyName = "cache.example.com-1";
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" ];
+    SigningKey = "/etc/2O9/secret-key";
+    KeyName = "cache.example.com-1";
+  };
 };
 ```
 
@@ -276,20 +279,23 @@ Push a path and its closure:
 # 209 cache push /nix/store/0v4v8...-cpufetch-1.07-1
 ```
 
-On the subscriber (machine B), add to `/etc/2O9/extra.nix`:
+On the subscriber (machine B), add to `/nix/config/extra.nix`:
 
 ```nix
-substituters = {
-  URLs = [ "https://cache.example.com" ];
-  PublicKey = "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=";
-  AllowUnsigned = false;
+subs = {
+  personal = {
+    URLs = [ "https://cache.example.com" ];
+    PublicKeys = [ "r634rsy7nIo/UH2Xux5k+GSFOh6rsqsGG5R2fNJFR9o=" ];
+    AllowUnsigned = false;
+  };
 };
 ```
 
 Now `209 -S cpufetch` on machine B fetches the NAR from
 `https://cache.example.com/0v4v8....narinfo`, verifies the Ed25519
-signature, streams it into the store. The Arch mirror is only consulted
-if the cache is missing the path or the signature fails.
+signature against any of the listed `PublicKeys`, streams it into the
+store. The Arch mirror is only consulted if the cache is missing the
+path or the signature fails.
 
 ## 15. Run an untrusted binary in a sandbox
 
