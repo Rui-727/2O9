@@ -107,22 +107,33 @@ main. If you want the full declarative system, use phase-4.
   install`. Regenerates initrd via `mkinitcpio`. See
   `docs/PHASE4_BOOTLOADER.md`.
 
-All three are wired into `cmd_apply` and run after the activation
-phase.
+- **Services as a DAG.** `src/declarative/services.c` (627 LOC).
+  Declares services with `requires`, `after`, `before` dependencies.
+  Topologically sorts via Kahn's algorithm with cycle detection.
+  Generates systemd unit files for services with `execStart`. Enables,
+  starts, restarts (if `restartOnChange`), disables, and stops based
+  on the diff against the previous generation. See
+  `docs/PHASE4_SERVICES.md`.
+
+- **PAM and NSS.** `src/declarative/pam_nss.c` (391 LOC). Declares
+  PAM service configs in `security.pam` (both string and structured
+  forms) and NSS sources in `security.nss`. Writes `/etc/pam.d/<svc>`
+  and `/etc/nsswitch.conf` on apply, with backups. See
+  `docs/PHASE4_PAM_NSS.md`.
+
+- **Profile hooks as derivations.** `src/declarative/profile_hooks.c`
+  (500 LOC). Declares `profileHooks` in `2O9.nix`. Built-in hooks
+  (gtk-icon-cache, desktop-database, font-cache, ldconfig) run their
+  system command, copy the output to a store path, and NAR-hash it.
+  Custom hooks run via `sh -c` with a clean env and `OUT` set. Hook
+  outputs land at `/nix/store/<hash>-hook-<name>/` and are recorded in
+  the generation manifest for rollback. See
+  `docs/PHASE4_PROFILE_HOOKS.md`.
+
+All six modules are wired into `cmd_apply` and run after the
+activation phase, in this order: users, fstab, bootloader, services,
+PAM/NSS, profile hooks.
 
 ### Not started
 
-- **Services as a DAG.** Today `services.sshd.enable = true` translates
-  to `systemctl enable sshd`. Phase 4 adds a service model with
-  dependencies, composition, and live reload. A service can declare
-  `requires = [ "network" ]` and 2O9 orders activation accordingly.
-
-- **PAM and NSS.** Declare PAM service configs and NSS modules in
-  `2O9.nix`. 2O9 writes the files to `/etc/pam.d/` and
-  `/etc/nsswitch.conf` on apply.
-
-- **Profile hooks as derivations.** Today the activation phase runs
-  `gtk-update-icon-cache`, `update-desktop-database`,
-  `update-ca-certificates`, etc. as imperative side effects. Phase 4
-  turns these into per-profile store paths so they roll back with the
-  generation.
+Nothing. All items from the original plan are implemented.
