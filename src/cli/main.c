@@ -676,25 +676,23 @@ int cmd_install_only(const char *pkg_name, char **store_path_out, char **version
                 }
                 resolved_version = strdup("unknown");
         } else {
-                /* Use lib2O9 to find, download, extract */
-                char user_config[PATH_MAX] = {0};
-                char system_config[PATH_MAX] = {0};
-                snprintf(user_config, sizeof(user_config), "%s/%s.nix",
-                         two9_config_dir(),
-                         get_current_username() ? get_current_username() : "");
+                /* Use lib2O9 to find, download, extract.
+                 * Only 2O9.nix is evaluated. User configs take effect
+                 * only if 2O9.nix imports them via standard Nix import. */
+                char system_config[PATH_MAX];
                 snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
                          two9_config_dir());
 
                 char *manifest_json = NULL;
                 char *eval_err = NULL;
                 struct stat st;
-                if (user_config[0] && stat(user_config, &st) == 0)
-                        manifest_json = eval_nix_config(user_config, &eval_err);
-                if (!manifest_json && stat(system_config, &st) == 0)
+                if (stat(system_config, &st) == 0)
                         manifest_json = eval_nix_config(system_config, &eval_err);
 
                 if (!manifest_json) {
-                        fprintf(stderr, "209: no config file found.\n");
+                        fprintf(stderr, "209: no config file found at %s\n",
+                                system_config);
+                        fprintf(stderr, "Run `209 init --system` to create one, then `209 -Sy` to sync repos.\n");
                         free(eval_err);
                         return 1;
                 }
@@ -929,34 +927,26 @@ int cmd_install(const char *pkg_name)
                 if (*targets_tail) targets_tail = &(*targets_tail)->next;
         } else {
                 /* Use lib2O9 to find the package in the repo sync DBs,
-                 * download it, and extract to the store. */
-                char user_config[PATH_MAX] = {0};
-                char system_config[PATH_MAX] = {0};
-                snprintf(user_config, sizeof(user_config), "%s/%s.nix",
-                         two9_config_dir(),
-                         get_current_username() ? get_current_username() : "");
+                 * download it, and extract to the store.
+                 * Only 2O9.nix is evaluated. User configs take effect
+                 * only if 2O9.nix imports them via standard Nix import. */
+                char system_config[PATH_MAX];
                 snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
                          two9_config_dir());
 
                 char *manifest_json = NULL;
                 char *eval_err = NULL;
                 struct stat st;
-                /* Check /nix/config/<user>.nix, then /nix/config/2O9.nix */
-                if (user_config[0] && stat(user_config, &st) == 0)
-                        manifest_json = eval_nix_config(user_config, &eval_err);
-                if (!manifest_json && stat(system_config, &st) == 0)
+                if (stat(system_config, &st) == 0)
                         manifest_json = eval_nix_config(system_config, &eval_err);
 
                 if (!manifest_json) {
                         if (eval_err) {
                                 fprintf(stderr, "209: config evaluation failed: %s\n", eval_err);
                         } else {
-                                fprintf(stderr, "209: no config file found. I looked in:\n");
-                                fprintf(stderr, "    %s\n",
-                                        user_config[0] ? user_config
-                                                       : "/nix/config/<user>.nix");
-                                fprintf(stderr, "    %s\n", system_config);
-                                fprintf(stderr, "\nRun `209 init` to create one, then `209 -Sy` to sync repos.\n");
+                                fprintf(stderr, "209: no config file found at %s\n",
+                                        system_config);
+                                fprintf(stderr, "Run `209 init --system` to create one, then `209 -Sy` to sync repos.\n");
                         }
                         free(eval_err);
                         return 1;
@@ -1895,84 +1885,48 @@ static int cmd_apply(void)
         /* The whole point of 2O9: evaluate the config, figure out what
          * changed, make it so. Concretely:
          *
-         *   1. Find the config (/nix/config/<user>.nix + /nix/config/2O9.nix)
-         *   2. Evaluate both with our own C Nix evaluator -> JSON manifest
-         *   3. Merge them (global wins, packages concatenate)
-         *   4. Diff the manifest against the current generation
-         *   5. Build a transaction: what to install, remove, build from AUR
-         *   6. Execute it (store adapter + AUR helper)
-         *   7. Commit a new generation
-         *   8. Rebuild the symlink farm
-         *   9. Run the activation phase (systemctl, sysusers, tmpfiles, ...)
+         *   1. Evaluate /nix/config/2O9.nix with our own C Nix evaluator
+         *      -> JSON manifest. 2O9.nix is the single entry point.
+         *      User configs (<user>.nix) take effect only if 2O9.nix
+         *      imports them via standard Nix import.
+         *   2. Diff the manifest against the current generation
+         *   3. Build a transaction: what to install, remove, build from AUR
+         *   4. Execute it (store adapter + AUR helper)
+         *   5. Commit a new generation
+         *   6. Rebuild the symlink farm
+         *   7. Run the activation phase (systemctl, sysusers, tmpfiles, ...)
+         *   8. Install/refresh systemd timers for declared snapshot paths
          */
 
         /* Refuse to run if pre-v2 config layout is present. */
         if (old_config_detected()) return 1;
 
-        /* Step 1: Find config files. Per-user config is
-         * /nix/config/<user>.nix (uses SUDO_USER when running as root).
-         * System config is /nix/config/2O9.nix. */
-        char user_nix[PATH_MAX] = {0};
-        char system_nix[PATH_MAX] = {0};
-        const char *user = get_current_username();
-        if (user) {
-                snprintf(user_nix, sizeof(user_nix), "%s/%s.nix",
-                         two9_config_dir(), user);
-        }
+        /* Step 1: Evaluate /nix/config/2O9.nix. This is the only config
+         * file 2O9 loads directly. If you want <user>.nix to take
+         * effect, add `import ./<user>.nix` inside 2O9.nix. */
+        char system_nix[PATH_MAX];
         snprintf(system_nix, sizeof(system_nix), "%s/2O9.nix",
                  two9_config_dir());
 
-        /* Step 2: Evaluate each config that exists */
-        char *user_json = NULL;
-        char *global_json = NULL;
+        char *json = NULL;
         char *eval_err = NULL;
         struct stat st;
 
-        if (user_nix[0] && stat(user_nix, &st) == 0) {
-                printf("209: evaluating %s...\n", user_nix);
-                user_json = eval_nix_config(user_nix, &eval_err);
-                if (!user_json) {
-                        fprintf(stderr, "209: %s: %s\n", user_nix,
-                                eval_err ? eval_err : "evaluation failed");
-                        free(eval_err);
-                        return 1;
-                }
-        }
-
         if (stat(system_nix, &st) == 0) {
                 printf("209: evaluating %s...\n", system_nix);
-                global_json = eval_nix_config(system_nix, &eval_err);
-                if (!global_json) {
+                json = eval_nix_config(system_nix, &eval_err);
+                if (!json) {
                         fprintf(stderr, "209: %s: %s\n", system_nix,
                                 eval_err ? eval_err : "evaluation failed");
-                        free(user_json);
                         free(eval_err);
                         return 1;
                 }
         }
 
-        if (!user_json && !global_json) {
-                fprintf(stderr, "209: no config file found. I looked in:\n");
-                if (user_nix[0]) fprintf(stderr, "    %s\n", user_nix);
-                fprintf(stderr, "    %s\n", system_nix);
-                fprintf(stderr, "\nRun `209 init` to create a starter config.\n");
-                return 1;
-        }
-
-        /* Step 3: Merge per DESIGN.md §7 (global wins on conflict) */
-        int merged_both = (user_json && global_json);
-        char *json = merge_manifests(user_json, global_json, &eval_err);
-        free(user_json);
-        free(global_json);
         if (!json) {
-                fprintf(stderr, "209: manifest merge failed: %s\n",
-                        eval_err ? eval_err : "unknown error");
-                free(eval_err);
+                fprintf(stderr, "209: no config file found at %s\n", system_nix);
+                fprintf(stderr, "Run `209 init --system` to create a starter config.\n");
                 return 1;
-        }
-
-        if (merged_both) {
-                printf("209: merged <user>.nix + 2O9.nix (global wins on conflict)\n");
         }
 
         /* Step 4: Open generation DB */char db_root[PATH_MAX];
@@ -2205,18 +2159,21 @@ static int cmd_apply(void)
          * System paths run as root; user paths run as the calling
          * user. Skipped silently if no snapshots block is present. */
         {
-                char *user_json2 = NULL, *global_json2 = NULL, *err2 = NULL;
+                char *global_json2 = NULL, *err2 = NULL;
                 struct stat st2;
-                if (user_nix[0] && stat(user_nix, &st2) == 0)
-                        user_json2 = eval_nix_config(user_nix, &err2);
                 if (stat(system_nix, &st2) == 0)
                         global_json2 = eval_nix_config(system_nix, &err2);
                 free(err2);
 
+                /* 2O9.nix is the single entry point. If it imports
+                 * <user>.nix, the snapshot declarations from the user
+                 * config are already in global_json2. We pass is_system=1
+                 * for all declarations since they all came from the
+                 * single evaluated manifest. Path resolution (absolute
+                 * vs user-relative) is determined by whether the path
+                 * starts with '/'. */
                 snapshot_decl_t *new_sys = collect_snapshot_decls(global_json2, 1);
-                snapshot_decl_t *new_usr = collect_snapshot_decls(user_json2, 0);
                 free(global_json2);
-                free(user_json2);
 
                 /* Install/refresh timers for new paths. */
                 int timers_installed = 0;
@@ -2224,15 +2181,12 @@ static int cmd_apply(void)
                 for (snapshot_decl_t *d = new_sys; d; d = d->next) {
                         if (!d->auto_schedule) continue;
                         if (strcmp(d->auto_schedule, "manual") == 0) continue;
+                        /* Absolute paths run as root. Relative paths
+                         * (from imported user configs) run as the
+                         * calling user. */
+                        const char *run_as = (d->path[0] == '/') ? "root" : caller_user;
                         if (snapshot_install_timer(d->path, d->auto_schedule,
-                                                   "root") == 0)
-                                timers_installed++;
-                }
-                for (snapshot_decl_t *d = new_usr; d; d = d->next) {
-                        if (!d->auto_schedule) continue;
-                        if (strcmp(d->auto_schedule, "manual") == 0) continue;
-                        if (snapshot_install_timer(d->path, d->auto_schedule,
-                                                   caller_user) == 0)
+                                                   run_as) == 0)
                                 timers_installed++;
                 }
 
@@ -2265,9 +2219,7 @@ static int cmd_apply(void)
                                                 else if (cJSON_IsObject(pout))
                                                         prev_nix_json = cJSON_PrintUnformatted(pout);
                                                 if (prev_nix_json) {
-                                                        /* Walk prev's snapshots for both scopes. */
                                                         snapshot_decl_t *p_sys = collect_snapshot_decls(prev_nix_json, 1);
-                                                        snapshot_decl_t *p_usr = collect_snapshot_decls(prev_nix_json, 0);
                                                         int timers_removed = 0;
                                                         for (snapshot_decl_t *p = p_sys; p; p = p->next) {
                                                                 int still_present = 0;
@@ -2278,20 +2230,10 @@ static int cmd_apply(void)
                                                                         timers_removed++;
                                                                 }
                                                         }
-                                                        for (snapshot_decl_t *p = p_usr; p; p = p->next) {
-                                                                int still_present = 0;
-                                                                for (snapshot_decl_t *n = new_usr; n; n = n->next)
-                                                                        if (strcmp(n->path, p->path) == 0) { still_present = 1; break; }
-                                                                if (!still_present) {
-                                                                        snapshot_remove_timer(p->path);
-                                                                        timers_removed++;
-                                                                }
-                                                        }
                                                         if (timers_removed > 0)
                                                                 printf("  snapshots: removed %d stale timer(s)\n",
                                                                        timers_removed);
                                                         snapshot_decl_list_free(p_sys);
-                                                        snapshot_decl_list_free(p_usr);
                                                 }
                                                 cJSON_Delete(pjson);
                                         }
@@ -2304,7 +2246,6 @@ static int cmd_apply(void)
                                timers_installed);
 
                 snapshot_decl_list_free(new_sys);
-                snapshot_decl_list_free(new_usr);
         }
 
         /* Step 9: Report services that need attention */
@@ -3651,8 +3592,20 @@ static int write_starter_nix(const char *path, int is_system)
         fprintf(f, "{ config, ... }:\n");
         fprintf(f, "#\n");
         fprintf(f, "# 2O9 configuration - see https://github.com/Rui-727/2O9 for docs\n");
-        fprintf(f, "# This file declares what %s should have installed.\n",
-                is_system ? "your system" : "your user");
+        if (is_system) {
+                fprintf(f, "# This is the system-wide entry point. 2O9 evaluates\n");
+                fprintf(f, "# only this file. User configs (<user>.nix) take effect\n");
+                fprintf(f, "# only if you import them here, e.g.:\n");
+                fprintf(f, "#\n");
+                fprintf(f, "#   let myuser = import ./myuser.nix; in\n");
+                fprintf(f, "#   { config, ... }: {\n");
+                fprintf(f, "#     packages = [ \"vim\" ] ++ myuser.packages or [];\n");
+                fprintf(f, "#   }\n");
+        } else {
+                fprintf(f, "# This is a user config. It does nothing on its own.\n");
+                fprintf(f, "# To activate it, add `import ./%s.nix` inside\n", is_system ? "" : "");
+                fprintf(f, "# /nix/config/2O9.nix and reference its fields.\n");
+        }
         fprintf(f, "# Run `209 apply` to make the system match this file.\n");
         fprintf(f, "#\n");
         fprintf(f, "\n");
@@ -5669,37 +5622,24 @@ static int cmd_lockfile_import(const char *lockfile_path)
  * re-evaluates the config to verify a path is managed, picks the
  * right DB root (system vs per-user based on uid), formats output. */
 
-/* Re-evaluate the merged 2O9.nix manifest so we can check whether a
- * path is declared under `snapshots`. Returns a malloc'd JSON string
- * or NULL on error (message printed). Caller frees. */
+/* Re-evaluate 2O9.nix so we can check whether a path is declared
+ * under `snapshots`. 2O9.nix is the single entry point; if it imports
+ * <user>.nix, those declarations are already included. Returns a
+ * malloc'd JSON string or NULL on error (message printed). Caller
+ * frees. */
 static char *eval_merged_manifest(void)
 {
-        char user_nix[PATH_MAX] = {0};
-        char system_nix[PATH_MAX] = {0};
-        const char *user = get_current_username();
-        if (user)
-                snprintf(user_nix, sizeof(user_nix), "%s/%s.nix",
-                         two9_config_dir(), user);
+        char system_nix[PATH_MAX];
         snprintf(system_nix, sizeof(system_nix), "%s/2O9.nix",
                  two9_config_dir());
 
-        char *user_json = NULL, *global_json = NULL, *err = NULL;
+        char *global_json = NULL, *err = NULL;
         struct stat st;
-        if (user_nix[0] && stat(user_nix, &st) == 0)
-                user_json = eval_nix_config(user_nix, &err);
         if (stat(system_nix, &st) == 0)
                 global_json = eval_nix_config(system_nix, &err);
         free(err);
 
-        if (!user_json && !global_json) return NULL;
-        if (!user_json)  return global_json;
-        if (!global_json) return user_json;
-
-        char *merged = merge_manifests(user_json, global_json, &err);
-        free(user_json);
-        free(global_json);
-        free(err);
-        return merged;
+        return global_json;
 }
 
 /* Build a snapshot scope string for the current caller. "system" if
@@ -5843,40 +5783,29 @@ static int cmd_snapshot_take(const char *path_arg)
         }
 
         /* Build the resolved set of declared snapshot paths and look
-         * for an exact match against path_arg. */
-        char *user_json = NULL, *global_json = NULL, *err = NULL;
-        char user_nix[PATH_MAX] = {0}, system_nix[PATH_MAX] = {0};
-        const char *user = get_current_username();
-        if (user)
-                snprintf(user_nix, sizeof(user_nix), "%s/%s.nix",
-                         two9_config_dir(), user);
+         * for an exact match against path_arg. 2O9.nix is the single
+         * entry point; if it imports <user>.nix, those declarations
+         * are already in the evaluated manifest. */
+        char *global_json = NULL, *err = NULL;
+        char system_nix[PATH_MAX];
         snprintf(system_nix, sizeof(system_nix), "%s/2O9.nix",
                  two9_config_dir());
         struct stat st;
-        if (user_nix[0] && stat(user_nix, &st) == 0)
-                user_json = eval_nix_config(user_nix, &err);
         if (stat(system_nix, &st) == 0)
                 global_json = eval_nix_config(system_nix, &err);
         free(err);
 
         snapshot_decl_t *sys_decls = collect_snapshot_decls(global_json, 1);
-        snapshot_decl_t *usr_decls = collect_snapshot_decls(user_json, 0);
         free(global_json);
-        free(user_json);
 
         int managed = 0;
         for (snapshot_decl_t *d = sys_decls; d; d = d->next)
                 if (strcmp(d->path, path_arg) == 0) { managed = 1; break; }
-        if (!managed)
-                for (snapshot_decl_t *d = usr_decls; d; d = d->next)
-                        if (strcmp(d->path, path_arg) == 0) { managed = 1; break; }
         snapshot_decl_list_free(sys_decls);
-        snapshot_decl_list_free(usr_decls);
 
         if (!managed) {
                 fprintf(stderr, "209: snapshot: %s is not declared under "
-                        "`snapshots` in 2O9.nix or %s.nix\n",
-                        path_arg, user ? user : "<user>");
+                        "`snapshots` in 2O9.nix\n", path_arg);
                 free(manifest);
                 return 1;
         }

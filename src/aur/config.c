@@ -294,25 +294,14 @@ static two9_config_t *two9_config_defaults(void)
         return cfg;
 }
 
-/* Resolve the config file path. Tries /nix/config/<user>.extra.nix
- * first (with SUDO_USER resolution), then falls back to
- * /nix/config/extra.nix. Returns a malloc'd path the caller must free,
- * or NULL if neither exists. */
+/* Resolve the config file path. Only /nix/config/extra.nix is loaded
+ * directly. User side configs (<user>.extra.nix) take effect only if
+ * extra.nix imports them via standard Nix import. Returns a malloc'd
+ * path the caller must free, or NULL if it doesn't exist. */
 static char *resolve_config_path(void)
 {
         const char *dir = config_dir();
 
-        /* User-local: /nix/config/<user>.extra.nix.
-         * When running under sudo, look up the original user's name. */
-        const char *user = current_username();
-        if (user && *user) {
-                char path[PATH_MAX];
-                snprintf(path, sizeof(path), "%s/%s.extra.nix", dir, user);
-                if (access(path, R_OK) == 0)
-                        return strdup(path);
-        }
-
-        /* System-wide fallback. */
         char syspath[PATH_MAX];
         snprintf(syspath, sizeof(syspath), "%s/extra.nix", dir);
         if (access(syspath, R_OK) == 0)
