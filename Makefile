@@ -135,7 +135,7 @@ STORE_SRC = src/store/store.c src/store/symlinks.c src/store/nar.c src/store/opt
 ifeq ($(HAVE_SQLITE3),yes)
 STORE_SRC += src/store/db.c src/store/snapshot.c
 endif
-DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/reconcile_execute.c src/declarative/activation.c src/declarative/gen_index.c
+DECL_SRC  = src/declarative/gen.c src/declarative/reconcile.c src/declarative/reconcile_execute.c src/declarative/activation.c src/declarative/gen_index.c src/declarative/users.c src/declarative/fstab.c src/declarative/bootloader.c
 AUR_SRC   = src/aur/aur_rpc.c src/aur/aur_build.c src/aur/aur_resolve.c \
             src/aur/chroot.c src/aur/pgp.c src/aur/config.c
 TRAK_SRC  = src/trakker/trakker.c src/debag/debag.c src/debag/static_analysis.c src/debag/seccomp_filter.c src/debag/script_analysis.c src/debag/dynamic_db.c src/debag/static_db.c

@@ -46,6 +46,9 @@
 #include "declarative/reconcile.h"
 #include "declarative/activation.h"
 #include "declarative/gen_index.h"
+#include "declarative/users.h"
+#include "declarative/fstab.h"
+#include "declarative/bootloader.h"
 #include "trakker/trakker.h"
 #include "debag/debag.h"
 #include "subs_ui.h"
@@ -2246,6 +2249,51 @@ static int cmd_apply(void)
                                timers_installed);
 
                 snapshot_decl_list_free(new_sys);
+        }
+
+        /* Step 8: Phase 4 declarative system management.
+         * Users/groups, file systems (fstab), and bootloader are
+         * declared in 2O9.nix and applied here. Each module is
+         * self-contained and reads its own section from the manifest
+         * JSON. They need root (we already checked at the top of
+         * cmd_apply). The previous generation's manifest is read for
+         * removal diffing. */
+        {
+                /* Read the previous generation's manifest for diffing. */
+                char *prev_manifest = NULL;
+                int prev_gen_id = gen_db_current(db);
+                if (prev_gen_id > 0 && prev_gen_id != new_id) {
+                        char prev_path[PATH_MAX];
+                        snprintf(prev_path, sizeof(prev_path),
+                                 "%s/generations/%d/manifest.json",
+                                 db_root, prev_gen_id);
+                        FILE *pf = fopen(prev_path, "r");
+                        if (pf) {
+                                fseek(pf, 0, SEEK_END);
+                                long psize = ftell(pf);
+                                fseek(pf, 0, SEEK_SET);
+                                prev_manifest = malloc(psize + 1);
+                                if (prev_manifest) {
+                                        size_t nrd = fread(prev_manifest, 1, psize, pf);
+                                        prev_manifest[nrd] = '\0';
+                                }
+                                fclose(pf);
+                        }
+                }
+
+                /* Users and groups. */
+                printf("  applying users and groups...\n");
+                users_apply(json, prev_manifest, 0);
+
+                /* File systems and swap (fstab). */
+                printf("  applying file systems...\n");
+                fstab_apply(json, prev_manifest, 0);
+
+                /* Bootloader (grub or systemd-boot). */
+                printf("  applying bootloader...\n");
+                bootloader_apply(json, prev_manifest, db_root, 0);
+
+                free(prev_manifest);
         }
 
         /* Step 9: Report services that need attention */
