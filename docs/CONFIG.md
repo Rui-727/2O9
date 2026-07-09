@@ -285,20 +285,48 @@ Not supported (not needed for `2O9.nix`):
 - Derivations, fetchers, flakes
 - Full nixpkgs evaluation
 
-## Merge order
+## Config inclusion model
 
-When both `/nix/config/<user>.nix` and `/nix/config/2O9.nix` exist:
+2O9 evaluates only `/nix/config/2O9.nix`. That file is the single entry
+point. User configs (`<user>.nix`) do nothing on their own. They take
+effect only if `2O9.nix` imports them via standard Nix `import`:
 
+```nix
+# /nix/config/2O9.nix
+let myuser = import ./myuser.nix; in
+{ config, ... }:
+{
+  packages = [ "vim" ] ++ myuser.packages or [];
+  services = myuser.services or {};
+}
 ```
-built-in defaults
-  → /nix/config/<user>.nix (user)
-    → /nix/config/2O9.nix (system)  ← wins on conflict
-      → CLI flags                      ← wins on everything
+
+This gives the sysadmin explicit control over what is active. A user
+can create `<user>.nix` but it sits idle until the sysadmin adds an
+`import` for it in `2O9.nix`.
+
+Same model for `extra.nix`: only `/nix/config/extra.nix` is loaded.
+User side configs (`<user>.extra.nix`) take effect only if `extra.nix`
+imports them:
+
+```nix
+# /nix/config/extra.nix
+let myuser = import ./myuser.extra.nix; in
+{
+  bin = { Makepkg = "makepkg"; };
+  subs = myuser.subs or {};
+}
 ```
 
-For list values (e.g. `packages`), the lists concatenate. Both user
-and system packages get installed. For everything else, the system
-config wins on conflict.
+There is no automatic merge. If you want user packages concatenated
+with system packages, write that in `2O9.nix` using `++`:
+
+```nix
+packages = [ "vim" ] ++ myuser.packages or [];
+```
+
+If you want the system to override a user setting, write that too. The
+merge logic lives in your config, not in 2O9's C code.
 
 ## Worked example
 

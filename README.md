@@ -243,12 +243,22 @@ scans `/etc/passwd` for every user with uid >= 1000 and a `/home/*`
 home dir (excluding root and nobody) and creates a config pair for each,
 chowned to that user.
 
-Merge order, lowest to highest precedence:
+2O9 evaluates only `/nix/config/2O9.nix`. That file is the single entry
+point. User configs (`<user>.nix`) take effect only if `2O9.nix`
+imports them via standard Nix `import`:
 
-1. Built-in defaults (compiled into `209`)
-2. `/nix/config/<user>.nix`
-3. `/nix/config/2O9.nix`
-4. CLI flags
+```nix
+# /nix/config/2O9.nix
+let myuser = import ./myuser.nix; in
+{ config, ... }:
+{
+  packages = [ "vim" ] ++ myuser.packages or [];
+}
+```
+
+Same for `extra.nix`: only `/nix/config/extra.nix` is loaded. User side
+configs (`<user>.extra.nix`) take effect only if `extra.nix` imports
+them. This gives the sysadmin explicit control over what is active.
 
 `~/.local/bin` is in `$PATH`. That is the visibility mechanism: binaries
 from the store are symlinked there. Libraries go to `~/.local/lib/`.
@@ -517,8 +527,8 @@ What works and what's left.
   lambdas (curried and formal), imports, fixed-point recursion for
   `{ config, ... }`, `inherit`, all 9 binary operator precedence
   levels, 19 builtins. 49/49 tests pass. `209 apply` evaluates
-  `/nix/config/<user>.nix`, merges it with `/nix/config/2O9.nix`,
-  reconciles, commits.
+  `/nix/config/2O9.nix`. User configs take effect only if `2O9.nix`
+  imports them via standard Nix `import`.
 
 - **Phase 4 (Trakker + Debag): DONE.** ptrace sandbox with all four
   restriction flags, JSON trace output. Debag hybrid sandbox with

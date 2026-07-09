@@ -524,16 +524,18 @@ system or user should look like. Two scopes:
 - User: `/nix/config/<user>.nix`
 - System: `/nix/config/2O9.nix`
 
-Both are evaluated and merged per `DESIGN.md` section 7: global wins on
-conflict, packages concatenate. See [`docs/CONFIG.md`](./CONFIG.md) for
-the full schema reference.
+2O9 evaluates only `/nix/config/2O9.nix`. User configs take effect only
+if `2O9.nix` imports them via standard Nix `import`. There is no
+automatic merge. See [`docs/CONFIG.md`](./CONFIG.md) for the full
+schema reference and the import pattern.
 
-`<scope>.extra.nix` is the imperative side config. Also Nix syntax
-(per locked decision #7: "One declarative config format: Nix").
-Holds stuff that doesn't belong in the declarative config: binary-cache
-subs, signing keys, AUR build flags, chroot settings. Lives at
-`/nix/config/<user>.extra.nix` (or `/nix/config/extra.nix` for
-system-wide). See [`docs/CONFIG.md`](./CONFIG.md) for the schema.
+`extra.nix` is the imperative side config. Also Nix syntax (per locked
+decision #7: "One declarative config format: Nix"). Holds stuff that
+doesn't belong in the declarative config: binary-cache subs, signing
+keys, AUR build flags, chroot settings. 2O9 loads only
+`/nix/config/extra.nix`. User side configs (`<user>.extra.nix`) take
+effect only if `extra.nix` imports them. See
+[`docs/CONFIG.md`](./CONFIG.md) for the schema.
 
 If 2O9 detects a pre-v2 config layout (`~/.config/2O9/`, `/etc/2O9/`),
 it prints the exact `mv` commands to migrate and exits 1. No

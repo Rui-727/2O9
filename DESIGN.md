@@ -643,25 +643,35 @@ directly. Each user's `~/.local/` gets their symlinks. System paths (`/etc/`,
 new binaries are visible in the next shell session. If you want them
 immediately: `source /etc/profile.d/2O9.sh`.
 
-A user's `<user>.nix` overlays on top of the global config, packages and
-settings in `<user>.nix` are added to that user's `~/.local/` only, without
-affecting anyone else. The merge order (below) determines what wins.
+A user's `<user>.nix` does nothing on its own. 2O9 evaluates only
+`/nix/config/2O9.nix`. User configs take effect only if `2O9.nix`
+imports them via standard Nix `import`. This gives the sysadmin
+explicit control over what is active.
 
-### Merge order (global wins)
+### Config inclusion (Nix import, not auto-merge)
 
-When `2O9.nix` and `<user>.nix` conflict on the same setting, global wins.
-The sysadmin's declaration is authoritative. This is the opposite of the
-conventional "most-specific wins" pattern, and it's deliberate: on a managed
-system, the sysadmin's intent overrides individual users. The user scope adds
-packages and settings that don't conflict; if there's a conflict, global takes
-precedence.
+2O9 does not auto-merge user configs. The `2O9.nix` file is the single
+entry point. If the sysadmin wants a user's packages included, they
+write:
 
+```nix
+# /nix/config/2O9.nix
+let myuser = import ./myuser.nix; in
+{ config, ... }:
+{
+  packages = [ "vim" ] ++ myuser.packages or [];
+}
 ```
-built-in defaults
-  → /nix/config/<user>.nix (user)   ← adds user packages/settings
-    → /nix/config/2O9.nix   (global)  ← wins on conflict
-      → CLI flags                      ← wins on everything
-```
+
+The merge logic lives in the config, not in 2O9's C code. If you want
+`++` (concatenation), write `++`. If you want global to override user,
+just write the global value. If you want user to override global,
+reverse the order. There is no built-in "global wins" rule because
+there is no built-in merge.
+
+Same model for `extra.nix`: only `/nix/config/extra.nix` is loaded.
+User side configs (`<user>.extra.nix`) take effect only if `extra.nix`
+imports them.
 
 ### Imperative installs are temporary
 
