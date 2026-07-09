@@ -86,5 +86,43 @@ main. If you want the full declarative system, use phase-4.
 
 ## Current state
 
-Phase 4 is not started. This file is the plan. The first commit on
-this branch beyond the branch point will be the service DAG skeleton.
+### Done
+
+- **Users and groups.** `src/declarative/users.c` (530 LOC). Declares
+  users and groups in `2O9.nix`, creates/updates them on `209 apply`
+  via `useradd`/`usermod`/`groupadd`/`groupmod`/`gpasswd`. Handles
+  supplementary groups, hashed passwords, system users, home creation,
+  and removal of users/groups no longer in the config (with
+  confirmation). See `docs/PHASE4_USERS.md`.
+
+- **File systems and swap.** `src/declarative/fstab.c` (476 LOC).
+  Declares `fileSystems` and `swapDevices` in `2O9.nix`, generates
+  `/etc/fstab` on apply. Creates swap files, backs up the old fstab,
+  runs `swapon -a` and `mount -a`. See `docs/PHASE4_FSTAB.md`.
+
+- **Bootloader (grub + systemd-boot).** `src/declarative/bootloader.c`
+  (480 LOC). Declares `boot.loader.grub` or `boot.loader.systemd-boot`
+  in `2O9.nix`. Generates grub.cfg or systemd-boot entries with one
+  menu entry per 2O9 generation. Runs `grub-install` or `bootctl
+  install`. Regenerates initrd via `mkinitcpio`. See
+  `docs/PHASE4_BOOTLOADER.md`.
+
+All three are wired into `cmd_apply` and run after the activation
+phase.
+
+### Not started
+
+- **Services as a DAG.** Today `services.sshd.enable = true` translates
+  to `systemctl enable sshd`. Phase 4 adds a service model with
+  dependencies, composition, and live reload. A service can declare
+  `requires = [ "network" ]` and 2O9 orders activation accordingly.
+
+- **PAM and NSS.** Declare PAM service configs and NSS modules in
+  `2O9.nix`. 2O9 writes the files to `/etc/pam.d/` and
+  `/etc/nsswitch.conf` on apply.
+
+- **Profile hooks as derivations.** Today the activation phase runs
+  `gtk-update-icon-cache`, `update-desktop-database`,
+  `update-ca-certificates`, etc. as imperative side effects. Phase 4
+  turns these into per-profile store paths so they roll back with the
+  generation.
