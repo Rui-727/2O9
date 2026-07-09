@@ -49,6 +49,9 @@
 #include "declarative/users.h"
 #include "declarative/fstab.h"
 #include "declarative/bootloader.h"
+#include "declarative/services.h"
+#include "declarative/pam_nss.h"
+#include "declarative/profile_hooks.h"
 #include "trakker/trakker.h"
 #include "debag/debag.h"
 #include "subs_ui.h"
@@ -2292,6 +2295,18 @@ static int cmd_apply(void)
                 /* Bootloader (grub or systemd-boot). */
                 printf("  applying bootloader...\n");
                 bootloader_apply(json, prev_manifest, db_root, 0);
+
+                /* Services DAG (topological sort, unit generation). */
+                printf("  applying services...\n");
+                services_apply(json, prev_manifest, 0);
+
+                /* PAM and NSS configuration. */
+                printf("  applying PAM and NSS...\n");
+                pam_nss_apply(json, prev_manifest, 0);
+
+                /* Profile hooks (per-generation cache files in the store). */
+                printf("  applying profile hooks...\n");
+                profile_hooks_apply(json, db_root, new_id, 0);
 
                 free(prev_manifest);
         }
