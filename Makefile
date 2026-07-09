@@ -2,7 +2,7 @@
 CC ?= cc
 CFLAGS ?= -std=gnu11 -Wall -Wextra -O2 -g
 PREFIX ?= /usr
-VERSION := $(shell git describe --abbrev=4 --dirty 2>/dev/null || echo 0.0.1)
+VERSION := $(shell git describe --abbrev=4 --dirty 2>/dev/null || echo 0.1.0)
 
 # Phase 2: sqlite3 detection (store DB / refs graph for GC).
 HAVE_SQLITE3 := $(shell pkg-config --exists sqlite3 2>/dev/null && echo yes)
@@ -190,7 +190,7 @@ test-signing: src/store/test_signing.o src/store/signing.o
 	$(CC) $(CFLAGS) -o $@ $^ -lcrypto $(SODIUM_LIBS) $(LIB2O9_DEPS_LIBS)
 
 test-narinfo: src/store/test_narinfo.o src/store/narinfo.o src/store/nar.o src/store/signing.o src/store/db.o
-	$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lsqlite3 $(SODIUM_LIBS) $(LIB2O9_DEPS_LIBS)
+	$(CC) $(CFLAGS) -o $@ $^ -lcrypto -lsqlite3 -lm $(SODIUM_LIBS) $(LIB2O9_DEPS_LIBS)
 
 test-keygen: src/store/test_keygen.o src/store/signing.o
 	$(CC) $(CFLAGS) -o $@ $^ -lcrypto $(SODIUM_LIBS) $(LIB2O9_DEPS_LIBS)
