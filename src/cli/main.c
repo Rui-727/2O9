@@ -3104,6 +3104,26 @@ static int cmd_aur_info(const char *pkg_name)
 
 /* ── AUR build ────────────────────────────────────────────────────── */
 
+/* Free the heap-owned string fields of a build_config_t. Safe to call
+ * on a zero-initialized struct. Doesn't free the struct itself. */
+static void build_config_free_strings(build_config_t *c)
+{
+        if (!c) return;
+        free(c->cflags);
+        free(c->cxxflags);
+        free(c->ldflags);
+        free(c->makepkg_conf);
+        free(c->pacman_conf);
+        if (c->mflags) {
+                for (size_t i = 0; c->mflags[i]; i++)
+                        free(c->mflags[i]);
+                free(c->mflags);
+                c->mflags = NULL;
+        }
+        c->cflags = c->cxxflags = c->ldflags = NULL;
+        c->makepkg_conf = c->pacman_conf = NULL;
+}
+
 static int cmd_aur_build(const char *pkg_name)
 {
         /* Step 1: Resolve dependencies */
@@ -3145,8 +3165,33 @@ static int cmd_aur_build(const char *pkg_name)
                         a = a->next;
                 }
                 printf("\n");
-                /* TODO: install repo deps via lib2O9 in Phase 3 */
-                printf("  (repo deps will be installed with pacman -S --asdeps)\n");
+
+                /* Install each repo dep via lib2O9. cmd_install_only()
+                 * resolves the package through the sync DBs, downloads,
+                 * extracts to /nix/store/, and registers it in the store
+                 * DB - but does NOT commit a generation. The AUR packages
+                 * we're about to build pick these up at makepkg time via
+                 * the symlink farm / PATH. The aur_resolve logic above
+                 * has already filtered `plan->install` to packages that
+                 * exist in the repo sync DBs; remaining AUR-only deps
+                 * are in `plan->build` and handled by the build loop. */
+                a = plan->install;
+                while (a) {
+                        char *sp = NULL, *ver = NULL;
+                        int rc = cmd_install_only(a->name, &sp, &ver);
+                        if (rc != 0) {
+                                fprintf(stderr, "209: failed to install repo dep %s\n",
+                                        a->name);
+                                free(sp);
+                                free(ver);
+                                resolve_result_free(plan);
+                                aur_cache_close(cache);
+                                return 1;
+                        }
+                        free(sp);
+                        free(ver);
+                        a = a->next;
+                }
         }
 
         /* Collect all AUR packages to build (topologically sorted later) */
@@ -3211,14 +3256,96 @@ static int cmd_aur_build(const char *pkg_name)
                 .gpg_key = NULL,
         };
 
-        /* TODO: read build config from 2O9.nix (Phase 3) */
-        /* For now, respect environment variables */
-        const char *env_cflags = getenv("CFLAGS");
-        const char *env_cxxflags = getenv("CXXFLAGS");
-        const char *env_ldflags = getenv("LDFLAGS");
-        config.cflags = env_cflags ? strdup(env_cflags) : NULL;
-        config.cxxflags = env_cxxflags ? strdup(env_cxxflags) : NULL;
-        config.ldflags = env_ldflags ? strdup(env_ldflags) : NULL;
+        /* Read build config from 2O9.nix's aur.build block. Falls back to
+         * environment variables (CFLAGS/CXXFLAGS/LDFLAGS) for any field
+         * the manifest doesn't set. The manifest schema is:
+         *
+         *   aur.build = {
+         *     CFLAGS    = "-O2 -pipe";
+         *     CXXFLAGS  = "-O2 -pipe";
+         *     LDFLAGS   = "-Wl,--as-needed";
+         *     makepkgConf = "/etc/makepkg.conf";   # profile, optional
+         *     pacmanConf  = "/etc/pacman.conf";    # optional
+         *     jobs      = 4;                       # appends -jN to mflags
+         *   };
+         *
+         * Unknown keys are silently ignored (forward-compat). */
+        {
+                char system_config[PATH_MAX];
+                snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
+                         two9_config_dir());
+                struct stat cfg_st;
+                char *manifest_json = NULL;
+                char *eval_err = NULL;
+                if (stat(system_config, &cfg_st) == 0)
+                        manifest_json = eval_nix_config(system_config, &eval_err);
+                if (manifest_json) {
+                        cJSON *root = cJSON_Parse(manifest_json);
+                        if (root) {
+                                cJSON *aur = cJSON_GetObjectItem(root, "aur");
+                                if (aur) {
+                                        cJSON *build = cJSON_GetObjectItem(aur, "build");
+                                        if (build && cJSON_IsObject(build)) {
+                                                cJSON *cf  = cJSON_GetObjectItem(build, "CFLAGS");
+                                                cJSON *cxx = cJSON_GetObjectItem(build, "CXXFLAGS");
+                                                cJSON *lf  = cJSON_GetObjectItem(build, "LDFLAGS");
+                                                cJSON *mc  = cJSON_GetObjectItem(build, "makepkgConf");
+                                                cJSON *pc  = cJSON_GetObjectItem(build, "pacmanConf");
+                                                cJSON *jobs = cJSON_GetObjectItem(build, "jobs");
+                                                if (cJSON_IsString(cf)) {
+                                                        free(config.cflags);
+                                                        config.cflags = strdup(cf->valuestring);
+                                                }
+                                                if (cJSON_IsString(cxx)) {
+                                                        free(config.cxxflags);
+                                                        config.cxxflags = strdup(cxx->valuestring);
+                                                }
+                                                if (cJSON_IsString(lf)) {
+                                                        free(config.ldflags);
+                                                        config.ldflags = strdup(lf->valuestring);
+                                                }
+                                                if (cJSON_IsString(mc)) {
+                                                        free(config.makepkg_conf);
+                                                        config.makepkg_conf = strdup(mc->valuestring);
+                                                }
+                                                if (cJSON_IsString(pc)) {
+                                                        free(config.pacman_conf);
+                                                        config.pacman_conf = strdup(pc->valuestring);
+                                                }
+                                                /* jobs -> append "-j<N>" to mflags */
+                                                if (cJSON_IsNumber(jobs) && jobs->valueint > 0) {
+                                                        char jflag[32];
+                                                        snprintf(jflag, sizeof(jflag), "-j%d", jobs->valueint);
+                                                        if (!config.mflags) {
+                                                                config.mflags = calloc(2, sizeof(char *));
+                                                                if (config.mflags) {
+                                                                        config.mflags[0] = strdup(jflag);
+                                                                        config.mflags[1] = NULL;
+                                                                }
+                                                        }
+                                                }
+                                        }
+                                }
+                                cJSON_Delete(root);
+                        }
+                        free(manifest_json);
+                }
+                free(eval_err);
+        }
+
+        /* Environment variables fill in any fields the manifest didn't set. */
+        if (!config.cflags) {
+                const char *env_cflags = getenv("CFLAGS");
+                if (env_cflags) config.cflags = strdup(env_cflags);
+        }
+        if (!config.cxxflags) {
+                const char *env_cxxflags = getenv("CXXFLAGS");
+                if (env_cxxflags) config.cxxflags = strdup(env_cxxflags);
+        }
+        if (!config.ldflags) {
+                const char *env_ldflags = getenv("LDFLAGS");
+                if (env_ldflags) config.ldflags = strdup(env_ldflags);
+        }
 
         build_result_t *results = NULL;
         build_result_t **tail = &results;
@@ -3233,9 +3360,7 @@ static int cmd_aur_build(const char *pkg_name)
                         build_result_free(r);
                         resolve_result_free(plan);
                         aur_cache_close(cache);
-                        free(config.cflags);
-                        free(config.cxxflags);
-                        free(config.ldflags);
+                        build_config_free_strings(&config);
                         return 1;
                 }
                 *tail = r;
@@ -3253,9 +3378,7 @@ static int cmd_aur_build(const char *pkg_name)
                 build_result_free(results);
                 resolve_result_free(plan);
                 aur_cache_close(cache);
-                free(config.cflags);
-                free(config.cxxflags);
-                free(config.ldflags);
+                build_config_free_strings(&config);
                 return 1;
         }
 
@@ -3265,9 +3388,7 @@ static int cmd_aur_build(const char *pkg_name)
                 build_result_free(results);
                 resolve_result_free(plan);
                 aur_cache_close(cache);
-                free(config.cflags);
-                free(config.cxxflags);
-                free(config.ldflags);
+                build_config_free_strings(&config);
                 return 1;
         }
 
@@ -3301,9 +3422,7 @@ static int cmd_aur_build(const char *pkg_name)
                                 gen_db_close(db);
                                 resolve_result_free(plan);
                                 aur_cache_close(cache);
-                                free(config.cflags);
-                                free(config.cxxflags);
-                                free(config.ldflags);
+                                build_config_free_strings(&config);
                                 return 1;
                         }
                         gen_pkg_t *p = gen_pkg_create(r->pkg_name, r->pkg_version,
@@ -3341,9 +3460,7 @@ static int cmd_aur_build(const char *pkg_name)
         build_result_free(results);
         resolve_result_free(plan);
         aur_cache_close(cache);
-        free(config.cflags);
-        free(config.cxxflags);
-        free(config.ldflags);
+        build_config_free_strings(&config);
         return new_id < 0 ? 1 : 0;
 }
 
@@ -4827,8 +4944,16 @@ static int cmd_keygen(int argc, char **argv)
         return 0;
 }
 
-/* 209 <pkg> tree - dependency tree visualizer */
-static void print_dep_tree(const char *pkg_name, int depth, int *visited, int visited_count)
+/* 209 <pkg> tree - dependency tree visualizer
+ *
+ * Walks alpm_pkg_get_depends() recursively, with a depth limit of 5 to
+ * bound recursion (a hard cap on stack depth and on output size). Cycle
+ * detection is via a per-branch visited set: each recursion slot owns
+ * one entry, freed on the way back up. */
+#define TREE_MAX_DEPTH 5
+
+static void print_dep_tree(alpm_handle_t *handle, const char *pkg_name,
+                           int depth, char **visited, int visited_count)
 {
         /* Print with indentation */
         for (int i = 0; i < depth; i++)
@@ -4836,38 +4961,116 @@ static void print_dep_tree(const char *pkg_name, int depth, int *visited, int vi
         if (depth > 0) printf("└─ ");
         printf("%s\n", pkg_name);
 
-        /* Check for cycles */
+        /* Cycle detection: bail if we've already walked this name on
+         * the current root-to-leaf path. */
         for (int i = 0; i < visited_count; i++) {
-                if (strcmp(visited[i] == 0 ? "" : "", pkg_name) == 0) {
-                        for (int i = 0; i < depth + 1; i++) printf("  ");
+                if (strcmp(visited[i], pkg_name) == 0) {
+                        for (int j = 0; j < depth + 1; j++) printf("  ");
                         printf("└─ (cycle detected)\n");
                         return;
                 }
         }
 
-        /* TODO: query libalpm for deps. For now, show a placeholder. */
-        if (depth < 3) {
-                /* Check if installed locally */
+        /* Hard depth limit (task spec: depth limit of 5). */
+        if (depth >= TREE_MAX_DEPTH) {
+                for (int j = 0; j < depth + 1; j++) printf("  ");
+                printf("└─ (max depth reached)\n");
+                return;
+        }
+
+        /* Record this package on the current path so deeper levels can
+         * detect cycles through it. The slot is freed before we return. */
+        visited[visited_count] = strdup(pkg_name);
+        if (!visited[visited_count]) return;
+        visited_count++;
+
+        /* Query libalpm for this package's depends list. If the package
+         * isn't in any sync DB (AUR-only, virtual, etc.), we fall back
+         * to the local install-status check. */
+        if (handle) {
+                alpm_pkg_t *pkg = NULL;
+                alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);
+                for (alpm_list_t *i = sync_dbs; i; i = alpm_list_next(i)) {
+                        alpm_db_t *db = (alpm_db_t *)i->data;
+                        pkg = alpm_db_get_pkg(db, pkg_name);
+                        if (pkg) break;
+                }
+
+                if (pkg) {
+                        alpm_list_t *deps = alpm_pkg_get_depends(pkg);
+                        int dep_count = 0;
+                        for (alpm_list_t *i = deps; i; i = alpm_list_next(i)) {
+                                alpm_depend_t *dep = (alpm_depend_t *)i->data;
+                                if (dep && dep->name) {
+                                        print_dep_tree(handle, dep->name,
+                                                       depth + 1, visited, visited_count);
+                                        dep_count++;
+                                }
+                        }
+                        (void)dep_count;
+                } else {
+                        /* Not in any sync DB - check local install status. */
+                        gen_index_t *idx = get_gen_index();
+                        if (idx) {
+                                const gen_index_entry_t *e = gen_index_lookup(idx, pkg_name);
+                                if (!e) {
+                                        for (int j = 0; j < depth + 1; j++) printf("  ");
+                                        printf("└─ (not in any sync DB)\n");
+                                }
+                        }
+                }
+        } else {
+                /* No lib2O9 handle - best-effort local check. */
                 gen_index_t *idx = get_gen_index();
                 if (idx) {
                         const gen_index_entry_t *e = gen_index_lookup(idx, pkg_name);
                         if (!e) {
-                                for (int i = 0; i < depth + 1; i++) printf("  ");
+                                for (int j = 0; j < depth + 1; j++) printf("  ");
                                 printf("└─ (not installed)\n");
                         }
                 }
-        } else if (depth >= 3) {
-                for (int i = 0; i < depth + 1; i++) printf("  ");
-                printf("└─ (max depth reached)\n");
         }
+
+        free(visited[visited_count - 1]);
+        visited[visited_count - 1] = NULL;
 }
 
 static int cmd_tree(const char *pkg_name)
 {
         printf("=== Dependency tree for %s ===\n\n", pkg_name);
-        print_dep_tree(pkg_name, 0, NULL, 0);
-        printf("\nNote: full dependency resolution requires lib2O9 (alpm_dep_compute).\n");
-        printf("For now, this shows the package and whether it's installed.\n");
+
+        /* Evaluate 2O9.nix and init lib2O9 so we can query sync DBs for
+         * depends. Missing config is non-fatal - print_dep_tree falls
+         * back to the local install-status check. */
+        char system_config[PATH_MAX];
+        snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
+                 two9_config_dir());
+        struct stat st;
+        char *manifest_json = NULL;
+        char *eval_err = NULL;
+        if (stat(system_config, &st) == 0)
+                manifest_json = eval_nix_config(system_config, &eval_err);
+
+        alpm_handle_t *handle = NULL;
+        if (manifest_json) {
+                handle = two9_alpm_init_from_manifest(manifest_json);
+                free(manifest_json);
+        }
+        free(eval_err);
+
+        /* Visited set: TREE_MAX_DEPTH+1 slots; each recursion uses one. */
+        char *visited[TREE_MAX_DEPTH + 1];
+        for (int i = 0; i < TREE_MAX_DEPTH + 1; i++) visited[i] = NULL;
+        print_dep_tree(handle, pkg_name, 0, visited, 0);
+
+        if (handle) {
+                alpm_release(handle);
+        } else {
+                printf("\n%sNote:%s no 2O9.nix config found - cannot query sync DBs.\n",
+                       C_DIM(), C_RESET());
+                printf("Run %s209 init%s then %s209 -Sy%s to populate the sync DBs.\n",
+                       C_CYAN(), C_RESET(), C_CYAN(), C_RESET());
+        }
         return 0;
 }
 
@@ -5333,40 +5536,122 @@ static int cmd_why(const char *pkg_name)
                C_BOLD(), pkg_name, C_RESET(),
                C_DIM(), e->version, C_RESET());
 
-        /* Try libalpm reverse deps if we have a handle */
-        char db_root[PATH_MAX];
-        get_db_root(db_root, sizeof(db_root));
-        /* Walk all installed packages and check if any depend on pkg_name */
         printf("\nSearching for reverse dependencies...\n\n");
 
+        /* The generation DB walk below only enumerates installed packages;
+         * it doesn't carry per-package depends info, so it can't actually
+         * tell us who depends on pkg_name. That's why we consult lib2O9
+         * via alpm_pkg_compute_requiredby() below. The walk stays to
+         * establish a list of installed package names we can filter the
+         * libalpm results against. */
         int found = 0;
-        for (size_t i = 0; i < idx->bucket_count; i++) {
-                for (gen_index_entry_t *dep = idx->buckets[i]; dep; dep = dep->next) {
-                        if (strcmp(dep->name, pkg_name) == 0) continue;
-                        /* Can't do full dep resolution without libalpm sync DBs,
-                         * but we can check package names heuristically */
-                        /* TODO: use alpm_pkg_compute_requiredby when lib2O9 is
-                         * fully wired into the query path */
-                        (void)dep;
+
+        /* Build a lookup set of installed names by walking the index.
+         * gen_index_lookup() is the O(1) way to test membership. */
+
+        /* Try libalpm reverse deps. alpm_pkg_compute_requiredby() on a
+         * sync-DB package returns the list of packages in any sync DB
+         * that depend on it; we then filter to only those installed
+         * locally. This is the inverse of alpm_pkg_get_depends().
+         *
+         * For local-DB packages, the same call searches db_local only,
+         * but populating db_local requires an installed_set_loader
+         * that builds alpm_pkg_t entries with depends - which 2O9
+         * doesn't wire up yet. The sync-DB path is the one that
+         * actually returns useful data today. */
+        char user_config[PATH_MAX] = {0};
+        char system_config[PATH_MAX] = {0};
+        snprintf(user_config, sizeof(user_config), "%s/%s.nix",
+                 two9_config_dir(),
+                 get_current_username() ? get_current_username() : "");
+        snprintf(system_config, sizeof(system_config), "%s/2O9.nix",
+                 two9_config_dir());
+
+        char *manifest_json = NULL;
+        char *eval_err = NULL;
+        struct stat st;
+        if (user_config[0] && stat(user_config, &st) == 0)
+                manifest_json = eval_nix_config(user_config, &eval_err);
+        if (!manifest_json && stat(system_config, &st) == 0)
+                manifest_json = eval_nix_config(system_config, &eval_err);
+
+        if (!manifest_json) {
+                /* No config - skip the libalpm query, keep the package
+                 * info block and the explanatory note below. */
+                free(eval_err);
+        } else {
+                alpm_handle_t *handle = two9_alpm_init_from_manifest(manifest_json);
+                free(manifest_json);
+                free(eval_err);
+
+                if (handle) {
+                        /* Find pkg in sync DBs so alpm_pkg_compute_requiredby
+                         * has a real alpm_pkg_t to operate on. */
+                        alpm_pkg_t *pkg = NULL;
+                        alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);
+                        for (alpm_list_t *i = sync_dbs; i; i = alpm_list_next(i)) {
+                                alpm_db_t *db = (alpm_db_t *)i->data;
+                                pkg = alpm_db_get_pkg(db, pkg_name);
+                                if (pkg) break;
+                        }
+
+                        if (pkg) {
+                                alpm_list_t *reqs = alpm_pkg_compute_requiredby(pkg);
+                                if (reqs) {
+                                        printf("%sRequired By:%s\n",
+                                               C_BOLD(), C_RESET());
+                                        int printed = 0;
+                                        for (alpm_list_t *i = reqs; i; i = alpm_list_next(i)) {
+                                                char *rname = (char *)i->data;
+                                                if (!rname) continue;
+                                                /* Only show packages that
+                                                 * are actually installed
+                                                 * locally (the sync-DB query
+                                                 * returns every package in
+                                                 * every repo that depends on
+                                                 * pkg_name). */
+                                                const gen_index_entry_t *re =
+                                                        gen_index_lookup(idx, rname);
+                                                if (re) {
+                                                        printf("  %s%s%s %s%s  [%s]\n",
+                                                               C_BOLD(), rname, C_RESET(),
+                                                               C_DIM(), re->version,
+                                                               C_RESET(),
+                                                               re->origin ? re->origin : "?");
+                                                        printed++;
+                                                        found = 1;
+                                                }
+                                        }
+                                        if (!printed) {
+                                                printf("  %s(no installed packages depend on %s)%s\n",
+                                                       C_DIM(), pkg_name, C_RESET());
+                                        }
+                                        /* compute_requiredby returns a list of
+                                         * strdup'd strings - free each one. */
+                                        alpm_list_free_inner(reqs, free);
+                                        alpm_list_free(reqs);
+                                }
+                        }
+                        alpm_release(handle);
                 }
         }
 
-        /* For now, show what we can: the package info */
+        /* Show what we know from the generation DB regardless of whether
+         * the libalpm query produced results. */
         printf("  Name:       %s\n", e->name);
         printf("  Version:    %s\n", e->version);
         printf("  Store path: %s\n", e->store_path ? e->store_path : "(unknown)");
         printf("  Origin:     %s\n", e->origin);
         printf("  Generation: #%d\n", e->generation_id);
 
-        printf("\n%sNote:%s Full reverse dependency resolution requires lib2O9 sync DBs.\n",
-               C_DIM(), C_RESET());
-        printf("Run %s209 -Sy%s first to download repo databases, then %s209 why %s%s\n",
-               C_CYAN(), C_RESET(), C_CYAN(), pkg_name, C_RESET());
-        printf("to see which installed packages depend on it.\n");
-
         if (!found) {
-                /* Not an error - just no reverse deps found yet */
+                printf("\n%sNote:%s no installed reverse dependencies were found.\n",
+                       C_DIM(), C_RESET());
+                printf("Run %s209 -Sy%s first to refresh repo databases if you\n",
+                       C_CYAN(), C_RESET());
+                printf("expected this package to be required by something.\n");
         }
+
         return 0;
 }
 
