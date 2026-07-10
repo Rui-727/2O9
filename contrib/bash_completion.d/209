@@ -1,0 +1,65 @@
+# bash completion for 209 - the 2O9 package manager
+#
+# Install to /etc/bash_completion.d/209 or /usr/share/bash-completion/completions/209
+# (or source from ~/.bashrc). Completion covers the SOV command set, the
+# pacman-compatible flags, and the per-domain subcommands for snapshot /
+# share / subs.
+#
+# The completion is intentionally simple: no per-flag argument completion
+# (e.g. -S <pkg> completing package names from sync DBs), since that
+# would require shelling out to `209 -Qq` / `209 -Ssq` on every <TAB>.
+# That's slow on a cold cache and noisy on stderr. Add it locally if you
+# want it.
+
+_209() {
+    local cur prev words cword
+    _init_completion 2>/dev/null || {
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        words=("${COMP_WORDS[@]}")
+        cword=$COMP_CWORD
+    }
+
+    # Top-level commands (SOV subjects / zero-arg commands).
+    local top_cmds="apply sync init generations gc optimise news cache \
+keygen snapshot share get subs trakker debag fuzz bundle import diff why \
+lock doctor wiki"
+
+    # Pacman-compatible flags 209 understands (mirrors test_pacman_flags.sh).
+    local pacman_flags="-S -Sy -Su -Ss -Si -R -Q -Qs -Qi -Ql -Qm"
+
+    # Per-domain subcommands.
+    local snapshot_subs="take list restore diff rm"
+    local share_subs="ls rm"
+    local subs_subs="add rm"
+
+    # If the previous word is a domain, complete its subcommands.
+    case "$prev" in
+        snapshot)
+            COMPREPLY=( $(compgen -W "$snapshot_subs" -- "$cur") )
+            return 0
+            ;;
+        share)
+            COMPREPLY=( $(compgen -W "$share_subs" -- "$cur") )
+            return 0
+            ;;
+        subs)
+            COMPREPLY=( $(compgen -W "$subs_subs" -- "$cur") )
+            return 0
+            ;;
+    esac
+
+    # First non-flag argument: complete top-level commands + pacman flags.
+    if [ "$cword" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$top_cmds $pacman_flags" -- "$cur") )
+        return 0
+    fi
+
+    # For pacman -Q/-S/-R style flags at position 1 that take a package
+    # argument, fall back to filename completion (so the user can still
+    # complete local .pkg.tar.zst paths). Default behaviour.
+    COMPREPLY=( $(compgen -f -- "$cur") )
+    return 0
+}
+
+complete -F _209 209

@@ -217,6 +217,11 @@ clean:
 install: 209
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 209 $(DESTDIR)$(PREFIX)/bin/209
+	# Bash completion (lives under contrib/, installed to the standard
+	# bash-completion dir so it's picked up automatically on Arch).
+	install -d $(DESTDIR)$(PREFIX)/share/bash-completion/completions
+	install -m 644 contrib/bash_completion.d/209 \
+		$(DESTDIR)$(PREFIX)/share/bash-completion/completions/209
 
 # Run unit + integration tests. Unit tests run first; any failure
 # aborts before integration tests run. test-aur-rpc needs network

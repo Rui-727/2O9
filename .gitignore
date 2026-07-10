@@ -1,6 +1,6 @@
 # Build artifacts
 *.o
-209
+/209
 test-aur-rpc
 test-nix-lexer
 test-nix-eval
